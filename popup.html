@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deepgram Voice Notes</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Voice Notes</h1>
+      <div id="statusBadge" class="badge badge-idle">Idle</div>
+    </header>
+
+    <div id="apiKeyWarning" class="warning hidden">
+      No API key set. <a href="#" id="openOptionsLink">Open Options</a> to configure your Deepgram key.
+    </div>
+
+    <div class="controls">
+      <button id="btnStart" class="btn btn-primary" title="Start recording">Start</button>
+      <button id="btnStop" class="btn btn-danger" disabled title="Stop recording">Stop</button>
+      <button id="btnPause" class="btn btn-secondary" disabled title="Pause">Pause</button>
+      <button id="btnResume" class="btn btn-secondary" disabled title="Resume">Resume</button>
+    </div>
+
+    <div class="controls secondary-controls">
+      <button id="btnNewNote" class="btn btn-outline" title="Start a new note">New Note</button>
+      <button id="btnClear" class="btn btn-outline" title="Clear current transcript">Clear</button>
+      <button id="btnCopy" class="btn btn-outline" title="Copy to clipboard">Copy</button>
+      <button id="btnDownload" class="btn btn-outline" title="Download as .txt">Download</button>
+    </div>
+
+    <div class="transcript-wrapper">
+      <label for="transcriptArea">Live Transcription</label>
+      <textarea
+        id="transcriptArea"
+        class="transcript-area"
+        rows="10"
+        placeholder="Transcript will appear here… You can edit it anytime."
+        aria-live="polite"
+        spellcheck="true"
+      ></textarea>
+      <div id="interimHint" class="interim-hint hidden" aria-live="polite"></div>
+    </div>
+
+    <div class="stats">
+      <span id="wordCount">Words: 0</span>
+      <span id="charCount">Characters: 0</span>
+      <span id="timer">00:00</span>
+    </div>
+
+    <footer class="footer">
+      <a href="#" id="optionsLink">Options</a>
+      <span class="version">v1.0.0</span>
+    </footer>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

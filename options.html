@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deepgram Voice Notes – Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Deepgram Voice Notes</h1>
+      <p class="subtitle">Configure your Deepgram API key for real-time transcription.</p>
+    </header>
+
+    <section class="card">
+      <h2>API Key</h2>
+      <p class="help">
+        Create a free API key at
+        <a href="https://console.deepgram.com/" target="_blank" rel="noopener">console.deepgram.com</a>.
+        The key is stored only in your browser’s local extension storage and is never hardcoded or transmitted except to Deepgram’s servers.
+      </p>
+
+      <label for="apiKeyInput">Deepgram API Key</label>
+      <div class="input-row">
+        <input
+          type="password"
+          id="apiKeyInput"
+          placeholder="Paste your Deepgram API key here"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="button" id="btnToggleVisibility" class="btn-icon" title="Show / hide key">👁</button>
+      </div>
+
+      <div class="actions">
+        <button id="btnSave" class="btn btn-primary">Save Key</button>
+        <button id="btnClearKey" class="btn btn-outline">Clear Key</button>
+      </div>
+
+      <div id="statusMessage" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="card">
+      <h2>Language</h2>
+      <p class="help">
+        Choose how speech is transcribed. For mixed Urdu + English, use
+        <strong>Mixed (code-switch)</strong>. Note: Deepgram’s multilingual mode
+        officially covers English, Hindi, and several other languages — pure Urdu
+        script is best with the <strong>Urdu</strong> setting.
+      </p>
+      <label for="languageSelect">Transcription language</label>
+      <select id="languageSelect">
+        <option value="multi">Mixed / code-switch (English + others)</option>
+        <option value="en">English only</option>
+        <option value="ur">Urdu only</option>
+      </select>
+      <div class="actions" style="margin-top: 14px;">
+        <button id="btnSaveLanguage" class="btn btn-primary">Save Language</button>
+      </div>
+      <div id="languageStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="card">
+      <h2>How it works</h2>
+      <ul class="steps">
+        <li>The extension uses an <strong>offscreen document</strong> to keep the microphone and MediaRecorder alive under Manifest V3.</li>
+        <li>Audio is captured in 250 ms WebM/Opus chunks via <code>MediaRecorder</code>.</li>
+        <li>Chunks are streamed over a WebSocket to Deepgram’s Live Transcription API (<code>wss://api.deepgram.com/v1/listen</code>).</li>
+        <li>Interim and final transcripts appear live in the popup.</li>
+        <li>Your API key is sent only as the WebSocket subprotocol (<code>token, &lt;key&gt;</code>) — the official browser authentication method.</li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>Deepgram Voice Notes v1.0.0 · Manifest V3 · Vanilla JS</p>
+    </footer>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

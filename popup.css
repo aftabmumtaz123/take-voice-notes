@@ -1,0 +1,251 @@
+/* popup.css – clean, modern dark-friendly UI for the voice-notes popup */
+
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2e3a;
+  --text: #e8eaed;
+  --text-muted: #9aa0a6;
+  --primary: #4f8cff;
+  --primary-hover: #3a7aef;
+  --danger: #e74c3c;
+  --danger-hover: #c0392b;
+  --success: #2ecc71;
+  --warning-bg: #3d2e00;
+  --warning-text: #ffd666;
+  --interim: #8ab4f8;
+  --radius: 8px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 380px;
+  min-height: 420px;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-idle {
+  background: var(--border);
+  color: var(--text-muted);
+}
+
+.badge-recording {
+  background: rgba(231, 76, 60, 0.2);
+  color: var(--danger);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.badge-paused {
+  background: rgba(255, 214, 102, 0.15);
+  color: var(--warning-text);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Warning */
+.warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+.warning a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Controls */
+.controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.secondary-controls {
+  margin-top: -4px;
+}
+
+.btn {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.btn-outline:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Transcript */
+.transcript-wrapper label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.transcript-area {
+  display: block;
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  min-height: 160px;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  font-family: var(--font);
+  resize: vertical;
+}
+
+.transcript-area:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.2);
+}
+
+.transcript-area::placeholder {
+  color: var(--text-muted);
+}
+
+.interim-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--interim);
+  min-height: 1.2em;
+}
+
+.interim-hint.hidden {
+  display: none;
+}
+
+/* Stats */
+.stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Footer */
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.footer a {
+  color: var(--primary);
+  text-decoration: none;
+}
+.footer a:hover {
+  text-decoration: underline;
+}
+
+.version {
+  opacity: 0.6;
+}
