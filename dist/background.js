@@ -93,8 +93,8 @@ async function ensureOffscreen() {
   return creating;
 }
 
-async function sendToOffscreen(type) {
-  return chrome.runtime.sendMessage({ target: 'offscreen', type });
+async function sendToOffscreen(type, data = {}) {
+  return chrome.runtime.sendMessage({ target: 'offscreen', type, data });
 }
 
 async function configuredProviders() {
@@ -125,7 +125,7 @@ async function wasMeetingRecentlyDetected(tabId, url) {
   return Boolean(timestamp && Date.now() - timestamp < MEETING_COOLDOWN_MS);
 }
 
-async function startRecordingInternal({ automatic = false } = {}) {
+async function startRecordingInternal({ automatic = false, tabCaptureStreamId = null, captureMeetingAudio = false } = {}) {
   const providers = await configuredProviders();
   if (!providers.length) {
     throw new Error('No transcription provider is configured. Add developer API keys to .env and run npm run build.');
@@ -138,7 +138,10 @@ async function startRecordingInternal({ automatic = false } = {}) {
     pauseTime: null, totalPausedMs: 0, provider: null
   });
 
-  const result = await sendToOffscreen('OFFSCREEN_START');
+  const result = await sendToOffscreen('OFFSCREEN_START', {
+    tabCaptureStreamId: tabCaptureStreamId || null,
+    captureMeetingAudio: Boolean(captureMeetingAudio && tabCaptureStreamId)
+  });
   if (!result?.ok) {
     await setRecordingState({ isRecording: false, isPaused: false, provider: null });
     await closeOffscreenDocument();
@@ -170,19 +173,10 @@ async function openExtensionPopup(tab) {
   await chrome.storage.session.set({ pendingMeeting });
   await markMeetingDetected(tab.id, tab.url);
 
-  // Try to start immediately. If microphone permission has already been granted
-  // for the extension, transcription starts without requiring a click. On a
-  // first run Chrome may require an explicit user gesture for microphone access;
-  // in that case we open the popup and the existing Start button completes it.
-  try {
-    await startRecordingInternal({ automatic: true });
-    await chrome.storage.session.remove('pendingMeeting');
-  } catch (err) {
-    console.warn('[background] automatic meeting transcription could not start:', err);
-  }
-
-  // Show the normal extension UI so the user can see the detected meeting and,
-  // when first-time microphone permission is required, click Start recording.
+  // Remote/tab audio capture requires a user invocation of the extension.
+  // Keep the meeting detected state pending and let the popup's Start button
+  // obtain the tab-capture stream ID from the active meeting tab. This gives
+  // us both the user's microphone and the remote participants' tab audio.
   if (typeof chrome.action?.openPopup === 'function') {
     try {
       await chrome.action.openPopup({ windowId: tab.windowId });
@@ -251,7 +245,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'START_RECORDING': {
           try {
-            const finalState = await startRecordingInternal({ automatic: false });
+            const finalState = await startRecordingInternal({
+              automatic: false,
+              tabCaptureStreamId: message.tabCaptureStreamId || null,
+              captureMeetingAudio: Boolean(message.captureMeetingAudio)
+            });
             sendResponse({ ok: true, state: finalState });
           } catch (err) {
             sendResponse({ ok: false, error: err.message || String(err) });

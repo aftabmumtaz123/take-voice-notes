@@ -32,8 +32,8 @@ let userIsEditing = false;
 let saveTimer = null;
 let timerInterval = null;
 
-const send = (type) => new Promise((resolve) => {
-  chrome.runtime.sendMessage({ target:'background', type }, resolve);
+const send = (type, data = {}) => new Promise((resolve) => {
+  chrome.runtime.sendMessage({ target:'background', type, ...data }, resolve);
 });
 
 function formatTime(ms) {
@@ -107,9 +107,9 @@ function renderMeetingDetected(meeting) {
   meetingDetectedTitle.textContent = `${meeting.platform} meeting detected`;
   try {
     const u = new URL(meeting.url);
-    meetingDetectedMeta.textContent = `${u.hostname}${u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname} · Ready to record`;
+    meetingDetectedMeta.textContent = `${u.hostname}${u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname} · Mic + meeting audio`;
   } catch {
-    meetingDetectedMeta.textContent = 'Meeting tab detected · Ready to record';
+    meetingDetectedMeta.textContent = 'Meeting tab detected · Mic + meeting audio';
   }
   meetingDetected.classList.remove('hidden');
 }
@@ -165,7 +165,29 @@ btnStart.addEventListener('click', async () => {
     alert(err.name === 'NotAllowedError' ? 'Microphone permission is required to record.' : `Microphone error: ${err.message || err}`);
     return;
   }
-  const result = await send('START_RECORDING');
+  let tabCaptureStreamId = null;
+  let captureMeetingAudio = false;
+
+  // A meeting's remote participants are delivered through the meeting tab's
+  // audio. Chrome requires tabCapture to follow an extension user invocation,
+  // so this is intentionally performed from the Start button click.
+  if (pendingMeeting?.tabId) {
+    try {
+      tabCaptureStreamId = await chrome.tabCapture.getMediaStreamId({
+        targetTabId: pendingMeeting.tabId
+      });
+      captureMeetingAudio = Boolean(tabCaptureStreamId);
+    } catch (err) {
+      console.warn('[popup] meeting audio capture unavailable:', err);
+      const proceed = confirm('Meeting audio could not be captured. Start microphone-only transcription instead?');
+      if (!proceed) {
+        btnStart.disabled = false;
+        return;
+      }
+    }
+  }
+
+  const result = await send('START_RECORDING', { tabCaptureStreamId, captureMeetingAudio });
   if (!result?.ok) {
     btnStart.disabled = false;
     alert(result?.error || 'Unable to start recording.');
@@ -173,6 +195,9 @@ btnStart.addEventListener('click', async () => {
   }
   currentState = result.state;
   meetingDetected.classList.add('hidden');
+  if (pendingMeeting && captureMeetingAudio) {
+    console.log('[popup] Meeting audio capture enabled');
+  }
   if (pendingMeeting) {
     await send('MEETING_TRANSCRIPTION_STARTED');
     pendingMeeting = null;

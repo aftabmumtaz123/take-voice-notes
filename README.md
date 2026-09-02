@@ -145,3 +145,10 @@ The detector does not treat generic platform landing pages such as `https://meet
 When a qualifying Google Meet, Zoom, or Microsoft Teams meeting URL is detected, the background service attempts to start transcription immediately. If microphone permission has already been granted, recording starts automatically. On first use, Chrome may require the user to approve microphone access; the extension opens its normal popup with the Start recording action so the user can complete the permission flow.
 
 Meeting landing pages such as `meet.google.com/home` do not trigger recording.
+
+## Meeting audio capture
+
+When a supported meeting is detected, the extension opens its popup. Clicking **Start recording** uses Chrome tab capture to capture the meeting tab's remote audio and mixes it with the microphone before sending PCM to the transcription provider. Chrome requires tab capture to follow a user invocation of the extension, so remote-audio capture is initiated from the Start button rather than silently in the background.
+
+### Audio sources
+For a detected meeting, clicking Start recording captures both microphone audio and remote participants' audio from the meeting tab. Chrome's `tabCapture` API requires a user invocation of the extension, so the meeting audio capture is intentionally started by the Start button. Chrome documents that tab audio is muted while captured and must be routed back to the output; this project does that in the offscreen mixer.

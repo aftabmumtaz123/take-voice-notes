@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "AI Note Taker",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "Professional live meeting transcription with developer-configured AI transcription providers.",
   "permissions": [
     "storage",
     "offscreen",
-    "tabs"
+    "tabs",
+    "activeTab",
+    "tabCapture"
   ],
   "host_permissions": [
     "https://api.deepgram.com/*",

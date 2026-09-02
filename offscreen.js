@@ -7,6 +7,12 @@ const OPENAI_TRANSCRIBE = 'https://api.openai.com/v1/audio/transcriptions';
 const MEDIA_MIME = 'audio/webm;codecs=opus';
 
 let mediaStream = null;
+let tabAudioStream = null;
+let micAudioStream = null;
+let tabAudioSource = null;
+let micAudioSource = null;
+let mixerNode = null;
+let tabPlaybackGain = null;
 let mediaRecorder = null;
 let audioContext = null;
 let audioSource = null;
@@ -49,6 +55,9 @@ function buildDeepgramUrl() {
   const params = new URLSearchParams({
     model: CONFIG.deepgramModel || 'nova-3',
     language: 'multi',
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
     punctuate: 'true',
     interim_results: 'true',
     smart_format: 'true',
@@ -216,37 +225,70 @@ function resample(input, inputRate, outputRate) {
 
 
 function setupDeepgramCapture() {
-  const mimeType = MediaRecorder.isTypeSupported(MEDIA_MIME) ? MEDIA_MIME : '';
-  mediaRecorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : {});
-  mediaRecorder.ondataavailable = (event) => {
-    if (!event.data?.size || paused) return;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(event.data);
-  };
-  mediaRecorder.onerror = (event) => send({
-    type: 'OFFSCREEN_ERROR',
-    error: event.error?.message || 'Microphone recorder error'
-  });
-  mediaRecorder.start(250);
+  // Deepgram uses the same mixed PCM pipeline as AssemblyAI so remote meeting
+  // audio and microphone audio are both transcribed.
+  return setupPcmCapture();
 }
 
-async function setupPcmCapture() {
+async function setupPcmCapture({ tabCaptureStreamId = null } = {}) {
   audioContext = new AudioContext();
-  audioSource = audioContext.createMediaStreamSource(mediaStream);
+
+  // Microphone is always captured. When a meeting tab stream ID is supplied,
+  // capture the meeting tab's audio as well and mix both sources before the
+  // PCM worklet. The tab audio is also routed back to the speakers because
+  // Chrome mutes tab playback while tabCapture is active.
+  micAudioStream = mediaStream;
+  micAudioSource = audioContext.createMediaStreamSource(micAudioStream);
+
+  if (tabCaptureStreamId) {
+    try {
+      tabAudioStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          mandatory: {
+            chromeMediaSource: 'tab',
+            chromeMediaSourceId: tabCaptureStreamId
+          }
+        },
+        video: false
+      });
+    } catch (err) {
+      throw new Error(`Unable to capture meeting audio: ${err.message || err}`);
+    }
+    tabAudioSource = audioContext.createMediaStreamSource(tabAudioStream);
+  }
+
   await audioContext.audioWorklet.addModule(chrome.runtime.getURL('audio-processor.js'));
   audioWorklet = new AudioWorkletNode(audioContext, 'pcm-processor');
+
+  mixerNode = audioContext.createGain();
+  mixerNode.gain.value = 1;
+  micAudioSource.connect(mixerNode);
+
+  if (tabAudioSource) {
+    const remoteMixGain = audioContext.createGain();
+    remoteMixGain.gain.value = 1;
+    tabAudioSource.connect(remoteMixGain);
+    remoteMixGain.connect(mixerNode);
+
+    // Preserve normal meeting playback for the user while the tab is captured.
+    tabPlaybackGain = audioContext.createGain();
+    tabPlaybackGain.gain.value = 1;
+    tabAudioSource.connect(tabPlaybackGain);
+    tabPlaybackGain.connect(audioContext.destination);
+  }
+
   const silentGain = audioContext.createGain();
   silentGain.gain.value = 0;
-  audioSource.connect(audioWorklet);
+  mixerNode.connect(audioWorklet);
   audioWorklet.connect(silentGain);
   silentGain.connect(audioContext.destination);
 
   audioWorklet.port.onmessage = ({ data }) => {
     if (paused) return;
 
-    if (provider === 'assemblyai' && socket?.readyState === WebSocket.OPEN) {
-      // AudioWorklet usually delivers ~128 samples per callback (only a few ms).
-      // AssemblyAI streaming expects PCM16 frames in roughly the 50–1000 ms range,
-      // so buffer the tiny worklet callbacks into 100 ms frames before sending.
+    if ((provider === 'assemblyai' || provider === 'deepgram') && socket?.readyState === WebSocket.OPEN) {
+      // AudioWorklet usually delivers ~128 samples per callback. Buffer the
+      // mixed microphone + meeting audio into 100 ms PCM16 frames before sending.
       const floatChunk = resample(data, audioContext.sampleRate, 16000);
       const pcmChunk = floatToPcm16(floatChunk);
       const merged = new Int16Array(assemblyPcmBuffer.length + pcmChunk.length);
@@ -321,7 +363,7 @@ async function startProvider(name) {
   } else throw new Error(`Unsupported provider: ${name}`);
 }
 
-async function startRecording() {
+async function startRecording(options = {}) {
   await cleanup();
   const providers = configuredProviders();
   if (!providers.length) throw new Error('No transcription provider is configured. Set provider keys in the developer .env file.');
@@ -335,8 +377,7 @@ async function startRecording() {
   for (const candidate of providers) {
     try {
       await startProvider(candidate);
-      if (candidate === 'deepgram') setupDeepgramCapture();
-      else await setupPcmCapture();
+      await setupPcmCapture({ tabCaptureStreamId: options.tabCaptureStreamId || null });
       if (candidate === 'openai') {
         openAiTimer = setInterval(flushOpenAIChunk, 4000);
       }
@@ -411,8 +452,15 @@ async function cleanup() {
   }
   audioContext = null;
 
+  if (tabAudioStream) tabAudioStream.getTracks().forEach(track => track.stop());
+  tabAudioStream = null;
   if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
   mediaStream = null;
+  micAudioStream = null;
+  tabAudioSource = null;
+  micAudioSource = null;
+  mixerNode = null;
+  tabPlaybackGain = null;
   provider = null;
   paused = false;
 }
