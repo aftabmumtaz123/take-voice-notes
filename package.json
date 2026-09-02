@@ -1,0 +1,11 @@
+{
+  "name": "ai-note-taking-extension",
+  "version": "2.0.0",
+  "private": true,
+  "description": "AI Note Taking Chrome extension with configurable live transcription providers",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "clean": "node -e \"import('fs').then(fs=>fs.rmSync('dist',{recursive:true,force:true}))\""
+  }
+}
