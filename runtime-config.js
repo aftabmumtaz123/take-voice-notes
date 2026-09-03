@@ -4,6 +4,6 @@ globalThis.AI_NOTE_CONFIG = {
   fallbackProviders: ['assemblyai', 'deepgram', 'openai'],
   keys: { deepgram: '', assemblyai: '', openai: '' },
   deepgramModel: 'nova-3',
-  assemblyaiModel: 'u3-rt-pro',
+  assemblyaiModel: 'universal-3-5-pro',
   openaiModel: 'gpt-4o-mini-transcribe'
 };

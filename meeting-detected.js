@@ -22,7 +22,7 @@ const iconLetters = {
 platformName.textContent = platform;
 platformIcon.textContent = iconLetters[platform] || 'M';
 meetingUrl.textContent = compactUrl(url);
-description.textContent = `${platform} was detected in your active browser tab. Start when you're ready.`;
+description.textContent = `${platform} was detected in an open browser tab. Transcription can continue while you work in any tab.`;
 
 autoCloseIfInvalid();
 

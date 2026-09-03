@@ -152,3 +152,16 @@ When a supported meeting is detected, the extension opens its popup. Clicking **
 
 ### Audio sources
 For a detected meeting, clicking Start recording captures both microphone audio and remote participants' audio from the meeting tab. Chrome's `tabCapture` API requires a user invocation of the extension, so the meeting audio capture is intentionally started by the Start button. Chrome documents that tab audio is muted while captured and must be routed back to the output; this project does that in the offscreen mixer.
+
+
+## Automatic meeting transcription (v3)
+
+When a qualifying Google Meet, Zoom, or Microsoft Teams meeting URL appears in any browser tab, the background service automatically starts the transcription engine and shows a small transcription-status window for 5 seconds. The user does not need to be on the meeting tab.
+
+The microphone stream is captured by the offscreen document, so recording continues while the user switches tabs.
+
+### Chrome tab-audio limitation
+
+Chrome's `tabCapture` API requires an extension user invocation/`activeTab` grant for the target tab. Therefore a meeting tab that was detected automatically cannot always have its remote tab audio captured automatically, especially when it is a background tab. The implementation treats remote tab audio as best-effort and never prevents microphone transcription from starting. To capture remote meeting audio reliably, the extension still needs a user-initiated tab-capture action on the meeting tab.
+
+The 5-second status window is informational; closing it does not stop transcription.

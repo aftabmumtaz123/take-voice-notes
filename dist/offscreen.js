@@ -128,11 +128,39 @@ async function getAssemblyToken() {
 
 async function connectAssemblyAI() {
   const token = await getAssemblyToken();
+  // Universal-3.5 Pro Realtime is promptable. Give the model meeting/dev
+  // context so English product names and technical vocabulary are not
+  // phoneticized when the speaker code-switches between English and Hindi/Urdu.
+  const transcriptPrompt =
+    'Transcribe a software development team meeting with natural English, ' +
+    'Hindi, Urdu, and Hinglish code-switching. Preserve English technical terms, ' +
+    'company names, product names, browser names, programming terms, URLs, and ' +
+    'common developer vocabulary exactly as spoken. Do not translate English ' +
+    'words into Hindi or Urdu. Prefer the correct English spelling for known ' +
+    'technical/product terms and use surrounding context to resolve phonetic ' +
+    'Hindi or Urdu speech.';
+
+  const transcriptKeyterms = [
+    'Microsoft', 'Bing', 'Google', 'Chrome', 'Edge', 'Firefox',
+    'homepage', 'default search engine', 'search engine', 'default browser',
+    'Zoom', 'Google Meet', 'Microsoft Teams', 'AssemblyAI', 'Deepgram',
+    'OpenAI', 'ChatGPT', 'API', 'APIs', 'WebSocket', 'WebSockets',
+    'JavaScript', 'TypeScript', 'React', 'Next.js', 'Node.js', 'Express',
+    'MongoDB', 'MySQL', 'PostgreSQL', 'SQL', 'GitHub', 'GitLab',
+    'frontend', 'backend', 'full stack', 'deployment', 'production',
+    'development', 'developer', 'meeting', 'transcription', 'transcript',
+    'authentication', 'authorization', 'database', 'server', 'client',
+    'browser', 'extension', 'Chrome extension', 'API key', 'endpoint',
+    'refresh', 'page', 'tab', 'link', 'login', 'logout'
+  ];
+
   const params = new URLSearchParams({
     sample_rate: '16000',
     speech_model: CONFIG.assemblyaiModel || 'universal-3-5-pro',
     encoding: 'pcm_s16le',
     mode: 'balanced',
+    prompt: transcriptPrompt,
+    keyterms_prompt: JSON.stringify(transcriptKeyterms),
     token
   });
 
@@ -470,7 +498,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       if (message.type === 'OFFSCREEN_START') {
-        await startRecording();
+        await startRecording(message.data || {});
         sendResponse({ ok: true, provider });
       } else if (message.type === 'OFFSCREEN_STOP') {
         await stopRecording();

@@ -1,0 +1,9 @@
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;font-family:Inter,Segoe UI,Arial,sans-serif;background:#0b1020;color:#f8fafc}
+body{display:flex;align-items:center;justify-content:center;overflow:hidden}
+.card{width:100%;height:100%;min-height:0;padding:22px 24px 30px;display:grid;grid-template-columns:48px minmax(0,1fr);align-items:center;gap:16px;position:relative;background:linear-gradient(145deg,#111827,#0b1020 65%,#16113a);overflow:hidden}
+.icon{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:rgba(124,108,255,.16);color:#9d91ff;font-size:22px;box-shadow:0 0 0 1px rgba(157,145,255,.18) inset;flex:none}
+.copy{min-width:0;max-width:100%;padding-right:2px}.eyebrow{font-size:10px;line-height:1.2;letter-spacing:.16em;font-weight:700;color:#9d91ff;margin:0 0 6px}
+h1{font-size:18px;line-height:1.25;margin:0 0 6px;font-weight:750;white-space:normal;overflow:visible;word-break:normal}
+p{font-size:12px;line-height:1.5;color:#a9b2c4;margin:0;white-space:normal;overflow:visible;word-break:normal}
+.progress{position:absolute;left:24px;right:24px;bottom:12px;height:3px;border-radius:99px;background:#252c3d;overflow:hidden}.progress span{display:block;height:100%;width:100%;transform-origin:left;background:#8b7cff;animation:shrink 5s linear forwards}@keyframes shrink{to{transform:scaleX(0)}}

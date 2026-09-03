@@ -107,9 +107,9 @@ function renderMeetingDetected(meeting) {
   meetingDetectedTitle.textContent = `${meeting.platform} meeting detected`;
   try {
     const u = new URL(meeting.url);
-    meetingDetectedMeta.textContent = `${u.hostname}${u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname} · Mic + meeting audio`;
+    meetingDetectedMeta.textContent = `${u.hostname}${u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname} · Mic + meeting audio when permitted`;
   } catch {
-    meetingDetectedMeta.textContent = 'Meeting tab detected · Mic + meeting audio';
+    meetingDetectedMeta.textContent = 'Meeting tab detected · Mic + meeting audio when permitted when permitted';
   }
   meetingDetected.classList.remove('hidden');
 }
@@ -168,22 +168,26 @@ btnStart.addEventListener('click', async () => {
   let tabCaptureStreamId = null;
   let captureMeetingAudio = false;
 
-  // A meeting's remote participants are delivered through the meeting tab's
-  // audio. Chrome requires tabCapture to follow an extension user invocation,
-  // so this is intentionally performed from the Start button click.
+  // Remote participants come from the meeting tab's output audio. Chrome
+  // only grants tabCapture in an explicit invocation context for the target
+  // tab. If the user is currently working in another tab, do not attempt to
+  // capture the meeting tab and do not interrupt microphone transcription.
   if (pendingMeeting?.tabId) {
     try {
-      tabCaptureStreamId = await chrome.tabCapture.getMediaStreamId({
-        targetTabId: pendingMeeting.tabId
+      const [activeTab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true
       });
-      captureMeetingAudio = Boolean(tabCaptureStreamId);
-    } catch (err) {
-      console.warn('[popup] meeting audio capture unavailable:', err);
-      const proceed = confirm('Meeting audio could not be captured. Start microphone-only transcription instead?');
-      if (!proceed) {
-        btnStart.disabled = false;
-        return;
+      if (activeTab?.id === pendingMeeting.tabId && /^https?:$/i.test(new URL(pendingMeeting.url).protocol)) {
+        tabCaptureStreamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: pendingMeeting.tabId
+        });
+        captureMeetingAudio = Boolean(tabCaptureStreamId);
       }
+    } catch (err) {
+      console.info('[popup] meeting-audio capture unavailable; continuing with microphone:', err?.message || err);
+      tabCaptureStreamId = null;
+      captureMeetingAudio = false;
     }
   }
 

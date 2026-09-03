@@ -53,7 +53,7 @@ fs.mkdirSync(dist, { recursive: true });
 
 const files = [
   'manifest.json','background.js','script-processor.js','offscreen.html','offscreen.js','audio-processor.js',
-  'popup.html','popup.css','popup.js','meeting-detected.html','meeting-detected.css','meeting-detected.js','options.html','options.css','options.js','storage.js'
+  'popup.html','popup.css','popup.js','transcribing.html','transcribing.css','transcribing.js','meeting-detected.html','meeting-detected.css','meeting-detected.js','options.html','options.css','options.js','storage.js'
 ];
 for (const file of files) {
   fs.copyFileSync(path.join(root, file), path.join(dist, file));
@@ -65,6 +65,16 @@ fs.writeFileSync(
   `// Generated from .env. This file is ignored by git.\n` +
   `globalThis.AI_NOTE_CONFIG = ${JSON.stringify(config, null, 2)};\n`
 );
+
+// The background service worker is intentionally a single classic script.
+// Inject the same generated runtime config into it so it has no module imports.
+const builtBackgroundPath = path.join(dist, 'background.js');
+let builtBackground = fs.readFileSync(builtBackgroundPath, 'utf8');
+builtBackground = builtBackground.replace(
+  /globalThis\.AI_NOTE_CONFIG = \{[\s\S]*?\};\n+(?=\/\/ Offline script normalization)/,
+  `globalThis.AI_NOTE_CONFIG = ${JSON.stringify(config, null, 2)};\n\n`
+);
+fs.writeFileSync(builtBackgroundPath, builtBackground);
 
 console.log(`Built extension -> ${dist}`);
 console.log(`Active provider: ${active}`);
