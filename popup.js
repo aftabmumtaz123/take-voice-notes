@@ -162,7 +162,20 @@ btnStart.addEventListener('click', async () => {
     stream.getTracks().forEach(t => t.stop());
   } catch (err) {
     btnStart.disabled = false;
-    alert(err.name === 'NotAllowedError' ? 'Microphone permission is required to record.' : `Microphone error: ${err.message || err}`);
+    // Open the dedicated permission page instead of a plain alert
+    try {
+      await chrome.windows.create({
+        url: chrome.runtime.getURL('request-mic.html'),
+        type: 'popup',
+        width: 420,
+        height: 380,
+        focused: true
+      });
+    } catch (_) {
+      alert(err.name === 'NotAllowedError'
+        ? 'Microphone permission is required. Please allow the microphone in the window that just opened (or in chrome://settings/content/microphone).'
+        : `Microphone error: ${err.message || err}`);
+    }
     return;
   }
   let tabCaptureStreamId = null;
@@ -306,5 +319,32 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+async function ensureMicrophonePermission() {
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const status = await navigator.permissions.query({ name: 'microphone' });
+      if (status.state === 'granted') return true;
+    }
+  } catch (_) {}
+
+  // getUserMedia from the short-lived popup often fails with NotAllowedError
+  // without ever showing Chrome's permission dialog. Opening a normal window
+  // is the reliable way to trigger the system prompt.
+  try {
+    await chrome.windows.create({
+      url: chrome.runtime.getURL('request-mic.html'),
+      type: 'popup',
+      width: 420,
+      height: 380,
+      focused: true
+    });
+  } catch (err) {
+    console.warn('[popup] Could not open microphone permission window:', err);
+  }
+  return false;
+}
+
 loadScriptMode();
 loadState();
+// Open the reliable microphone permission window when the extension is opened
+ensureMicrophonePermission();

@@ -53,7 +53,10 @@ fs.mkdirSync(dist, { recursive: true });
 
 const files = [
   'manifest.json','background.js','script-processor.js','offscreen.html','offscreen.js','audio-processor.js',
-  'popup.html','popup.css','popup.js','transcribing.html','transcribing.css','transcribing.js','meeting-detected.html','meeting-detected.css','meeting-detected.js','options.html','options.css','options.js','storage.js'
+  'popup.html','popup.css','popup.js','transcribing.html','transcribing.css','transcribing.js',
+  'meeting-detected.html','meeting-detected.css','meeting-detected.js',
+  'options.html','options.css','options.js','storage.js',
+  'request-mic.html','request-mic.js'
 ];
 for (const file of files) {
   fs.copyFileSync(path.join(root, file), path.join(dist, file));
