@@ -328,7 +328,73 @@ async function configuredProviders() {
 }
 
 async function getMeetingState() {
-  return chrome.storage.session.get({ pendingMeeting: null, meetingPromptHistory: {} });
+  return chrome.storage.session.get({ pendingMeeting: null, meetingPromptHistory: {}, activeMeeting: null });
+}
+
+async function ensureUserId() {
+  const result = await chrome.storage.local.get({ noteUserId: '' });
+  if (result.noteUserId) return result.noteUserId;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ noteUserId: id });
+  return id;
+}
+
+async function getBackendUrl() {
+  return String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+}
+
+async function saveCompletedMeeting() {
+  const meetingState = await getMeetingState();
+  const activeMeeting = meetingState.activeMeeting;
+  const transcript = await getTranscript();
+  const recordingState = await getRecordingState();
+  const now = Date.now();
+  const startedAt = activeMeeting?.startedAt || recordingState.startTime || now;
+  const endedAt = now;
+  const duration = Math.max(0, Math.round((endedAt - startedAt - (recordingState.totalPausedMs || 0)) / 1000));
+  const titleResult = await chrome.storage.local.get({ noteTitle: 'Untitled meeting' });
+  const payload = {
+    externalId: activeMeeting?.id || crypto.randomUUID(),
+    userId: await ensureUserId(),
+    title: String(titleResult.noteTitle || activeMeeting?.title || 'Untitled meeting').slice(0, 160),
+    platform: activeMeeting?.platform || 'Manual',
+    meetingUrl: activeMeeting?.url || '',
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    duration,
+    participants: [],
+    fullTranscript: transcript,
+    transcript: transcript ? [{ speaker: 'Speaker', text: transcript, startTime: 0, endTime: duration, confidence: null }] : []
+  };
+
+  await chrome.storage.local.set({ lastCompletedMeeting: payload });
+  let sync = { ok: false, error: 'Backend unavailable.' };
+  try {
+    const response = await fetch(`${await getBackendUrl()}/api/meetings/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Backend returned ${response.status}`);
+    sync = { ok: true, meetingId: data.meeting?.externalId || payload.externalId, analysisReady: Boolean(data.analysisReady) };
+    await chrome.storage.local.remove('lastCompletedMeeting');
+  } catch (error) {
+    sync = { ok: false, error: error.message || String(error), meetingId: payload.externalId };
+    await chrome.storage.local.set({ lastMeetingSyncError: sync });
+  }
+
+  await chrome.storage.session.remove('activeMeeting');
+  return { payload, sync };
+}
+
+async function openDashboard(meetingId = '') {
+  const url = chrome.runtime.getURL(`dashboard.html${meetingId ? `?meeting=${encodeURIComponent(meetingId)}` : ''}`);
+  try {
+    await chrome.tabs.create({ url });
+  } catch (error) {
+    console.warn('[background] dashboard open failed:', error);
+  }
 }
 
 async function markMeetingDetected(tabId, url) {
@@ -355,8 +421,28 @@ async function startRecordingInternal({ automatic = false, tabCaptureStreamId = 
     throw new Error('No transcription provider is configured. Add developer API keys to .env and run npm run build.');
   }
 
+  const meetingState = await getMeetingState();
+  let activeMeeting = meetingState.activeMeeting;
+  if (!activeMeeting) {
+    const pending = meetingState.pendingMeeting;
+    let activeTab = null;
+    if (!pending) {
+      try { [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }); } catch {}
+    }
+    activeMeeting = {
+      id: crypto.randomUUID(),
+      platform: pending?.platform || detectMeeting(activeTab?.url)?.name || 'Manual',
+      url: pending?.url || activeTab?.url || '',
+      title: pending?.title || activeTab?.title || 'Untitled meeting',
+      tabId: pending?.tabId || activeTab?.id || null,
+      startedAt: Date.now()
+    };
+    await chrome.storage.session.set({ activeMeeting });
+  }
+
   await ensureOffscreen();
   await setInterim('');
+  await chrome.storage.local.set({ noteTitle: activeMeeting.title || 'Untitled meeting' });
   await setRecordingState({
     isRecording: true, isPaused: false, startTime: Date.now(),
     pauseTime: null, totalPausedMs: 0, provider: null
@@ -511,7 +597,13 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => { scanTabs(); });
+chrome.runtime.onInstalled.addListener(async () => {
+  scanTabs();
+  try {
+    const { onboardingCompleted } = await chrome.storage.local.get({ onboardingCompleted: false });
+    if (!onboardingCompleted) await chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') });
+  } catch (error) { console.warn('[background] onboarding:', error); }
+});
 chrome.runtime.onStartup.addListener(() => { scanTabs(); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -527,6 +619,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({
             ok: true, ...snapshot,
             pendingMeeting: meetingState.pendingMeeting || null,
+            activeMeeting: meetingState.activeMeeting || null,
             activeProvider: globalThis.AI_NOTE_CONFIG?.activeProvider || 'assemblyai',
             configuredProviders: providers
           });
@@ -547,8 +640,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
-        case 'STOP_RECORDING':
+        case 'STOP_RECORDING': {
           try { await sendToOffscreen('OFFSCREEN_STOP'); } catch {}
+          // Give the final provider event a moment to reach the service worker
+          // before taking the transcript snapshot.
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const completed = await saveCompletedMeeting();
           await setRecordingState({ isRecording: false, isPaused: false, startTime: null, pauseTime: null, totalPausedMs: 0, provider: null });
           await setInterim('');
           await closeOffscreenDocument();
@@ -556,8 +653,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const tabs = await chrome.tabs.query({});
             for (const tab of tabs) { if (tab.id) await chrome.action.setBadgeText({ tabId: tab.id, text: '' }).catch(() => {}); }
           } catch {}
-          sendResponse({ ok: true });
+          sendResponse({ ok: true, meetingId: completed.sync.meetingId, synced: completed.sync.ok, syncError: completed.sync.error || '', analysisReady: completed.sync.analysisReady });
+          // Always show the saved local/server result immediately. If MongoDB is
+          // unavailable, the dashboard explains the recovery state instead.
+          await openDashboard(completed.sync.meetingId || completed.payload.externalId);
           break;
+        }
 
         case 'PAUSE_RECORDING':
           await sendToOffscreen('OFFSCREEN_PAUSE');

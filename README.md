@@ -165,3 +165,68 @@ The microphone stream is captured by the offscreen document, so recording contin
 Chrome's `tabCapture` API requires an extension user invocation/`activeTab` grant for the target tab. Therefore a meeting tab that was detected automatically cannot always have its remote tab audio captured automatically, especially when it is a background tab. The implementation treats remote tab audio as best-effort and never prevents microphone transcription from starting. To capture remote meeting audio reliably, the extension still needs a user-initiated tab-capture action on the meeting tab.
 
 The 5-second status window is informational; closing it does not stop transcription.
+
+## Tactiq-style meeting history + MongoDB dashboard
+
+This version adds a connected post-meeting workflow inspired by the provided Tactiq UX references without copying Tactiq branding/assets.
+
+### New flow
+
+```text
+Meeting detected
+  -> recording/transcription
+  -> Stop meeting
+  -> finalize transcript
+  -> save to MongoDB
+  -> Gemini meeting analysis
+  -> open Meeting Details automatically
+  -> My Meetings dashboard
+```
+
+### Backend
+
+The backend lives in `server/` and uses Express + Mongoose + MongoDB. Gemini is called from the backend so the Gemini API key is not bundled into the extension.
+
+1. Install MongoDB locally or use MongoDB Atlas.
+2. Create `server/.env` from `server/.env.example`.
+3. Set `MONGODB_URI` and `GEMINI_API_KEY`.
+4. From `server/` run:
+
+```bash
+npm install
+npm start
+```
+
+The default API is `http://localhost:4000`.
+
+Google's current Gemini API supports `models.generateContent`, and structured JSON output can be requested from the generation configuration. This project uses the backend for transcript analysis and meeting chat rather than exposing the Gemini key in the extension.
+
+### Dashboard
+
+`dashboard.html` is bundled into the extension. After a meeting is stopped, the background service saves the transcript, calls the backend, and opens the meeting detail view automatically.
+
+The dashboard provides:
+
+- My Meetings
+- search
+- sorting
+- meeting metadata
+- AI summary
+- key points
+- decisions
+- action items
+- topics
+- transcript search
+- meeting-specific AI chat
+- private notes
+- export meeting notes as a multi-page PDF
+- delete
+- retry AI analysis
+
+### Important
+
+The final package intentionally does not include any real provider/API secret. Put your developer credentials into a local `.env` before rebuilding the extension. The extension still uses the existing developer-managed transcription architecture.
+
+## AI meeting intelligence update
+
+AI analysis now creates a meeting-specific title from the transcript and produces a richer detailed summary. The meeting detail page includes a discussion breakdown table, decision rationale table, action-item table, conflicts/differing-viewpoints table, open questions, risks, and follow-ups. PDF export includes these richer sections as well.

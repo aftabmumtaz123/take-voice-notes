@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AI Note Taker",
-  "version": "2.3.4",
-  "description": "Professional live meeting transcription with developer-configured AI transcription providers.",
+  "version": "3.0.0",
+  "description": "AI meeting transcription, post-meeting summaries, searchable history and meeting intelligence.",
   "permissions": [
     "storage",
     "offscreen",
@@ -17,7 +17,8 @@
     "https://streaming.assemblyai.com/*",
     "wss://streaming.assemblyai.com/*",
     "https://api.openai.com/*",
-    "wss://api.openai.com/*"
+    "wss://api.openai.com/*",
+    "http://localhost:4000/*"
   ],
   "background": {
     "service_worker": "background.js"

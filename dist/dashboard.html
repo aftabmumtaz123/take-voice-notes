@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Note Taker — My Meetings</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">✦</div><div><strong>AI Note Taker</strong><span>Meeting intelligence</span></div></div>
+      <nav>
+        <button class="nav-item active" data-view="meetings">⌂ <span>My Meetings</span></button>
+        <button class="nav-item" data-view="summary">✦ <span>AI Tools</span></button>
+        <button class="nav-item" data-view="reporting">◫ <span>Reporting</span></button>
+        <button class="nav-item" data-view="settings">⚙ <span>Settings</span></button>
+      </nav>
+      <div class="sidebar-bottom"><button id="openExtension" class="outline-btn">Open extension</button><div class="user-card"><div class="avatar">A</div><div><strong>Local workspace</strong><span id="userIdShort">Loading…</span></div></div></div>
+    </aside>
+
+    <main class="main">
+      <div id="listView" class="view">
+        <header class="page-header">
+          <div><div class="crumb">My Meetings</div><h1>My Meetings</h1><p>Search, review and revisit your meeting history.</p></div>
+          <div class="header-actions"><button id="refreshBtn" class="ghost-btn">↻ Refresh</button><button id="startBtn" class="primary-btn">● Start meeting</button></div>
+        </header>
+        <div class="toolbar"><div class="search-wrap">⌕<input id="searchInput" placeholder="Search keywords, participants, titles and transcripts…"></div><select id="sortSelect"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="longest">Longest first</option></select></div>
+        <div id="listState" class="state-card hidden"></div>
+        <section id="meetingList" class="meeting-list"></section>
+      </div>
+
+      <div id="detailView" class="view hidden">
+        <header class="detail-header"><button id="backBtn" class="back-btn">← My Meetings</button><div class="detail-actions"><button id="exportSummaryBtn" class="primary-btn">Export Summary PDF</button><button id="exportTranscriptBtn" class="ghost-btn">Export Transcript PDF</button><button id="exportAllBtn" class="ghost-btn">Export All PDF</button><button id="deleteBtn" class="danger-outline">Delete</button></div></header>
+        <section id="meetingHero" class="meeting-hero"></section>
+        <div class="tabs"><button class="tab active" data-tab="summary">AI Summary</button><button class="tab" data-tab="transcript">Transcript</button><button class="tab" data-tab="chat">AI Chat</button><button class="tab" data-tab="notes">Notes</button></div>
+        <section id="detailContent" class="detail-content"></section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="runtime-config.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

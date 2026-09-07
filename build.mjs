@@ -45,7 +45,8 @@ const config = {
   },
   deepgramModel: env.DEEPGRAM_MODEL || 'nova-3',
   assemblyaiModel: env.ASSEMBLYAI_MODEL || 'universal-3-5-pro',
-  openaiModel: env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe'
+  openaiModel: env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
+  backendUrl: env.BACKEND_URL || 'http://localhost:4000'
 };
 
 fs.rmSync(dist, { recursive: true, force: true });
@@ -53,9 +54,9 @@ fs.mkdirSync(dist, { recursive: true });
 
 const files = [
   'manifest.json','background.js','script-processor.js','offscreen.html','offscreen.js','audio-processor.js',
-  'popup.html','popup.css','popup.js','transcribing.html','transcribing.css','transcribing.js',
+  'popup.html','popup.css','popup.js','dashboard.html','dashboard.css','dashboard.js','transcribing.html','transcribing.css','transcribing.js',
   'meeting-detected.html','meeting-detected.css','meeting-detected.js',
-  'options.html','options.css','options.js','storage.js',
+  'options.html','options.css','options.js','storage.js','onboarding.html','onboarding.css','onboarding.js',
   'request-mic.html','request-mic.js'
 ];
 for (const file of files) {

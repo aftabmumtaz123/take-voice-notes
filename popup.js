@@ -20,6 +20,7 @@ const btnClear = $('btnClear');
 const btnCopy = $('btnCopy');
 const btnDownload = $('btnDownload');
 const optionsLink = $('optionsLink');
+const dashboardLink = $('dashboardLink');
 const meetingDetected = $('meetingDetected');
 const meetingDetectedIcon = $('meetingDetectedIcon');
 const meetingDetectedTitle = $('meetingDetectedTitle');
@@ -35,6 +36,62 @@ let timerInterval = null;
 const send = (type, data = {}) => new Promise((resolve) => {
   chrome.runtime.sendMessage({ target:'background', type, ...data }, resolve);
 });
+
+
+const toastHost = $('toastHost');
+const modalHost = $('modalHost');
+
+const TOAST_ICONS = { error: '!', success: '✓', info: 'i', warn: '!' };
+
+function showToast(message, { title = '', type = 'info', duration = 4200 } = {}) {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `
+    <div class="toast-icon">${TOAST_ICONS[type] || 'i'}</div>
+    <div class="toast-body">
+      ${title ? `<div class="toast-title">${title}</div>` : ''}
+      <div class="toast-msg">${message}</div>
+    </div>
+    <button class="toast-close" type="button" aria-label="Dismiss">×</button>
+  `;
+  const remove = () => {
+    el.classList.add('hiding');
+    setTimeout(() => el.remove(), 180);
+  };
+  el.querySelector('.toast-close').addEventListener('click', remove);
+  toastHost.appendChild(el);
+  if (duration > 0) setTimeout(remove, duration);
+  return el;
+}
+
+function showConfirm({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-title">${title || 'Confirm'}</div>
+        <div class="modal-msg">${message || ''}</div>
+        <div class="modal-actions">
+          <button class="modal-btn cancel" type="button">${cancelLabel}</button>
+          <button class="modal-btn ${danger ? 'danger' : 'primary'}" type="button">${confirmLabel}</button>
+        </div>
+      </div>
+    `;
+    const close = (result) => {
+      overlay.classList.add('hiding');
+      setTimeout(() => {
+        overlay.remove();
+        resolve(result);
+      }, 150);
+    };
+    overlay.querySelector('.cancel').addEventListener('click', () => close(false));
+    overlay.querySelector('.modal-btn.' + (danger ? 'danger' : 'primary')).addEventListener('click', () => close(true));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    modalHost.appendChild(overlay);
+  });
+}
+
 
 function formatTime(ms) {
   const total = Math.floor(Math.max(0, ms) / 1000);
@@ -162,7 +219,7 @@ btnStart.addEventListener('click', async () => {
     stream.getTracks().forEach(t => t.stop());
   } catch (err) {
     btnStart.disabled = false;
-    // Open the dedicated permission page instead of a plain alert
+    // Open the dedicated permission page (getUserMedia from popup is unreliable)
     try {
       await chrome.windows.create({
         url: chrome.runtime.getURL('request-mic.html'),
@@ -171,10 +228,18 @@ btnStart.addEventListener('click', async () => {
         height: 380,
         focused: true
       });
+      showToast('A permission window has opened. Allow the microphone, then try Start again.', {
+        title: 'Microphone access needed',
+        type: 'info',
+        duration: 5500
+      });
     } catch (_) {
-      alert(err.name === 'NotAllowedError'
-        ? 'Microphone permission is required. Please allow the microphone in the window that just opened (or in chrome://settings/content/microphone).'
-        : `Microphone error: ${err.message || err}`);
+      showToast(
+        err.name === 'NotAllowedError'
+          ? 'Please allow the microphone in chrome://settings/content/microphone, then try again.'
+          : (err.message || String(err)),
+        { title: 'Microphone access needed', type: 'error', duration: 6000 }
+      );
     }
     return;
   }
@@ -207,7 +272,11 @@ btnStart.addEventListener('click', async () => {
   const result = await send('START_RECORDING', { tabCaptureStreamId, captureMeetingAudio });
   if (!result?.ok) {
     btnStart.disabled = false;
-    alert(result?.error || 'Unable to start recording.');
+    showToast(result?.error || 'Unable to start recording.', {
+      title: 'Could not start',
+      type: 'error',
+      duration: 5500
+    });
     return;
   }
   currentState = result.state;
@@ -249,7 +318,14 @@ btnResume.addEventListener('click', async () => {
 });
 
 btnNewNote.addEventListener('click', async () => {
-  if (!confirm('Start a new note? The current transcript will be cleared.')) return;
+  const ok = await showConfirm({
+    title: 'Start a new note?',
+    message: 'The current transcript will be cleared. This cannot be undone.',
+    confirmLabel: 'Start new',
+    cancelLabel: 'Keep current',
+    danger: true
+  });
+  if (!ok) return;
   const result = await send('NEW_NOTE');
   if (result?.ok) {
     setTranscript(''); setInterim('');
@@ -257,28 +333,47 @@ btnNewNote.addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title: 'Untitled meeting' });
     currentState = {isRecording:false,isPaused:false,startTime:null,totalPausedMs:0,provider:null};
     updateUI(); manageTimer();
+    showToast('New note started.', { type: 'success', duration: 2200 });
   }
 });
 
 btnClear.addEventListener('click', async () => {
-  if (!confirm('Clear the current transcript?')) return;
+  const ok = await showConfirm({
+    title: 'Clear transcript?',
+    message: 'This will permanently remove the current notes from this session.',
+    confirmLabel: 'Clear',
+    cancelLabel: 'Cancel',
+    danger: true
+  });
+  if (!ok) return;
   const result = await send('CLEAR_NOTE');
-  if (result?.ok) { setTranscript(''); setInterim(''); }
+  if (result?.ok) {
+    setTranscript(''); setInterim('');
+    showToast('Transcript cleared.', { type: 'success', duration: 2500 });
+  }
 });
 
 btnCopy.addEventListener('click', async () => {
   const text = transcriptArea.value.trim();
-  if (!text) return;
-  await navigator.clipboard.writeText(text);
-  const old = btnCopy.textContent;
-  btnCopy.textContent = 'Copied';
-  setTimeout(() => btnCopy.textContent = old, 1200);
+  if (!text) {
+    showToast('Nothing to copy yet.', { type: 'info', duration: 2500 });
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Transcript copied to clipboard.', { type: 'success', duration: 2200 });
+  } catch {
+    showToast('Could not access the clipboard.', { title: 'Copy failed', type: 'error' });
+  }
 });
 
 btnDownload.addEventListener('click', () => {
   const text = transcriptArea.value.trim();
   const title = sessionTitle.value.trim() || 'Untitled meeting';
-  if (!text && title === 'Untitled meeting') return;
+  if (!text && title === 'Untitled meeting') {
+    showToast('Add some notes before exporting.', { type: 'info', duration: 2500 });
+    return;
+  }
   const content = `${title}\n${'='.repeat(Math.min(Math.max(title.length, 10), 80))}\n\n${text}\n`;
   const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
   const url = URL.createObjectURL(blob);
@@ -302,6 +397,7 @@ meetingDismiss.addEventListener('click', async () => {
   meetingDetected.classList.add('hidden');
 });
 
+dashboardLink.addEventListener('click', async (e) => { e.preventDefault(); try { await chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html') }); } catch (error) { showToast(error.message || String(error), { title: 'Could not open dashboard', type: 'error' }); } });
 optionsLink.addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
 
 chrome.storage.onChanged.addListener((changes, area) => {
