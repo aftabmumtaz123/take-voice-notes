@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Install extension · <%= (settings && settings.siteName) || 'AI Note Taker' %></title>
+  <link rel="stylesheet" href="/public/auth.css" />
+  <link rel="stylesheet" href="/public/onboarding-web.css" />
+</head>
+<body class="auth-body">
+  <div class="auth-shell onb-shell" style="max-width:560px">
+    <a class="auth-logo" href="/">
+      <span class="mark">✦</span>
+      <strong><%= (settings && settings.siteName) || 'AI Note Taker' %></strong>
+    </a>
+    <h1>Install the Chrome extension</h1>
+    <p class="auth-sub">Before the Chrome Web Store listing is live, load the extension as an unpacked package (developer mode).</p>
+
+    <div class="auth-panel onb-panel" style="text-align:left">
+      <h2 class="install-h">Option A — Load unpacked (recommended while developing)</h2>
+      <ol class="install-steps">
+        <li>On your machine, open the project folder and build:
+          <pre>npm run build</pre>
+          This creates a <code>dist/</code> folder.
+        </li>
+        <li>Open Chrome and go to <code>chrome://extensions</code></li>
+        <li>Turn on <strong>Developer mode</strong> (top right)</li>
+        <li>Click <strong>Load unpacked</strong></li>
+        <li>Select the <code>dist</code> folder from the project</li>
+        <li>Pin the extension, open the popup, paste your API key from <a href="/account">Account</a></li>
+      </ol>
+
+      <h2 class="install-h">Option B — Share a zip with testers (still pre–Web Store)</h2>
+      <ol class="install-steps">
+        <li>Build: <code>npm run build</code></li>
+        <li>Zip the contents of <code>dist/</code> (the files inside dist, or the folder itself)</li>
+        <li>Send the zip to testers</li>
+        <li>They unzip it, open <code>chrome://extensions</code> → Developer mode → <strong>Load unpacked</strong> → select the unzipped folder</li>
+      </ol>
+
+      <h2 class="install-h">Option C — Chrome Web Store (public release)</h2>
+      <ol class="install-steps">
+        <li>Create a developer account at the <a href="https://chrome.google.com/webstore/devconsole" target="_blank" rel="noopener">Chrome Web Store Developer Dashboard</a></li>
+        <li>Zip the <code>dist/</code> folder</li>
+        <li>Upload the package, fill store listing, privacy policy, screenshots</li>
+        <li>Submit for review — after approval users install with one click</li>
+      </ol>
+
+      <div class="install-note">
+        <strong>Important:</strong> Put API keys only in server <code>.env</code> / user account keys — never ship long-lived provider secrets inside the public extension package.
+      </div>
+
+      <a class="auth-submit onb-install-btn" href="/account" style="margin-top:16px;display:block;text-align:center;text-decoration:none">Get my API key</a>
+      <p class="auth-legal"><a href="/app">Go to my meetings</a> · <a href="/">Home</a></p>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<aside class="sidebar admin-sidebar">
+  <div class="sidebar-brand">
+    <span class="logo">✦</span>
+    <div>
+      <strong>AI Notes</strong>
+      <small>Admin control</small>
+    </div>
+  </div>
+  <nav class="sidebar-nav">
+    <a class="nav-item <%= activeNav === 'dashboard' ? 'active' : '' %>" href="/admin">
+      <span class="nav-ico">◆</span> Overview
+    </a>
+    <a class="nav-item <%= activeNav === 'users' ? 'active' : '' %>" href="/admin/users">
+      <span class="nav-ico">☺</span> Users
+    </a>
+    <a class="nav-item <%= activeNav === 'meetings' ? 'active' : '' %>" href="/admin/meetings">
+      <span class="nav-ico">⌂</span> Meetings
+    </a>
+    <a class="nav-item <%= activeNav === 'ai-notes' ? 'active' : '' %>" href="/admin/ai-notes">
+      <span class="nav-ico">✦</span> AI Notes
+    </a>
+    <a class="nav-item <%= activeNav === 'transcriptions' ? 'active' : '' %>" href="/admin/transcriptions">
+      <span class="nav-ico">≡</span> Transcriptions
+    </a>
+    <a class="nav-item <%= activeNav === 'plans' ? 'active' : '' %>" href="/admin/plans">
+      <span class="nav-ico">$</span> Plans &amp; Billing
+    </a>
+    <a class="nav-item <%= activeNav === 'analytics' ? 'active' : '' %>" href="/admin/analytics">
+      <span class="nav-ico">▤</span> Usage &amp; Analytics
+    </a>
+    <a class="nav-item <%= activeNav === 'extension' ? 'active' : '' %>" href="/admin/extension">
+      <span class="nav-ico">◈</span> Extension
+    </a>
+    <a class="nav-item <%= activeNav === 'settings' ? 'active' : '' %>" href="/admin/settings">
+      <span class="nav-ico">⚙</span> Settings
+    </a>
+    <a class="nav-item" href="/app">
+      <span class="nav-ico">→</span> User App
+    </a>
+    <a class="nav-item" href="/logout">
+      <span class="nav-ico">↪</span> Log out
+    </a>
+  </nav>
+  <% if (typeof user !== "undefined" && user) { %>
+  <div class="sidebar-user">
+    <div class="avatar"><%= (user.displayName || user.username || "?").charAt(0).toUpperCase() %></div>
+    <div class="sidebar-user-meta">
+      <strong>@<%= user.username %></strong>
+      <small>Administrator</small>
+    </div>
+  </div>
+  <% } %>
+</aside>

@@ -1,0 +1,59 @@
+<%- include("../partials/header", { title: "Users · Admin", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "users" }) %>
+  <div class="main">
+    <header class="main-top">
+      <h1>Users</h1>
+    </header>
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="table-wrap card" style="padding:0; overflow:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Role</th>
+            <th>Plan</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% (users || []).forEach(function(u) { %>
+            <tr>
+              <td>
+                <strong>@<%= u.username %></strong>
+                <div class="muted" style="font-size:12px"><%= u.displayName %></div>
+              </td>
+              <td>
+                <form method="POST" action="/admin/users/<%= u.id || u._id %>/role" class="inline-form">
+                  <select name="role" onchange="this.form.submit()">
+                    <option value="user" <%= u.role === 'user' ? 'selected' : '' %>>user</option>
+                    <option value="admin" <%= u.role === 'admin' ? 'selected' : '' %>>admin</option>
+                  </select>
+                </form>
+              </td>
+              <td>
+                <form method="POST" action="/admin/users/<%= u.id || u._id %>/plan" class="inline-form">
+                  <select name="planSlug" onchange="this.form.submit()">
+                    <% (plans || []).forEach(function(p) { %>
+                      <option value="<%= p.slug %>" <%= (u.planSlug || 'free') === p.slug ? 'selected' : '' %>><%= p.name %></option>
+                    <% }) %>
+                  </select>
+                </form>
+              </td>
+              <td><%= u.isActive === false ? 'Disabled' : 'Active' %></td>
+              <td>
+                <form method="POST" action="/admin/users/<%= u.id || u._id %>/toggle" style="display:inline">
+                  <button type="submit" class="btn-ghost"><%= u.isActive === false ? 'Enable' : 'Disable' %></button>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<%- include("../partials/footer") %>

@@ -1,37 +1,89 @@
+<%
+  const _usage = typeof usage !== 'undefined' && usage ? usage : null;
+  const _settings = typeof settings !== 'undefined' ? settings : null;
+  const badge = (_usage && _usage.badge) || (user && user.planSlug ? String(user.planSlug).toUpperCase() : 'FREE');
+  const isPaid = _usage ? _usage.isPaid : (user && user.planSlug && user.planSlug !== 'free');
+  const used = _usage ? _usage.meetingsUsed : 0;
+  const maxM = _usage ? _usage.meetingsMax : 5;
+  const pctUsed = maxM >= 9999 ? Math.min(100, used) : Math.min(100, Math.round((used / maxM) * 100));
+%>
 <aside class="sidebar">
   <div class="sidebar-brand">
     <span class="logo">✦</span>
     <div>
-      <strong>AI Note Taker</strong>
+      <strong><%= (_settings && _settings.siteName) || 'AI Note Taker' %></strong>
       <small>Meeting intelligence</small>
     </div>
   </div>
+
+  <div class="sidebar-search">
+    <form method="GET" action="/app/meetings">
+      <input type="search" name="q" placeholder="Search" value="<%= typeof q !== 'undefined' ? q : '' %>" />
+    </form>
+  </div>
+
   <nav class="sidebar-nav">
-    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'meetings' ? 'active' : '' %>" href="/?view=all">
-      <span class="nav-ico">⌂</span> My Meetings
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'overview' ? 'active' : '' %>" href="/app/overview">
+      <span class="nav-ico">⌂</span> Overview
     </a>
-    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'favorites' ? 'active' : '' %>" href="/?view=favorites">
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'meetings' ? 'active' : '' %>" href="/app/meetings">
+      <span class="nav-ico">▣</span> My Meetings
+    </a>
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'favorites' ? 'active' : '' %>" href="/app/meetings?view=favorites">
       <span class="nav-ico">★</span> Favourites
     </a>
-    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'archived' ? 'active' : '' %>" href="/?view=archived">
-      <span class="nav-ico">▤</span> Archived
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'archived' ? 'active' : '' %>" href="/app/meetings?view=archived">
+      <span class="nav-ico">▤</span> Archive
     </a>
-    <% if (typeof user !== "undefined" && user) { %>
+
+    <div class="nav-divider"></div>
+
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'insights' ? 'active' : '' %>" href="/app/insights">
+      <span class="nav-ico">✦</span> AI Insights
+      <% if (!isPaid) { %><span class="nav-pro">PRO</span><% } %>
+    </a>
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'usage' ? 'active' : '' %>" href="/app/usage">
+      <span class="nav-ico">◷</span> Usage &amp; Plan
+    </a>
+
+    <div class="nav-divider"></div>
+
     <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'account' ? 'active' : '' %>" href="/account">
-      <span class="nav-ico">⚙</span> Account & API key
+      <span class="nav-ico">⚙</span> Account &amp; Settings
     </a>
-    <a class="nav-item" href="/logout">
-      <span class="nav-ico">↪</span> Log out
+    <% if (typeof user !== "undefined" && user && user.role === "admin") { %>
+    <a class="nav-item" href="/admin">
+      <span class="nav-ico">◆</span> Admin
     </a>
     <% } %>
   </nav>
+
+  <div class="sidebar-promo">
+    <p><a href="/install"><strong>Add to Chrome</strong></a> for Meet, Zoom &amp; Teams</p>
+  </div>
+
+  <div class="sidebar-plan">
+    <div class="plan-head">
+      <strong><% if (isPaid) { %>✦ <% } %><%= badge %> PLAN</strong>
+    </div>
+    <p class="plan-line"><%= used %> / <%= maxM >= 9999 ? '∞' : maxM %> meetings used</p>
+    <div class="plan-bar"><div style="width:<%= pctUsed %>%"></div></div>
+    <% if (isPaid) { %>
+      <a class="btn-upgrade soft" href="/app/usage">Manage plan →</a>
+    <% } else { %>
+      <a class="btn-upgrade" href="/#pricing">Upgrade to Pro →</a>
+    <% } %>
+  </div>
+
   <% if (typeof user !== "undefined" && user) { %>
   <div class="sidebar-user">
     <div class="avatar"><%= (user.displayName || user.username || "?").charAt(0).toUpperCase() %></div>
-    <div>
-      <strong>@<%= user.username %></strong>
-      <small>Local workspace</small>
+    <div class="sidebar-user-meta">
+      <strong><%= user.displayName || user.username %></strong>
+      <small>@<%= user.username %></small>
+      <span class="user-plan-badge <%= isPaid ? 'paid' : 'free' %>"><% if (isPaid) { %>✦ <% } %><%= badge %></span>
     </div>
+    <a class="logout-mini" href="/logout" title="Log out">↪</a>
   </div>
   <% } %>
 </aside>

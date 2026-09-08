@@ -1,0 +1,51 @@
+<%- include("partials/header", { title: "AI Insights", bodyClass: "app-shell" }) %>
+<% const i = insights || {}; const maxT = Math.max(1, ...(i.topics || []).map(t => t[1])); %>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "insights", settings, usage, q: "" }) %>
+  <div class="main tactiq-main">
+    <header class="main-top page-head">
+      <div>
+        <h1>✦ AI Insights</h1>
+        <p class="admin-sub">Cross-meeting patterns from the last 7 days.</p>
+      </div>
+    </header>
+
+    <% if (!i.isPaid) { %>
+      <div class="card section-card pro-gate" style="margin: 0 28px;">
+        <h2>✦ PRO feature</h2>
+        <p>AI Insights analyzes all your meetings for topics, decisions, and time trends.</p>
+        <a class="btn-primary" href="/#pricing">Upgrade to unlock</a>
+        <a class="btn-ghost" href="/app/usage" style="margin-left:8px">View plan</a>
+      </div>
+    <% } else { %>
+      <div class="admin-stats stats-4" style="padding: 0 28px;">
+        <div class="stat-card rich"><span class="stat-label">This week</span><strong><%= i.meetings %></strong><span class="stat-delta">Meetings</span></div>
+        <div class="stat-card rich"><span class="stat-label">Meeting time</span><strong><%= i.totalMin %>m</strong><span class="stat-delta">Total</span></div>
+        <div class="stat-card rich"><span class="stat-label">Action items</span><strong><%= i.actionItems %></strong><span class="stat-delta">Extracted</span></div>
+        <div class="stat-card rich"><span class="stat-label">Decisions</span><strong><%= i.decisions %></strong><span class="stat-delta">Tracked</span></div>
+      </div>
+
+      <section class="card section-card" style="margin: 16px 28px;">
+        <h2>Most discussed topics</h2>
+        <% if (!i.topics || !i.topics.length) { %>
+          <p class="muted">Not enough meetings yet this week.</p>
+        <% } else { %>
+          <div class="plan-dist">
+            <% i.topics.forEach(function(t) { %>
+              <div class="plan-dist-row">
+                <div class="plan-dist-meta"><strong><%= t[0] %></strong><span><%= t[1] %></span></div>
+                <div class="plan-dist-bar"><div style="width:<%= Math.round((t[1]/maxT)*100) %>%"></div></div>
+              </div>
+            <% }) %>
+          </div>
+        <% } %>
+      </section>
+
+      <section class="card section-card" style="margin: 0 28px 24px;">
+        <h2>AI observation</h2>
+        <p>You had <strong><%= i.meetings %></strong> meetings totaling <strong><%= i.totalMin %> minutes</strong> this week<% if (i.actionItems) { %>, with <strong><%= i.actionItems %></strong> action items captured<% } %>.</p>
+      </section>
+    <% } %>
+  </div>
+</div>
+<%- include("partials/footer") %>

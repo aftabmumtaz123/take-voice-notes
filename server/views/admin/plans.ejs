@@ -1,0 +1,60 @@
+<%- include("../partials/header", { title: "Plans · Admin", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "plans" }) %>
+  <div class="main">
+    <header class="main-top">
+      <h1>Subscription plans</h1>
+    </header>
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <section class="card section-card">
+      <h2>Create plan</h2>
+      <form method="POST" action="/admin/plans" class="form admin-form">
+        <div class="form-row">
+          <label>Name <input name="name" required placeholder="Pro" /></label>
+          <label>Slug <input name="slug" placeholder="pro (optional)" /></label>
+          <label>Price / month (USD) <input name="priceMonthly" type="number" min="0" step="1" value="0" /></label>
+        </div>
+        <label>Description <input name="description" placeholder="Short description" /></label>
+        <label>Features (one per line)
+          <textarea name="features" rows="4" placeholder="Unlimited meetings&#10;AI chat"></textarea>
+        </label>
+        <div class="form-row">
+          <label>Max meetings / month <input name="maxMeetingsPerMonth" type="number" min="0" value="20" /></label>
+          <label>Sort order <input name="sortOrder" type="number" value="0" /></label>
+        </div>
+        <button type="submit" class="btn-primary">Create plan</button>
+      </form>
+    </section>
+
+    <section class="card section-card" style="margin-top:16px">
+      <h2>Existing plans</h2>
+      <% (plans || []).forEach(function(p) { %>
+        <form method="POST" action="/admin/plans/<%= p._id %>" class="plan-edit form">
+          <div class="form-row">
+            <label>Name <input name="name" value="<%= p.name %>" required /></label>
+            <label>Price / mo <input name="priceMonthly" type="number" min="0" value="<%= p.priceMonthly %>" /></label>
+            <label>Max meetings <input name="maxMeetingsPerMonth" type="number" min="0" value="<%= p.maxMeetingsPerMonth %>" /></label>
+            <label>Sort <input name="sortOrder" type="number" value="<%= p.sortOrder %>" /></label>
+          </div>
+          <label>Description <input name="description" value="<%= p.description || '' %>" /></label>
+          <label>Features
+            <textarea name="features" rows="3"><%= (p.features || []).join('\n') %></textarea>
+          </label>
+          <label class="check-label">
+            <input type="checkbox" name="isActive" value="on" <%= p.isActive ? 'checked' : '' %> /> Active
+          </label>
+          <div class="form-row">
+            <button type="submit" class="btn-primary">Save</button>
+            <% if (p.slug !== 'free') { %>
+              <button type="submit" formaction="/admin/plans/<%= p._id %>/delete" class="btn-danger" onclick="return confirm('Delete this plan?')">Delete</button>
+            <% } %>
+            <span class="muted">slug: <%= p.slug %></span>
+          </div>
+        </form>
+      <% }) %>
+    </section>
+  </div>
+</div>
+<%- include("../partials/footer") %>

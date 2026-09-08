@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title><%= (settings && settings.siteName) || 'AI Note Taker' %> — <%= (settings && settings.tagline) || 'Focus on the meeting, let AI handle the notes.' %></title>
+  <link rel="stylesheet" href="/public/landing.css" />
+</head>
+<body class="landing">
+  <header class="lp-nav">
+    <a class="lp-brand" href="/">
+      <span class="lp-logo">✦</span>
+      <strong><%= (settings && settings.siteName) || 'AI Note Taker' %></strong>
+    </a>
+    <nav class="lp-links">
+      <a href="#features">Product</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#security">Security</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="lp-nav-actions">
+      <a class="lp-ghost" href="/login">Log in</a>
+      <a class="lp-primary" href="/register">Get started — free</a>
+    </div>
+  </header>
+
+  <section class="lp-hero">
+    <div class="lp-hero-copy">
+      <span class="lp-pill">Powered by live AI transcription</span>
+      <h1>Focus on the meeting,<br />let AI handle the notes.</h1>
+      <p class="lp-lead">
+        Get live, in-meeting transcriptions and insightful AI summaries —
+        so you always take the right actions and get more out of every call.
+      </p>
+      <div class="lp-cta-row">
+        <a class="lp-primary large" href="/register">Start free</a>
+        <a class="lp-outline large" href="/login">Log in</a>
+        <span class="lp-platforms">
+          <span title="Google Meet">Meet</span>
+          <span title="Zoom">Zoom</span>
+          <span title="Microsoft Teams">Teams</span>
+        </span>
+      </div>
+      <p class="lp-lang">Supports English, Hindi, Urdu &amp; Hinglish code-switching</p>
+    </div>
+    <div class="lp-hero-card">
+      <div class="lp-card-tabs">
+        <span class="active">Live Transcript</span>
+        <span>Ask AI</span>
+      </div>
+      <div class="lp-card-body">
+        <div class="lp-speaker">
+          <strong>You</strong>
+          <p>Simply add the extension, join a Google Meet, Zoom or Teams call, and watch the conversation appear in real time.</p>
+        </div>
+        <div class="lp-speaker">
+          <strong>Teammate</strong>
+          <p>Speaker-aware notes, action items, and a summary you can share the moment the meeting ends.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="lp-stats">
+    <div class="lp-stat"><strong>Live</strong><span>Transcription for Meet, Zoom &amp; Teams</span></div>
+    <div class="lp-stat"><strong>AI</strong><span>Summaries, decisions &amp; action items</span></div>
+    <div class="lp-stat"><strong>Chrome</strong><span>Extension + web dashboard</span></div>
+    <div class="lp-stat"><strong>Multi</strong><span>Language &amp; code-switch ready</span></div>
+  </section>
+
+  <section class="lp-section" id="features">
+    <h2>Transcribed live. Summarised instantly.</h2>
+    <div class="lp-feature-grid">
+      <article class="lp-feat pink">
+        <h3>Action items</h3>
+        <p>Who does what. Instantly clear after every meeting.</p>
+      </article>
+      <article class="lp-feat yellow">
+        <h3>Summaries</h3>
+        <p>Get context in seconds — not thirty minutes of rewatching.</p>
+      </article>
+      <article class="lp-feat green">
+        <h3>Ask AI</h3>
+        <p>Your meetings answer back. Chat over any transcript.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="lp-section alt" id="pricing">
+    <h2>Simple plans for every team.</h2>
+    <p class="lp-sub">Start free. Upgrade when you need unlimited meetings and deeper AI.</p>
+    <div class="lp-pricing">
+      <% (plans || []).forEach(function(p) { %>
+        <article class="lp-plan <%= p.slug === 'pro' ? 'featured' : '' %>">
+          <h3><%= p.name %></h3>
+          <div class="lp-price">
+            <% if (p.priceMonthly > 0) { %>$<%= p.priceMonthly %><span>/mo</span><% } else { %>Free<% } %>
+          </div>
+          <p><%= p.description %></p>
+          <ul>
+            <% (p.features || []).forEach(function(f) { %><li><%= f %></li><% }) %>
+          </ul>
+          <a class="lp-primary block" href="/register"><%= p.priceMonthly > 0 ? 'Choose ' + p.name : 'Get started' %></a>
+        </article>
+      <% }) %>
+      <% if (!plans || !plans.length) { %>
+        <article class="lp-plan">
+          <h3>Free</h3>
+          <div class="lp-price">Free</div>
+          <p>Live transcription and basic AI summaries.</p>
+          <a class="lp-primary block" href="/register">Get started</a>
+        </article>
+      <% } %>
+    </div>
+  </section>
+
+  <section class="lp-section" id="security">
+    <h2>Built with privacy in mind.</h2>
+    <p class="lp-sub">Your transcripts stay in your workspace. API keys stay on the server. You control what is saved.</p>
+    <div class="lp-badges">
+      <div class="lp-badge">Local / self-hosted option</div>
+      <div class="lp-badge">API keys server-side</div>
+      <div class="lp-badge">Per-user isolation</div>
+      <div class="lp-badge">Export anytime</div>
+    </div>
+  </section>
+
+  <section class="lp-section alt" id="faq">
+    <h2>Your questions, answered.</h2>
+    <div class="lp-faq">
+      <details><summary>Does AI Note Taker record audio?</summary><p>Audio is streamed for transcription only. We store the transcript and AI analysis you choose to save — not raw meeting recordings.</p></details>
+      <details><summary>Will everyone in the meeting see the transcription?</summary><p>No. Notes are private to your account unless you export or share them.</p></details>
+      <details><summary>Which platforms are supported?</summary><p>Google Meet, Zoom, and Microsoft Teams via the Chrome extension, plus manual recording anytime.</p></details>
+      <details><summary>Can I use this with my team?</summary><p>Yes. Create accounts per person, or ask an admin to assign Pro / Team plans from the admin dashboard.</p></details>
+    </div>
+  </section>
+
+  <footer class="lp-footer">
+    <div>
+      <span class="lp-logo">✦</span>
+      <strong><%= (settings && settings.siteName) || 'AI Note Taker' %></strong>
+      <p><%= (settings && settings.footerText) || 'The easiest way to transcribe, summarize, and act on meetings.' %></p>
+    </div>
+    <div class="lp-footer-cols">
+      <div>
+        <strong>Links</strong>
+        <% const fl = (settings && settings.footerLinks) || []; %>
+        <% if (fl.length) { fl.forEach(function(link) { %>
+          <a href="<%= link.url %>"><%= link.label %></a>
+        <% }) } else { %>
+          <a href="#features">How it works</a>
+          <a href="#pricing">Pricing</a>
+          <a href="/login">Log in</a>
+          <a href="/register">Sign up</a>
+        <% } %>
+      </div>
+      <div>
+        <strong>Account</strong>
+        <a href="/login">Log in</a>
+        <a href="/register">Sign up</a>
+        <% if (settings && settings.supportEmail) { %>
+          <a href="mailto:<%= settings.supportEmail %>"><%= settings.supportEmail %></a>
+        <% } %>
+      </div>
+    </div>
+    <p class="lp-copy"><%= (settings && settings.copyrightText) || ('© ' + new Date().getFullYear() + ' ' + ((settings && settings.siteName) || 'AI Note Taker')) %></p>
+  </footer>
+
+</body>
+</html>

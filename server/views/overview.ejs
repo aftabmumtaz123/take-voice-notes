@@ -1,0 +1,87 @@
+<%- include("partials/header", { title: "Overview", bodyClass: "app-shell" }) %>
+<%
+  const name = user.displayName || user.username || 'there';
+  const u = usage || {};
+%>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "overview", settings, usage, q: "" }) %>
+  <div class="main tactiq-main">
+    <div class="top-banner">
+      <span>Add the Chrome extension to capture Meet, Zoom, and Teams.</span>
+      <a class="banner-cta" href="/install">Install now</a>
+    </div>
+
+    <header class="main-top page-head">
+      <div>
+        <h1><%= greet || 'Hello' %>, <%= name %> 👋</h1>
+        <p class="admin-sub">Here's an overview of your meetings and AI activity.</p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-primary" href="/app/meetings">My Meetings</a>
+        <a class="btn-ghost" href="/install">Install extension</a>
+      </div>
+    </header>
+
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="admin-stats stats-4" style="padding: 0 28px;">
+      <div class="stat-card rich">
+        <span class="stat-label">Meetings</span>
+        <strong><%= u.meetingsUsed || 0 %></strong>
+        <span class="stat-delta">This month · max <%= u.meetingsMax >= 9999 ? '∞' : u.meetingsMax %></span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">AI Notes</span>
+        <strong><%= u.aiNotes || 0 %></strong>
+        <span class="stat-delta">Generated</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Transcription</span>
+        <strong><%= u.transcriptionMinutes || 0 %></strong>
+        <span class="stat-delta">Minutes this month</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Usage remaining</span>
+        <strong><%= u.remainingPct != null ? u.remainingPct : 100 %>%</strong>
+        <span class="stat-delta"><%= u.badge || 'FREE' %> plan</span>
+      </div>
+    </div>
+
+    <section class="card section-card" style="margin: 16px 28px;">
+      <div class="section-head">
+        <h2>Recent meetings</h2>
+        <a href="/app/meetings">View all →</a>
+      </div>
+      <% if (!recent || !recent.length) { %>
+        <p class="muted">No meetings yet. Install the extension and save your first call.</p>
+      <% } else { %>
+        <div class="meeting-groups" style="padding:0">
+          <% recent.forEach(function(m) { %>
+            <a class="meeting-row" href="/meetings/<%= m.externalId %>" style="border:1px solid #ebe7f2;margin-bottom:8px;border-radius:12px">
+              <div class="meeting-dur">
+                <strong><%= Math.max(1, Math.round((m.duration || 0) / 60)) %>m</strong>
+                <span><%= m.startedAt ? new Date(m.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %></span>
+              </div>
+              <div class="meeting-avatar"><%= (m.title || 'M').charAt(0).toUpperCase() %></div>
+              <div class="meeting-body">
+                <strong><%= m.title || 'Untitled meeting' %></strong>
+                <span class="participants"><%= m.platform || 'Manual' %><% if (m.ai && m.ai.summary) { %> · ✦ AI summary ready<% } %></span>
+              </div>
+            </a>
+          <% }) %>
+        </div>
+      <% } %>
+    </section>
+
+    <% if (!u.isPaid) { %>
+    <section class="card section-card upgrade-banner" style="margin: 0 28px 24px;">
+      <div>
+        <h2>Unlock AI Insights &amp; Ask AI</h2>
+        <p class="muted">Pro includes unlimited meetings, action items, and cross-meeting insights.</p>
+      </div>
+      <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
+    </section>
+    <% } %>
+  </div>
+</div>
+<%- include("partials/footer") %>

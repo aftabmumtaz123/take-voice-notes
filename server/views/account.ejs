@@ -1,10 +1,37 @@
-<%- include("partials/header", { title: "API key", bodyClass: "app-shell" }) %>
+<%- include("partials/header", { title: "Account & Settings", bodyClass: "app-shell" }) %>
+<% const u = typeof usage !== 'undefined' && usage ? usage : {}; %>
 <div class="shell">
-  <%- include("partials/sidebar", { user, activeNav: "account" }) %>
+  <%- include("partials/sidebar", { user, activeNav: "account", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
   <div class="main">
-    <header class="main-top"><h1>Account &amp; API key</h1></header>
+    <header class="main-top">
+      <h1>Account &amp; Settings</h1>
+    </header>
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+
+    <section class="card section-card">
+      <h2>Profile</h2>
+      <div class="profile-grid">
+        <div class="avatar lg"><%= (user.displayName || user.username || '?').charAt(0).toUpperCase() %></div>
+        <div>
+          <p><strong><%= user.displayName || user.username %></strong>
+            <span class="user-plan-badge <%= u.isPaid ? 'paid' : 'free' %>"><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></span>
+          </p>
+          <p class="muted">@<%= user.username %></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card section-card">
+      <h2>Subscription</h2>
+      <p>Current plan: <strong><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></strong></p>
+      <p class="muted"><%= u.meetingsUsed || 0 %> / <%= (u.meetingsMax >= 9999) ? '∞' : (u.meetingsMax || 5) %> meetings this month</p>
+      <p style="margin-top:12px">
+        <a class="btn-primary" href="/app/usage">Usage &amp; plan details</a>
+        <a class="btn-ghost" href="/#pricing">View pricing</a>
+      </p>
+    </section>
+
     <section class="card section-card">
       <h2>Extension API key</h2>
       <p class="muted">Paste this into the Chrome extension. The extension only needs this key and the server URL.</p>
@@ -16,6 +43,17 @@
         <button type="submit" class="btn-danger">Rotate key</button>
       </form>
     </section>
+
+    <section class="card section-card">
+      <h2>Integrations</h2>
+      <ul class="feature-check">
+        <li>✓ Google Meet — via Chrome extension</li>
+        <li>✓ Zoom — via Chrome extension</li>
+        <li>✓ Microsoft Teams — via Chrome extension</li>
+      </ul>
+      <p style="margin-top:12px"><a class="btn-ghost" href="/install">Install guide →</a></p>
+    </section>
+
     <section class="card section-card">
       <h2>Extension setup</h2>
       <ol class="steps">
@@ -27,4 +65,10 @@
     </section>
   </div>
 </div>
+<script>
+  document.getElementById('copyKey')?.addEventListener('click', async () => {
+    const t = document.getElementById('apiKey')?.textContent || '';
+    try { await navigator.clipboard.writeText(t); } catch (_) {}
+  });
+</script>
 <%- include("partials/footer") %>

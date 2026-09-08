@@ -1,10 +1,102 @@
 /**
  * Auth: username + passkey, session cookies for web, API keys for the extension.
+ * Roles: user | admin. Plans: free / paid SaaS tiers.
  */
 import crypto from "node:crypto";
 import mongoose from "mongoose";
 
 const SCRYPT_OPTS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+
+const planSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  priceMonthly: { type: Number, default: 0 },
+  currency: { type: String, default: "USD" },
+  description: { type: String, default: "" },
+  features: { type: [String], default: [] },
+  maxMeetingsPerMonth: { type: Number, default: 20 },
+  isActive: { type: Boolean, default: true },
+  sortOrder: { type: Number, default: 0 }
+}, { timestamps: true });
+
+export const Plan = mongoose.models.Plan || mongoose.model("Plan", planSchema);
+
+const siteSettingsSchema = new mongoose.Schema({
+  key: { type: String, unique: true, default: "site" },
+  siteName: { type: String, default: "AI Note Taker" },
+  tagline: { type: String, default: "Focus on the meeting, let AI handle the notes." },
+  authSubtitle: {
+    type: String,
+    default: "Turn meeting conversations into actionable outcomes. Log in or sign up to access transcripts, AI summaries, and workflows."
+  },
+  footerText: { type: String, default: "The easiest way to transcribe, summarize, and act on meetings." },
+  footerLinks: [{
+    label: { type: String, default: "" },
+    url: { type: String, default: "" }
+  }],
+  supportEmail: { type: String, default: "" },
+  copyrightText: { type: String, default: "" }
+}, { timestamps: true });
+
+export const SiteSettings = mongoose.models.SiteSettings || mongoose.model("SiteSettings", siteSettingsSchema);
+
+const DEFAULT_FOOTER_LINKS = [
+  { label: "Product", url: "/#features" },
+  { label: "Pricing", url: "/#pricing" },
+  { label: "Security", url: "/#security" },
+  { label: "Log in", url: "/login" },
+  { label: "Sign up", url: "/register" }
+];
+
+export async function getSiteSettings() {
+  let doc = await SiteSettings.findOne({ key: "site" }).lean();
+  if (!doc) {
+    const created = await SiteSettings.create({
+      key: "site",
+      siteName: "AI Note Taker",
+      tagline: "Focus on the meeting, let AI handle the notes.",
+      authSubtitle: "Turn meeting conversations into actionable outcomes. Log in or sign up to access transcripts, AI summaries, and workflows.",
+      footerText: "The easiest way to transcribe, summarize, and act on meetings.",
+      footerLinks: DEFAULT_FOOTER_LINKS,
+      supportEmail: "",
+      copyrightText: ""
+    });
+    doc = created.toObject();
+  }
+  if (!doc.footerLinks || !doc.footerLinks.length) {
+    doc.footerLinks = DEFAULT_FOOTER_LINKS;
+  }
+  return doc;
+}
+
+export async function updateSiteSettings(payload = {}) {
+  const footerLinks = Array.isArray(payload.footerLinks)
+    ? payload.footerLinks
+        .map((l) => ({
+          label: String(l.label || "").trim().slice(0, 60),
+          url: String(l.url || "").trim().slice(0, 500)
+        }))
+        .filter((l) => l.label && l.url)
+        .slice(0, 20)
+    : undefined;
+
+  const $set = {
+    siteName: String(payload.siteName || "AI Note Taker").slice(0, 80),
+    tagline: String(payload.tagline || "").slice(0, 200),
+    authSubtitle: String(payload.authSubtitle || "").slice(0, 400),
+    footerText: String(payload.footerText || "").slice(0, 300),
+    supportEmail: String(payload.supportEmail || "").slice(0, 120),
+    copyrightText: String(payload.copyrightText || "").slice(0, 120)
+  };
+  if (footerLinks) $set.footerLinks = footerLinks;
+
+  const doc = await SiteSettings.findOneAndUpdate(
+    { key: "site" },
+    { $set },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+  ).lean();
+  return doc;
+}
 
 const userSchema = new mongoose.Schema({
   username: {
@@ -19,7 +111,17 @@ const userSchema = new mongoose.Schema({
   passkeyHash: { type: String, required: true },
   passkeySalt: { type: String, required: true },
   displayName: { type: String, default: "" },
+  role: { type: String, enum: ["user", "admin"], default: "user", index: true },
+  planId: { type: mongoose.Schema.Types.ObjectId, ref: "Plan", default: null },
+  planSlug: { type: String, default: "free" },
   apiKey: { type: String, unique: true, sparse: true, index: true },
+  isActive: { type: Boolean, default: true },
+  onboardingCompleted: { type: Boolean, default: false },
+  onboarding: {
+    useCase: { type: String, default: "" },
+    heardFrom: { type: String, default: "" },
+    completedAt: Date
+  },
   sessions: [{
     tokenHash: String,
     createdAt: { type: Date, default: Date.now },
@@ -66,10 +168,35 @@ export function publicUser(user) {
     id: user._id.toString(),
     username: user.username,
     displayName: user.displayName || user.username,
+    role: user.role || "user",
+    planSlug: user.planSlug || "free",
+    planId: user.planId ? user.planId.toString() : null,
     apiKey: user.apiKey || null,
+    isActive: user.isActive !== false,
+    onboardingCompleted: Boolean(user.onboardingCompleted),
+    onboarding: user.onboarding || null,
     createdAt: user.createdAt
   };
 }
+
+export function postLoginRedirect(user) {
+  if (user?.role === "admin") return "/admin";
+  if (user && !user.onboardingCompleted) return "/onboarding";
+  return "/app/overview";
+}
+
+export function isPaidPlan(slug) {
+  const s = String(slug || "free").toLowerCase();
+  return s !== "free" && s !== "";
+}
+
+export function planBadgeLabel(slug) {
+  const s = String(slug || "free").toLowerCase();
+  if (s === "team" || s === "premium" || s === "business") return "PREMIUM";
+  if (s === "pro") return "PRO";
+  return "FREE";
+}
+
 
 export async function registerUser({ username, passkey, displayName = "" }) {
   const err = validateCredentials(username, passkey);
@@ -78,12 +205,16 @@ export async function registerUser({ username, passkey, displayName = "" }) {
   if (await User.findOne({ username: u })) {
     throw Object.assign(new Error("Username is already taken."), { status: 409 });
   }
+  const freePlan = await Plan.findOne({ slug: "free", isActive: true }).lean();
   const salt = crypto.randomBytes(16);
   const user = await User.create({
     username: u,
     passkeyHash: hashPasskey(passkey, salt),
     passkeySalt: salt.toString("hex"),
     displayName: String(displayName || u).slice(0, 80),
+    role: "user",
+    planId: freePlan?._id || null,
+    planSlug: freePlan?.slug || "free",
     apiKey: `ntk_${crypto.randomBytes(24).toString("base64url")}`
   });
   const session = await createSession(user, "web");
@@ -95,6 +226,7 @@ export async function loginUser({ username, passkey, label = "web" }) {
   if (err) throw Object.assign(new Error(err), { status: 400 });
   const user = await User.findOne({ username: normalizeUsername(username) });
   if (!user) throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
+  if (user.isActive === false) throw Object.assign(new Error("Account is disabled."), { status: 403 });
   const salt = Buffer.from(user.passkeySalt, "hex");
   const attempt = hashPasskey(passkey, salt);
   const ok = crypto.timingSafeEqual(Buffer.from(attempt, "hex"), Buffer.from(user.passkeyHash, "hex"));
@@ -117,7 +249,8 @@ async function createSession(user, label = "web") {
     expiresAt: expiresAt.toISOString(),
     userId: user._id.toString(),
     username: user.username,
-    apiKey: user.apiKey
+    apiKey: user.apiKey,
+    role: user.role || "user"
   };
 }
 
@@ -155,14 +288,16 @@ export async function resolveUser(req) {
   if (token.startsWith("ntk_") || apiKeyHeader) {
     const key = apiKeyHeader || token;
     const user = await User.findOne({ apiKey: key });
-    return user ? publicUser(user) : null;
+    if (!user || user.isActive === false) return null;
+    return publicUser(user);
   }
 
   const user = await User.findOne({
     "sessions.tokenHash": hashToken(token),
     "sessions.expiresAt": { $gt: new Date() }
   });
-  return user ? publicUser(user) : null;
+  if (!user || user.isActive === false) return null;
+  return publicUser(user);
 }
 
 function wantsHtml(req) {
@@ -176,6 +311,24 @@ export async function requireAuth(req, res, next) {
     if (!user) {
       if (wantsHtml(req)) return res.redirect("/login");
       return res.status(401).json({ ok: false, error: "Not authenticated.", code: "AUTH_REQUIRED" });
+    }
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+export async function requireAdmin(req, res, next) {
+  try {
+    const user = await resolveUser(req);
+    if (!user) {
+      if (wantsHtml(req)) return res.redirect("/login");
+      return res.status(401).json({ ok: false, error: "Not authenticated." });
+    }
+    if (user.role !== "admin") {
+      if (wantsHtml(req)) return res.redirect("/app");
+      return res.status(403).json({ ok: false, error: "Admin access required." });
     }
     req.user = user;
     next();
@@ -198,4 +351,77 @@ export function setSessionCookie(res, token) {
 
 export function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "note_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+}
+
+
+export async function completeOnboarding(userId, { useCase = "", heardFrom = "" } = {}) {
+  const user = await User.findById(userId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  user.onboarding = {
+    useCase: String(useCase || "").slice(0, 80),
+    heardFrom: String(heardFrom || "").slice(0, 120),
+    completedAt: new Date()
+  };
+  user.onboardingCompleted = true;
+  await user.save();
+  return publicUser(user);
+}
+
+/** Seed default plans + first admin (admin / admin123) if missing */
+export async function seedDefaults() {
+  const planCount = await Plan.countDocuments();
+  if (planCount === 0) {
+    await Plan.insertMany([
+      {
+        name: "Free",
+        slug: "free",
+        priceMonthly: 0,
+        description: "Get started with live transcription and basic AI summaries.",
+        features: ["Live meeting transcription", "AI summary", "5 meetings / month", "Chrome extension"],
+        maxMeetingsPerMonth: 5,
+        isActive: true,
+        sortOrder: 0
+      },
+      {
+        name: "Pro",
+        slug: "pro",
+        priceMonthly: 12,
+        description: "Unlimited notes, richer AI insights, and priority support.",
+        features: ["Unlimited meetings", "Detailed AI analysis", "Action items & chat", "Export PDF / MD / TXT", "Favourites & archive"],
+        maxMeetingsPerMonth: 9999,
+        isActive: true,
+        sortOrder: 1
+      },
+      {
+        name: "Team",
+        slug: "team",
+        priceMonthly: 29,
+        description: "For teams that need shared workspaces and admin controls.",
+        features: ["Everything in Pro", "Team seats", "Admin dashboard", "Priority support"],
+        maxMeetingsPerMonth: 9999,
+        isActive: true,
+        sortOrder: 2
+      }
+    ]);
+    console.log("[seed] Default plans created (free, pro, team)");
+  }
+
+  const admin = await User.findOne({ username: "admin" });
+  if (!admin) {
+    const freePlan = await Plan.findOne({ slug: "free" });
+    const salt = crypto.randomBytes(16);
+    await User.create({
+      username: "admin",
+      passkeyHash: hashPasskey("admin123", salt),
+      passkeySalt: salt.toString("hex"),
+      displayName: "Administrator",
+      role: "admin",
+      planId: freePlan?._id || null,
+      planSlug: "team",
+      apiKey: `ntk_${crypto.randomBytes(24).toString("base64url")}`
+    });
+    console.log("[seed] Admin user created — username: admin / passkey: admin123");
+  }
+
+  await getSiteSettings();
 }

@@ -1,14 +1,14 @@
 <%- include("partials/header", { title: meeting.title || "Meeting", bodyClass: "app-shell" }) %>
-<% const ai = meeting.ai || {}; %>
+<% const ai = meeting.ai || {}; const u = typeof usage !== 'undefined' && usage ? usage : { isPaid: false }; const mins = Math.max(0, Math.round((meeting.duration || 0) / 60)); %>
 <div class="shell">
-  <%- include("partials/sidebar", { user, activeNav: "meetings" }) %>
+  <%- include("partials/sidebar", { user, activeNav: "meetings", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
   <div class="main">
     <header class="main-top">
-      <a class="back" href="/">← My Meetings</a>
+      <a class="back" href="/app/meetings">← Back to My Meetings</a>
       <div class="main-actions">
         <form method="POST" action="/meetings/<%= meeting.externalId %>/favorite" style="display:inline">
           <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
-          <button type="submit" class="btn-ghost <%= meeting.isFavorite ? 'is-fav' : '' %>"><%= meeting.isFavorite ? '★ Favourited' : '☆ Favourite' %></button>
+          <button type="submit" class="btn-ghost"><%= meeting.isFavorite ? '★ Favourited' : '☆ Favourite' %></button>
         </form>
         <form method="POST" action="/meetings/<%= meeting.externalId %>/archive" style="display:inline">
           <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
@@ -17,12 +17,11 @@
         <form method="POST" action="/meetings/<%= meeting.externalId %>/delete" style="display:inline" onsubmit="return confirm('Delete this meeting permanently?');">
           <button type="submit" class="btn-danger">Delete</button>
         </form>
-        <a class="btn-primary" href="/meetings/<%= meeting.externalId %>/export.pdf" target="_blank">Export PDF</a>
-        <a class="btn-ghost" href="/meetings/<%= meeting.externalId %>/export.txt">Export TXT</a>
-        <a class="btn-ghost" href="/meetings/<%= meeting.externalId %>/export.md">Export MD</a>
-        <form method="POST" action="/meetings/<%= meeting.externalId %>/analyze" style="display:inline">
-          <button type="submit" class="btn-ghost">Retry analysis</button>
-        </form>
+        <% if (u.isPaid) { %>
+          <a class="btn-primary" href="/meetings/<%= meeting.externalId %>/export.pdf" target="_blank">Export PDF</a>
+        <% } else { %>
+          <a class="btn-ghost" href="/app/usage" title="Pro feature">Export ✦ PRO</a>
+        <% } %>
       </div>
     </header>
 
@@ -31,62 +30,41 @@
       <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
       <p class="meta">
         <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
-        · <%= Math.max(0, Math.round((meeting.duration || 0) / 60)) %> min
-        · <%= ai.summary ? 'AI summary ready' : 'Transcript saved' %>
+        · <%= mins %> minutes
+        · <%= ai.summary ? '✦ AI summary ready' : 'Transcript saved' %>
       </p>
+      <div class="feature-pills">
+        <span class="fpill">✓ Transcript</span>
+        <span class="fpill">✓ AI Summary</span>
+        <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Action Items</span>
+        <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Ask AI</span>
+      </div>
     </div>
 
     <div class="tabs" data-tabs>
       <button type="button" class="tab active" data-tab="summary">AI Summary</button>
       <button type="button" class="tab" data-tab="transcript">Transcript</button>
-      <button type="button" class="tab" data-tab="chat">AI Chat</button>
+      <button type="button" class="tab" data-tab="actions">Action Items</button>
+      <button type="button" class="tab" data-tab="chat">Ask AI<%= u.isPaid ? '' : ' · PRO' %></button>
       <button type="button" class="tab" data-tab="notes">Notes</button>
     </div>
 
     <div class="tab-panel active" data-panel="summary">
       <section class="card section-card">
-        <h2>Executive summary</h2>
-        <p><%= ai.summary || "No summary yet. Use Retry analysis." %></p>
+        <h2>Overview</h2>
+        <p><%= ai.summary || "No summary yet. Use Retry analysis from the menu or re-save from the extension." %></p>
       </section>
       <section class="card section-card">
-        <h2>Detailed summary</h2>
-        <p class="long"><%= ai.detailedSummary || ai.summary || "—" %></p>
+        <h2>Key decisions</h2>
+        <% if (ai.decisions && ai.decisions.length) { %><ul><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
       </section>
       <section class="card section-card">
         <h2>Key points</h2>
         <% if (ai.keyPoints && ai.keyPoints.length) { %><ul><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
       </section>
-      <section class="card section-card">
-        <h2>Decisions</h2>
-        <% if (ai.decisions && ai.decisions.length) { %><ul><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
-      </section>
-      <section class="card section-card">
-        <h2>Action items</h2>
-        <% if (ai.actionItems && ai.actionItems.length) { %>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
-            <tbody>
-              <% ai.actionItems.forEach(function(a){ %>
-                <tr><td><%= a.task %></td><td><%= a.owner || "—" %></td><td><%= a.deadline || "—" %></td></tr>
-              <% }) %>
-            </tbody>
-          </table></div>
-        <% } else { %><p class="muted">None identified.</p><% } %>
-      </section>
-      <section class="card section-card">
-        <h2>Topics</h2>
-        <div class="chips"><% (ai.topics || []).forEach(function(t){ %><span class="chip"># <%= t %></span><% }) %></div>
-      </section>
-      <section class="card section-card">
-        <h2>Open questions</h2>
-        <% if (ai.openQuestions && ai.openQuestions.length) { %><ul><% ai.openQuestions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None.</p><% } %>
-      </section>
-      <section class="card section-card">
-        <h2>Risks / follow-ups</h2>
-        <% if (ai.risks && ai.risks.length) { %><ul><% ai.risks.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } %>
-        <% if (ai.followUps && ai.followUps.length) { %><ul><% ai.followUps.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } %>
-        <% if (!(ai.risks && ai.risks.length) && !(ai.followUps && ai.followUps.length)) { %><p class="muted">None.</p><% } %>
-      </section>
+      <form method="POST" action="/meetings/<%= meeting.externalId %>/analyze" style="margin-top:8px">
+        <button type="submit" class="btn-ghost">Retry analysis</button>
+      </form>
     </div>
 
     <div class="tab-panel" data-panel="transcript">
@@ -96,14 +74,50 @@
       </section>
     </div>
 
+    <div class="tab-panel" data-panel="actions">
+      <section class="card section-card">
+        <h2>Action items</h2>
+        <% if (!u.isPaid) { %>
+          <div class="pro-gate inline">
+            <p>✦ Detailed action items are a <strong>Pro</strong> feature.</p>
+            <a class="btn-primary" href="/#pricing">Upgrade</a>
+          </div>
+        <% } %>
+        <% if (ai.actionItems && ai.actionItems.length) { %>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+            <tbody>
+              <% ai.actionItems.forEach(function(a){ %>
+                <tr><td>☐ <%= a.task %></td><td><%= a.owner || "—" %></td><td><%= a.deadline || "—" %></td></tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %><p class="muted">None identified yet.</p><% } %>
+      </section>
+    </div>
+
     <div class="tab-panel" data-panel="chat">
       <section class="card section-card chat-card">
-        <p class="muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
-        <div id="chatHistory" class="chat-history"></div>
-        <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">
-          <input id="chatInput" type="text" placeholder="What were the main decisions?" autocomplete="off" />
-          <button type="submit" class="btn-primary">Ask AI</button>
-        </form>
+        <% if (!u.isPaid) { %>
+          <div class="pro-gate">
+            <h2>✦ Ask AI — PRO</h2>
+            <p>Ask anything about this meeting transcript and summary.</p>
+            <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
+          </div>
+        <% } else { %>
+          <p class="muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
+          <div class="ask-suggestions">
+            <button type="button" class="chip ask-sugg" data-q="What were the key decisions?">What were the key decisions?</button>
+            <button type="button" class="chip ask-sugg" data-q="What action items were assigned?">What action items were assigned?</button>
+            <button type="button" class="chip ask-sugg" data-q="Give me a 5-bullet summary">Give me a 5-bullet summary</button>
+            <button type="button" class="chip ask-sugg" data-q="What did we discuss about next steps?">What about next steps?</button>
+          </div>
+          <div id="chatHistory" class="chat-history"></div>
+          <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">
+            <input id="chatInput" type="text" placeholder="Ask anything about this meeting…" autocomplete="off" />
+            <button type="submit" class="btn-primary">Ask AI</button>
+          </form>
+        <% } %>
       </section>
     </div>
 
@@ -117,4 +131,12 @@
     </div>
   </div>
 </div>
+<script>
+  document.querySelectorAll('.ask-sugg').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('chatInput');
+      if (input) { input.value = btn.getAttribute('data-q'); input.focus(); }
+    });
+  });
+</script>
 <%- include("partials/footer") %>

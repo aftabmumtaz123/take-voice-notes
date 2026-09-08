@@ -1,0 +1,68 @@
+<%- include("partials/header", { title: "Usage & Plan", bodyClass: "app-shell" }) %>
+<%
+  const u = usage || {};
+  const maxM = u.meetingsMax || 5;
+  const pctM = maxM >= 9999 ? 5 : Math.min(100, Math.round(((u.meetingsUsed||0)/maxM)*100));
+%>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "usage", settings, usage, q: "" }) %>
+  <div class="main tactiq-main">
+    <header class="main-top page-head">
+      <div>
+        <h1>Usage &amp; Plan</h1>
+        <p class="admin-sub">Track limits and manage your subscription.</p>
+      </div>
+    </header>
+
+    <section class="card section-card" style="margin: 0 28px 16px;">
+      <div class="section-head">
+        <div>
+          <h2><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></h2>
+          <p class="muted"><%= u.isPaid ? 'Active subscription' : 'Free plan · limited monthly meetings' %></p>
+        </div>
+        <% if (u.isPaid) { %>
+          <a class="btn-ghost" href="/#pricing">Manage subscription</a>
+        <% } else { %>
+          <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
+        <% } %>
+      </div>
+      <% if (plan && plan.features && plan.features.length) { %>
+        <ul class="feature-check">
+          <% plan.features.forEach(function(f) { %><li>✓ <%= f %></li><% }) %>
+        </ul>
+      <% } %>
+    </section>
+
+    <section class="card section-card" style="margin: 0 28px 16px;">
+      <h2>Monthly usage</h2>
+      <div class="usage-block">
+        <div class="usage-row">
+          <div class="plan-dist-meta"><strong>Meetings</strong><span><%= u.meetingsUsed || 0 %> / <%= maxM >= 9999 ? '∞' : maxM %></span></div>
+          <div class="plan-dist-bar"><div style="width:<%= pctM %>%"></div></div>
+        </div>
+        <div class="usage-row">
+          <div class="plan-dist-meta"><strong>AI Notes</strong><span><%= u.aiNotes || 0 %> generated</span></div>
+          <div class="plan-dist-bar"><div style="width:<%= Math.min(100, (u.aiNotes||0)*5) %>%"></div></div>
+        </div>
+        <div class="usage-row">
+          <div class="plan-dist-meta"><strong>Transcription</strong><span><%= u.transcriptionMinutes || 0 %> min</span></div>
+          <div class="plan-dist-bar"><div style="width:<%= Math.min(100, (u.transcriptionMinutes||0)) %>%"></div></div>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:14px">Your limits reset in <strong><%= daysLeft || 30 %></strong> days.</p>
+    </section>
+
+    <section class="card section-card" style="margin: 0 28px 24px;">
+      <h2>Feature access</h2>
+      <table class="feature-table">
+        <tr><td>Transcript</td><td>✓ Included</td></tr>
+        <tr><td>AI Summary</td><td>✓ Included</td></tr>
+        <tr><td>Action Items</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
+        <tr><td>Ask AI</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
+        <tr><td>AI Insights</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
+        <tr><td>Export PDF / MD</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
+      </table>
+    </section>
+  </div>
+</div>
+<%- include("partials/footer") %>

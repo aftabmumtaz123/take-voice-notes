@@ -1,17 +1,54 @@
-<%- include("partials/header", { title: "Register" }) %>
-<div class="auth-page">
-  <div class="auth-card">
-    <div class="auth-brand"><span class="logo">✦</span><h1>Create account</h1></div>
-    <p class="lead">Username is unique. You will receive an API key for the Chrome extension.</p>
-    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
-    <form method="POST" action="/register" class="form">
-      <label>Username<input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" /></label>
-      <label>Display name <span class="opt">(optional)</span><input name="displayName" maxlength="80" /></label>
-      <label>Passkey<input name="passkey" type="password" required minlength="6" /></label>
-      <label>Confirm passkey<input name="passkey2" type="password" required minlength="6" /></label>
-      <button type="submit" class="btn-primary">Create account</button>
-    </form>
-    <p class="muted center">Already have an account? <a href="/login">Log in</a></p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign up · <%= (settings && settings.siteName) || 'AI Note Taker' %></title>
+  <link rel="stylesheet" href="/public/auth.css" />
+</head>
+<body class="auth-body">
+  <div class="auth-shell">
+    <a class="auth-logo" href="/">
+      <span class="mark">✦</span>
+      <strong><%= (settings && settings.siteName) || 'AI Note Taker' %></strong>
+    </a>
+
+    <h1>Create your account</h1>
+    <p class="auth-sub">
+      <%= (settings && settings.authSubtitle) || 'Turn meeting conversations into actionable outcomes. Sign up to access transcripts, AI summaries, and workflows.' %>
+    </p>
+
+    <div class="auth-panel">
+      <% if (error) { %><div class="auth-error"><%= error %></div><% } %>
+      <% if (success) { %><div class="auth-ok"><%= success %></div><% } %>
+
+      <form method="POST" action="/register" class="auth-form">
+        <label class="field">
+          <span class="field-ico">@</span>
+          <input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" placeholder="username" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span class="field-ico">Aa</span>
+          <input name="displayName" maxlength="80" placeholder="Display name (optional)" autocomplete="name" />
+        </label>
+        <label class="field">
+          <span class="field-ico">•</span>
+          <input name="passkey" type="password" required minlength="6" placeholder="Passkey (min 6 characters)" autocomplete="new-password" />
+        </label>
+        <label class="field">
+          <span class="field-ico">•</span>
+          <input name="passkey2" type="password" required minlength="6" placeholder="Confirm passkey" autocomplete="new-password" />
+        </label>
+        <button type="submit" class="auth-submit">Create account</button>
+      </form>
+
+      <div class="auth-divider"><span>Already registered?</span></div>
+      <a class="auth-secondary" href="/login">Log in instead</a>
+      <p class="auth-legal">
+        You will get an API key for the Chrome extension after sign-up.
+        <a href="/">Back to home</a>
+      </p>
+    </div>
   </div>
-</div>
-<%- include("partials/footer") %>
+</body>
+</html>

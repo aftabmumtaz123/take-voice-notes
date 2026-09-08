@@ -9,11 +9,22 @@ import {
   loginUser,
   logoutUser,
   requireAuth,
+  requireAdmin,
   optionalAuth,
   resolveUser,
   setSessionCookie,
   clearSessionCookie,
-  rotateApiKey
+  rotateApiKey,
+  postLoginRedirect,
+  seedDefaults,
+  User,
+  Plan,
+  publicUser,
+  getSiteSettings,
+  updateSiteSettings,
+  completeOnboarding,
+  isPaidPlan,
+  planBadgeLabel
 } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -485,31 +496,166 @@ function buildMeetingExportText(meeting) {
 
 // ─── Web (EJS) ──────────────────────────────────────────────────────
 app.get('/', optionalAuth, async (req, res) => {
-  if (!req.user) return res.redirect('/login');
-  try {
-    const q = String(req.query.q || '').trim();
-    const view = String(req.query.view || 'all').toLowerCase();
-    const filter = { userId: req.user.id };
-    if (view === 'favorites') {
-      filter.isFavorite = true;
-      filter.isArchived = { $ne: true };
-    } else if (view === 'archived') {
-      filter.isArchived = true;
-    } else {
-      filter.isArchived = { $ne: true };
+  // Logged-in users go to their app / admin; guests see the marketing landing page
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const [plans, settings] = await Promise.all([
+    Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => []),
+    getSiteSettings().catch(() => null)
+  ]);
+  res.render('landing', { user: null, plans, settings, error: null, success: null });
+});
+
+
+async function loadUserPlanContext(user) {
+  const plan = await Plan.findOne({ slug: user.planSlug || 'free' }).lean().catch(() => null);
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const usedThisMonth = await Meeting.countDocuments({
+    userId: user.id,
+    createdAt: { $gte: monthStart }
+  }).catch(() => 0);
+  const aiThisMonth = await Meeting.countDocuments({
+    userId: user.id,
+    createdAt: { $gte: monthStart },
+    'ai.summary': { $exists: true, $ne: '' }
+  }).catch(() => 0);
+  const durationSec = await Meeting.aggregate([
+    { $match: { userId: user.id, createdAt: { $gte: monthStart } } },
+    { $group: { _id: null, total: { $sum: '$duration' } } }
+  ]).then((r) => r[0]?.total || 0).catch(() => 0);
+  const maxMeetings = plan?.maxMeetingsPerMonth || 5;
+  const remainingPct = maxMeetings >= 9999
+    ? 100
+    : Math.max(0, Math.round((1 - usedThisMonth / maxMeetings) * 100));
+  return {
+    plan,
+    usage: {
+      meetingsUsed: usedThisMonth,
+      meetingsMax: maxMeetings,
+      aiNotes: aiThisMonth,
+      transcriptionMinutes: Math.round(durationSec / 60),
+      remainingPct,
+      isPaid: isPaidPlan(user.planSlug),
+      badge: planBadgeLabel(user.planSlug)
     }
-    if (q) filter.$text = { $search: q };
-    const meetings = await Meeting.find(filter).sort({ startedAt: -1 }).limit(100).lean();
-    const success = req.query.success ? String(req.query.success) : null;
-    res.render('home', { user: req.user, meetings, q, view, error: null, success });
+  };
+}
+
+
+app.get('/app', requireAuth, (req, res) => res.redirect('/app/overview'));
+
+app.get('/app/overview', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role === 'admin') {
+      // admins can still view user overview
+    }
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const recent = await Meeting.find({ userId: req.user.id, isArchived: { $ne: true } })
+      .sort({ startedAt: -1 }).limit(5).lean();
+    const hour = new Date().getHours();
+    const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+    res.render('overview', {
+      user: req.user,
+      settings,
+      plan: ctx.plan,
+      usage: ctx.usage,
+      recent,
+      greet,
+      error: null,
+      success: null
+    });
   } catch (error) {
-    res.status(500).render('home', { user: req.user, meetings: [], q: '', view: 'all', error: error.message, success: null });
+    res.status(500).render('overview', {
+      user: req.user, settings: null, plan: null,
+      usage: { meetingsUsed: 0, meetingsMax: 5, aiNotes: 0, remainingPct: 100, isPaid: false, badge: 'FREE' },
+      recent: [], greet: 'Hello', error: error.message, success: null
+    });
   }
 });
 
-app.get('/login', optionalAuth, (req, res) => {
-  if (req.user) return res.redirect('/');
-  res.render('login', { user: null, error: null, success: null, formUsername: '' });
+app.get('/app/meetings', requireAuth, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const view = String(req.query.view || 'all');
+    const filter = { userId: req.user.id };
+    if (view === 'favorites') filter.isFavorite = true;
+    else if (view === 'archived') filter.isArchived = true;
+    else filter.isArchived = { $ne: true };
+    if (q) {
+      filter.$or = [
+        { title: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { platform: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+      ];
+    }
+    const meetings = await Meeting.find(filter).sort({ startedAt: -1 }).limit(100).lean();
+    const success = req.query.success ? String(req.query.success) : null;
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    res.render('home', {
+      user: req.user, meetings, q, view, error: null, success, settings,
+      plan: ctx.plan, usage: ctx.usage
+    });
+  } catch (error) {
+    res.status(500).render('home', {
+      user: req.user, meetings: [], q: '', view: 'all', error: error.message, success: null,
+      settings: null, plan: null, usage: { meetingsUsed: 0, meetingsMax: 5, remainingPct: 100, isPaid: false, badge: 'FREE' }
+    });
+  }
+});
+
+app.get('/app/insights', requireAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(req.user);
+  const weekStart = new Date();
+  weekStart.setDate(weekStart.getDate() - 7);
+  weekStart.setHours(0,0,0,0);
+  const meetings = await Meeting.find({
+    userId: req.user.id,
+    startedAt: { $gte: weekStart }
+  }).lean().catch(() => []);
+  const totalMin = Math.round(meetings.reduce((s, m) => s + (m.duration || 0), 0) / 60);
+  let actionItems = 0;
+  const topics = {};
+  for (const m of meetings) {
+    const items = m.ai?.actionItems || [];
+    actionItems += items.length;
+    const title = (m.title || 'Other').split(' ').slice(0, 3).join(' ');
+    topics[title] = (topics[title] || 0) + 1;
+  }
+  const topicList = Object.entries(topics).sort((a,b) => b[1]-a[1]).slice(0, 6);
+  res.render('insights', {
+    user: req.user, settings, plan: ctx.plan, usage: ctx.usage,
+    insights: {
+      meetings: meetings.length,
+      totalMin,
+      actionItems,
+      decisions: Math.round(actionItems * 0.6),
+      topics: topicList,
+      isPaid: ctx.usage.isPaid
+    },
+    error: null, success: null
+  });
+});
+
+app.get('/app/usage', requireAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(req.user);
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const daysLeft = Math.max(1, Math.ceil((end - now) / 86400000));
+  res.render('usage', {
+    user: req.user, settings, plan: ctx.plan, usage: ctx.usage, daysLeft,
+    error: null, success: null
+  });
+});
+
+
+app.get('/login', optionalAuth, async (req, res) => {
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('login', { user: null, error: null, success: null, formUsername: '', settings });
 });
 
 app.post('/login', async (req, res) => {
@@ -520,26 +666,30 @@ app.post('/login', async (req, res) => {
       label: 'web'
     });
     setSessionCookie(res, result.token);
-    res.redirect('/account?welcome=1');
+    res.redirect(postLoginRedirect(result.user));
   } catch (error) {
+    const settings = await getSiteSettings().catch(() => null);
     res.status(error.status || 400).render('login', {
       user: null,
       error: error.message,
       success: null,
-      formUsername: req.body.username || ''
+      formUsername: req.body.username || '',
+      settings
     });
   }
 });
 
-app.get('/register', optionalAuth, (req, res) => {
-  if (req.user) return res.redirect('/');
-  res.render('register', { user: null, error: null, success: null });
+app.get('/register', optionalAuth, async (req, res) => {
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('register', { user: null, error: null, success: null, settings });
 });
 
 app.post('/register', async (req, res) => {
   try {
     if (String(req.body.passkey || '') !== String(req.body.passkey2 || '')) {
-      return res.status(400).render('register', { user: null, error: 'Passkeys do not match.', success: null });
+      const settings = await getSiteSettings().catch(() => null);
+      return res.status(400).render('register', { user: null, error: 'Passkeys do not match.', success: null, settings });
     }
     const result = await registerUser({
       username: req.body.username,
@@ -547,9 +697,10 @@ app.post('/register', async (req, res) => {
       displayName: req.body.displayName
     });
     setSessionCookie(res, result.token);
-    res.redirect('/account?welcome=1');
+    res.redirect(postLoginRedirect(result.user));
   } catch (error) {
-    res.status(error.status || 400).render('register', { user: null, error: error.message, success: null });
+    const settings = await getSiteSettings().catch(() => null);
+    res.status(error.status || 400).render('register', { user: null, error: error.message, success: null, settings });
   }
 });
 
@@ -558,20 +709,459 @@ app.get('/logout', async (req, res) => {
   const token = cookie ? decodeURIComponent(cookie.split('=')[1]) : '';
   await logoutUser(token);
   clearSessionCookie(res);
-  res.redirect('/login');
+  res.redirect('/');
 });
 
-app.get('/account', requireAuth, (req, res) => {
+app.get('/onboarding', requireAuth, async (req, res) => {
+  if (req.user.role === 'admin') return res.redirect('/admin');
+  if (req.user.onboardingCompleted) return res.redirect('/app');
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('onboarding', {
+    user: req.user,
+    settings,
+    step: Number(req.query.step || 1),
+    error: null
+  });
+});
+
+app.post('/onboarding', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role === 'admin') return res.redirect('/admin');
+    const step = Number(req.body.step || 1);
+    const settings = await getSiteSettings().catch(() => null);
+
+    if (step === 1) {
+      const useCase = String(req.body.useCase || '').trim();
+      if (!useCase) {
+        return res.status(400).render('onboarding', {
+          user: req.user, settings, step: 1, error: 'Please choose an option.'
+        });
+      }
+      // stash in session via query for step 2 — persist partial on user
+      await User.findByIdAndUpdate(req.user.id, {
+        $set: { 'onboarding.useCase': useCase.slice(0, 80) }
+      });
+      return res.redirect('/onboarding?step=2');
+    }
+
+    if (step === 2) {
+      const heardFrom = String(req.body.heardFrom || '').trim();
+      if (!heardFrom) {
+        return res.status(400).render('onboarding', {
+          user: req.user, settings, step: 2, error: 'Please choose an option.'
+        });
+      }
+      const existing = await User.findById(req.user.id).lean();
+      const useCase = existing?.onboarding?.useCase || '';
+      await completeOnboarding(req.user.id, { useCase, heardFrom });
+      return res.redirect('/onboarding?step=3');
+    }
+
+    // step 3 continue
+    return res.redirect('/app/overview');
+  } catch (error) {
+    const settings = await getSiteSettings().catch(() => null);
+    res.status(500).render('onboarding', {
+      user: req.user, settings, step: 1, error: error.message
+    });
+  }
+});
+
+app.get('/install', optionalAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('install', { user: req.user || null, settings });
+});
+
+app.post('/onboarding/skip', requireAuth, async (req, res) => {
+  try {
+    await completeOnboarding(req.user.id, {
+      useCase: 'skipped',
+      heardFrom: 'skipped'
+    });
+  } catch (_) {}
+  res.redirect('/app/overview');
+});
+
+
+// ─── Admin ──────────────────────────────────────────────────────────
+app.get('/admin', requireAdmin, async (req, res) => {
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const prevMonthStart = new Date(monthStart);
+  prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+  const [
+    userCount,
+    usersThisMonth,
+    usersPrevMonth,
+    meetingCount,
+    meetingsThisMonth,
+    meetingsPrevMonth,
+    planCount,
+    recentUsers,
+    plans,
+    activeUsers,
+    meetingsWithAi,
+    totalDurationSec
+  ] = await Promise.all([
+    User.countDocuments(),
+    User.countDocuments({ createdAt: { $gte: monthStart } }),
+    User.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+    Meeting.countDocuments(),
+    Meeting.countDocuments({ createdAt: { $gte: monthStart } }),
+    Meeting.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+    Plan.countDocuments({ isActive: true }),
+    User.find().sort({ createdAt: -1 }).limit(8).lean(),
+    Plan.find().sort({ sortOrder: 1 }).lean(),
+    User.countDocuments({ isActive: { $ne: false } }),
+    Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+    Meeting.aggregate([{ $group: { _id: null, total: { $sum: '$duration' } } }]).then((r) => r[0]?.total || 0).catch(() => 0)
+  ]);
+
+  const planDist = {};
+  for (const pl of plans) planDist[pl.slug] = 0;
+  const byPlan = await User.aggregate([
+    { $group: { _id: '$planSlug', count: { $sum: 1 } } }
+  ]).catch(() => []);
+  for (const row of byPlan) {
+    const key = row._id || 'free';
+    planDist[key] = row.count;
+  }
+
+  const paidSubs = await User.countDocuments({
+    planSlug: { $nin: ['free', null, ''] },
+    isActive: { $ne: false }
+  }).catch(() => 0);
+
+  // per-user meeting counts for recent table
+  const recentIds = recentUsers.map((u) => u._id);
+  const meetingCounts = await Meeting.aggregate([
+    { $match: { userId: { $in: recentIds.map(String) } } },
+    { $group: { _id: '$userId', total: { $sum: 1 }, withAi: { $sum: { $cond: [{ $and: [{ $ifNull: ['$ai.summary', false] }, { $ne: ['$ai.summary', ''] }] }, 1, 0] } } } }
+  ]).catch(() => []);
+  const countMap = Object.fromEntries(meetingCounts.map((m) => [String(m._id), m]));
+
+  const pct = (cur, prev) => {
+    if (!prev) return cur ? 100 : 0;
+    return Math.round(((cur - prev) / prev) * 1000) / 10;
+  };
+
+  const transcriptionMinutes = Math.round(Number(totalDurationSec || 0) / 60);
+  // rough token estimate for display
+  const aiTokensEstimate = Math.round((meetingsWithAi || 0) * 2400);
+
+  const recentActivity = [];
+  for (const u of recentUsers.slice(0, 5)) {
+    recentActivity.push({
+      text: `@${u.username} joined the platform`,
+      time: u.createdAt,
+      type: 'user'
+    });
+  }
+  const recentMeetings = await Meeting.find().sort({ createdAt: -1 }).limit(5).lean().catch(() => []);
+  for (const m of recentMeetings) {
+    recentActivity.push({
+      text: m.ai?.summary
+        ? `AI summary generated · ${m.title || 'Meeting'}`
+        : `Meeting processed · ${m.title || 'Untitled'}`,
+      time: m.createdAt || m.startedAt,
+      type: m.ai?.summary ? 'ai' : 'meeting'
+    });
+  }
+  recentActivity.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+
+  // simple sparkline series from last 7 days of meetings
+  const series = [];
+  for (let i = 6; i >= 0; i--) {
+    const d0 = new Date();
+    d0.setHours(0, 0, 0, 0);
+    d0.setDate(d0.getDate() - i);
+    const d1 = new Date(d0);
+    d1.setDate(d1.getDate() + 1);
+    const c = await Meeting.countDocuments({ createdAt: { $gte: d0, $lt: d1 } }).catch(() => 0);
+    series.push({ label: d0.toLocaleDateString([], { weekday: 'short' }), value: c });
+  }
+
+  const mongoOk = mongoose.connection.readyState === 1;
+  const geminiOk = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+
+  res.render('admin/dashboard', {
+    user: req.user,
+    stats: {
+      userCount,
+      usersThisMonth,
+      usersGrowth: pct(usersThisMonth, usersPrevMonth),
+      activeSubscriptions: paidSubs,
+      meetingCount,
+      meetingsThisMonth,
+      meetingsGrowth: pct(meetingsThisMonth, meetingsPrevMonth),
+      aiNotesCount: meetingsWithAi,
+      transcriptionMinutes,
+      aiTokensEstimate,
+      extensionActiveUsers: activeUsers,
+      planCount,
+      monthlyRevenueEstimate: paidSubs * 12 // illustrative
+    },
+    planDist,
+    plans,
+    series,
+    recentActivity: recentActivity.slice(0, 8),
+    recentUsers: recentUsers.map((u) => {
+      const c = countMap[String(u._id)] || { total: 0, withAi: 0 };
+      return {
+        ...publicUser(u),
+        meetingsCount: c.total || 0,
+        aiNotesCount: c.withAi || 0
+      };
+    }),
+    health: {
+      api: true,
+      ai: geminiOk,
+      transcription: true,
+      database: mongoOk,
+      extension: true
+    },
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+app.get('/admin/users', requireAdmin, async (req, res) => {
+  const users = await User.find().sort({ createdAt: -1 }).limit(200).lean();
+  const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+  res.render('admin/users', {
+    user: req.user,
+    users: users.map((u) => ({ ...publicUser(u), _id: u._id.toString() })),
+    plans,
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+app.post('/admin/users/:id/role', requireAdmin, async (req, res) => {
+  try {
+    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    if (req.params.id === req.user.id && role !== 'admin') {
+      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot demote yourself.'));
+    }
+    await User.findByIdAndUpdate(req.params.id, { $set: { role } });
+    res.redirect('/admin/users?success=' + encodeURIComponent('Role updated'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/plan', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findOne({ slug: String(req.body.planSlug || 'free') });
+    await User.findByIdAndUpdate(req.params.id, {
+      $set: {
+        planSlug: plan?.slug || 'free',
+        planId: plan?._id || null
+      }
+    });
+    res.redirect('/admin/users?success=' + encodeURIComponent('Plan updated'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/toggle', requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot disable your own account.'));
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) return res.redirect('/admin/users');
+    target.isActive = !target.isActive;
+    await target.save();
+    res.redirect('/admin/users?success=' + encodeURIComponent(target.isActive ? 'User enabled' : 'User disabled'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/admin/plans', requireAdmin, async (req, res) => {
+  const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+  res.render('admin/plans', {
+    user: req.user,
+    plans,
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+app.post('/admin/plans', requireAdmin, async (req, res) => {
+  try {
+    const slug = String(req.body.slug || req.body.name || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40);
+    if (!slug || !req.body.name) throw new Error('Name is required');
+    const features = String(req.body.features || '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await Plan.create({
+      name: String(req.body.name).slice(0, 80),
+      slug,
+      priceMonthly: Math.max(0, Number(req.body.priceMonthly || 0)),
+      description: String(req.body.description || '').slice(0, 400),
+      features,
+      maxMeetingsPerMonth: Math.max(0, Number(req.body.maxMeetingsPerMonth || 20)),
+      isActive: req.body.isActive !== 'off',
+      sortOrder: Number(req.body.sortOrder || 0)
+    });
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan created'));
+  } catch (error) {
+    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/plans/:id', requireAdmin, async (req, res) => {
+  try {
+    const features = String(req.body.features || '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await Plan.findByIdAndUpdate(req.params.id, {
+      $set: {
+        name: String(req.body.name || '').slice(0, 80),
+        priceMonthly: Math.max(0, Number(req.body.priceMonthly || 0)),
+        description: String(req.body.description || '').slice(0, 400),
+        features,
+        maxMeetingsPerMonth: Math.max(0, Number(req.body.maxMeetingsPerMonth || 20)),
+        isActive: req.body.isActive === 'on' || req.body.isActive === 'true',
+        sortOrder: Number(req.body.sortOrder || 0)
+      }
+    });
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan updated'));
+  } catch (error) {
+    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/plans/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findById(req.params.id);
+    if (plan?.slug === 'free') {
+      return res.redirect('/admin/plans?success=' + encodeURIComponent('Cannot delete the Free plan'));
+    }
+    await Plan.findByIdAndDelete(req.params.id);
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan deleted'));
+  } catch (error) {
+    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+  }
+});
+
+
+app.get('/admin/meetings', requireAdmin, async (req, res) => {
+  const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(100).lean();
+  res.render('admin/section', {
+    user: req.user,
+    title: 'Meetings',
+    activeNav: 'meetings',
+    description: 'Monitor meetings and recorded sessions across all users.',
+    meetings,
+    error: null,
+    success: null
+  });
+});
+
+app.get('/admin/ai-notes', requireAdmin, async (req, res) => {
+  const meetings = await Meeting.find({ 'ai.summary': { $exists: true, $ne: '' } }).sort({ updatedAt: -1 }).limit(100).lean();
+  res.render('admin/section', {
+    user: req.user,
+    title: 'AI Notes',
+    activeNav: 'ai-notes',
+    description: 'Monitor generated notes and AI activity.',
+    meetings,
+    error: null,
+    success: null
+  });
+});
+
+app.get('/admin/transcriptions', requireAdmin, async (req, res) => {
+  const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(100).lean();
+  res.render('admin/section', {
+    user: req.user,
+    title: 'Transcriptions',
+    activeNav: 'transcriptions',
+    description: 'Monitor transcription usage and session length.',
+    meetings,
+    error: null,
+    success: null
+  });
+});
+
+app.get('/admin/analytics', requireAdmin, async (req, res) => {
+  res.redirect('/admin');
+});
+
+app.get('/admin/extension', requireAdmin, async (req, res) => {
+  res.render('admin/section', {
+    user: req.user,
+    title: 'Extension',
+    activeNav: 'extension',
+    description: 'Extension configuration and status. Share the install guide with users.',
+    meetings: [],
+    error: null,
+    success: null,
+    extraHtml: true
+  });
+});
+
+app.get('/admin/settings', requireAdmin, async (req, res) => {
+  const settings = await getSiteSettings();
+  res.render('admin/settings', {
+    user: req.user,
+    settings,
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+app.post('/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const labels = [].concat(req.body.linkLabel || []);
+    const urls = [].concat(req.body.linkUrl || []);
+    const footerLinks = labels.map((label, i) => ({ label, url: urls[i] || '' }));
+    await updateSiteSettings({
+      siteName: req.body.siteName,
+      tagline: req.body.tagline,
+      authSubtitle: req.body.authSubtitle,
+      footerText: req.body.footerText,
+      supportEmail: req.body.supportEmail,
+      copyrightText: req.body.copyrightText,
+      footerLinks
+    });
+    res.redirect('/admin/settings?success=' + encodeURIComponent('Settings saved'));
+  } catch (error) {
+    res.redirect('/admin/settings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+
+
+app.get('/account', requireAuth, async (req, res) => {
   const success = req.query.welcome ? 'Account ready. Copy your API key into the Chrome extension.' : null;
-  res.render('account', { user: req.user, error: null, success });
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(req.user);
+  res.render('account', { user: req.user, error: null, success, settings, plan: ctx.plan, usage: ctx.usage });
 });
 
 app.post('/account/rotate-key', requireAuth, async (req, res) => {
   try {
     const user = await rotateApiKey(req.user.id);
-    res.render('account', { user, error: null, success: 'API key rotated. Update the extension.' });
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(user);
+    res.render('account', { user, error: null, success: 'API key rotated. Update the extension.', settings, plan: ctx.plan, usage: ctx.usage });
   } catch (error) {
-    res.status(500).render('account', { user: req.user, error: error.message, success: null });
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user).catch(() => ({ plan: null, usage: null }));
+    res.status(500).render('account', { user: req.user, error: error.message, success: null, settings, plan: ctx.plan, usage: ctx.usage });
   }
 });
 
@@ -644,7 +1234,9 @@ app.get('/meetings/:id', requireAuth, async (req, res) => {
   try {
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
-    res.render('meeting', { user: req.user, meeting, error: null, success: null });
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    res.render('meeting', { user: req.user, meeting, error: null, success: null, settings, plan: ctx.plan, usage: ctx.usage });
   } catch (error) {
     res.status(500).send(error.message);
   }
@@ -685,8 +1277,17 @@ app.post('/meetings/:id/favorite', requireAuth, async (req, res) => {
     if (!meeting) return res.status(404).send('Meeting not found');
     meeting.isFavorite = !meeting.isFavorite;
     await meeting.save();
-    const back = req.body.redirect || req.get('Referer') || '/';
+    const back = req.body.redirect || req.get('Referer') || '/app';
     res.redirect(back);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/delete', requireAuth, async (req, res) => {
+  try {
+    await Meeting.deleteOne({ externalId: req.params.id, userId: req.user.id });
+    res.redirect('/app?success=' + encodeURIComponent('Meeting deleted'));
   } catch (error) {
     res.status(500).send(error.message);
   }
@@ -698,21 +1299,13 @@ app.post('/meetings/:id/archive', requireAuth, async (req, res) => {
     if (!meeting) return res.status(404).send('Meeting not found');
     meeting.isArchived = !meeting.isArchived;
     await meeting.save();
-    const back = req.body.redirect || (meeting.isArchived ? '/?view=archived' : '/');
+    const back = req.body.redirect || (meeting.isArchived ? '/app/meetings?view=archived' : '/app/meetings');
     res.redirect(back);
   } catch (error) {
     res.status(500).send(error.message);
   }
 });
 
-app.post('/meetings/:id/delete', requireAuth, async (req, res) => {
-  try {
-    await Meeting.deleteOne({ externalId: req.params.id, userId: req.user.id });
-    res.redirect('/?success=' + encodeURIComponent('Meeting deleted'));
-  } catch (error) {
-    res.status(500).send(error.message);
-  }
-});
 
 
 app.get('/api/health', (_req, res) => {
@@ -965,11 +1558,13 @@ app.delete('/api/meetings/:id', requireAuth, async (req, res) => {
 });
 
 mongoose.connect(mongoUri)
-  .then(() => {
+  .then(async () => {
+    await seedDefaults();
     app.listen(port, () => {
       console.log(`AI Note Taker API listening on http://localhost:${port}`);
       console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
       console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
+      console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
     });
   })
   .catch((error) => {

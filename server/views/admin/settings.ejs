@@ -1,0 +1,61 @@
+<%- include("../partials/header", { title: "Settings · Admin", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "settings" }) %>
+  <div class="main">
+    <header class="main-top">
+      <h1>Site settings</h1>
+    </header>
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <form method="POST" action="/admin/settings" class="card section-card form admin-form">
+      <h2>Branding</h2>
+      <div class="form-row">
+        <label>Site name
+          <input name="siteName" required value="<%= settings.siteName || '' %>" placeholder="AI Note Taker" />
+        </label>
+        <label>Support email
+          <input name="supportEmail" type="email" value="<%= settings.supportEmail || '' %>" placeholder="support@example.com" />
+        </label>
+      </div>
+      <label>Landing tagline
+        <input name="tagline" value="<%= settings.tagline || '' %>" />
+      </label>
+      <label>Login / signup subtitle
+        <textarea name="authSubtitle" rows="3"><%= settings.authSubtitle || '' %></textarea>
+      </label>
+
+      <h2 style="margin-top:20px">Footer</h2>
+      <label>Footer description
+        <input name="footerText" value="<%= settings.footerText || '' %>" />
+      </label>
+      <label>Copyright line (optional)
+        <input name="copyrightText" value="<%= settings.copyrightText || '' %>" placeholder="© 2026 Your Company" />
+      </label>
+
+      <h3 style="margin:16px 0 8px;font-size:14px">Footer links</h3>
+      <p class="muted" style="margin-top:0;font-size:12px">Add label + URL pairs. Empty rows are ignored.</p>
+      <div id="footerLinks">
+        <% const links = (settings.footerLinks && settings.footerLinks.length) ? settings.footerLinks : [{ label: '', url: '' }]; %>
+        <% links.forEach(function(link) { %>
+          <div class="form-row link-row">
+            <label>Label <input name="linkLabel" value="<%= link.label || '' %>" placeholder="Pricing" /></label>
+            <label>URL <input name="linkUrl" value="<%= link.url || '' %>" placeholder="/#pricing or https://…" /></label>
+          </div>
+        <% }) %>
+        <% for (let i = 0; i < 3; i++) { %>
+          <div class="form-row link-row">
+            <label>Label <input name="linkLabel" value="" placeholder="New link" /></label>
+            <label>URL <input name="linkUrl" value="" placeholder="https://…" /></label>
+          </div>
+        <% } %>
+      </div>
+
+      <div style="margin-top:18px">
+        <button type="submit" class="btn-primary">Save settings</button>
+        <a class="btn-ghost" href="/" target="_blank" style="margin-left:8px">Preview landing</a>
+      </div>
+    </form>
+  </div>
+</div>
+<%- include("../partials/footer") %>
