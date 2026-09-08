@@ -50,18 +50,170 @@
     </div>
 
     <div class="tab-panel active" data-panel="summary">
+      <% const discussion = Array.isArray(ai.discussionDetails) ? ai.discussionDetails : []; %>
+      <% const decisionDetails = Array.isArray(ai.decisionDetails) ? ai.decisionDetails : []; %>
+      <% const conflicts = Array.isArray(ai.conflicts) ? ai.conflicts : []; %>
+      <% const openQuestions = Array.isArray(ai.openQuestions) ? ai.openQuestions : []; %>
+      <% const followUps = Array.isArray(ai.followUps) ? ai.followUps : []; %>
+      <% const risks = Array.isArray(ai.risks) ? ai.risks : []; %>
+      <% const topics = Array.isArray(ai.topics) ? ai.topics : []; %>
+
       <section class="card section-card">
-        <h2>Overview</h2>
-        <p><%= ai.summary || "No summary yet. Use Retry analysis from the menu or re-save from the extension." %></p>
+        <h2>Executive summary</h2>
+        <% if (ai.summary) { %>
+          <div class="long-summary"><% String(ai.summary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+        <% } else { %>
+          <p class="muted">No summary yet. Use Retry analysis below or re-save from the extension.</p>
+        <% } %>
       </section>
+
       <section class="card section-card">
-        <h2>Key decisions</h2>
-        <% if (ai.decisions && ai.decisions.length) { %><ul><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
+        <h2>Detailed summary</h2>
+        <% if (ai.detailedSummary) { %>
+          <div class="long-summary"><% String(ai.detailedSummary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+        <% } else if (ai.summary) { %>
+          <p class="muted">Detailed summary not generated yet. Click <strong>Retry analysis</strong> to regenerate a richer write-up.</p>
+        <% } else { %>
+          <p class="muted">No detailed summary available.</p>
+        <% } %>
       </section>
+
+      <section class="card section-card">
+        <h2>Discussion breakdown</h2>
+        <% if (discussion.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Topic</th><th>What was discussed</th><th>Outcome</th></tr></thead>
+            <tbody>
+              <% discussion.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.topic || "—" %></strong></td>
+                  <td><%= x.details || "—" %></td>
+                  <td><%= x.outcome || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">No discussion breakdown identified yet.</p>
+        <% } %>
+      </section>
+
       <section class="card section-card">
         <h2>Key points</h2>
-        <% if (ai.keyPoints && ai.keyPoints.length) { %><ul><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
+        <% if (ai.keyPoints && ai.keyPoints.length) { %>
+          <ul class="bullet-list"><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
       </section>
+
+      <section class="card section-card">
+        <h2>Decisions</h2>
+        <% if (decisionDetails.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Decision</th><th>Rationale / context</th></tr></thead>
+            <tbody>
+              <% decisionDetails.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.decision || "—" %></strong></td>
+                  <td><%= x.rationale || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else if (ai.decisions && ai.decisions.length) { %>
+          <ul class="bullet-list"><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Action items</h2>
+        <% if (ai.actionItems && ai.actionItems.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Status</th><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+            <tbody>
+              <% ai.actionItems.forEach(function(a){ %>
+                <tr>
+                  <td><%= a.completed ? "✓ Complete" : "☐ Open" %></td>
+                  <td><strong><%= a.task || "—" %></strong></td>
+                  <td><%= a.owner || "Not specified" %></td>
+                  <td><%= a.deadline || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">None identified yet.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Conflicts &amp; differing viewpoints</h2>
+        <% if (conflicts.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Topic</th><th>Perspectives</th><th>Impact</th><th>Resolution</th><th>Status</th></tr></thead>
+            <tbody>
+              <% conflicts.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.topic || "—" %></strong></td>
+                  <td><%= x.perspectives || "—" %></td>
+                  <td><%= x.impact || "—" %></td>
+                  <td><%= x.resolution || "Not resolved" %></td>
+                  <td><span class="status-pill"><%= x.status || "Open" %></span></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">No explicit conflicts or competing viewpoints were identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Open questions</h2>
+        <% if (openQuestions.length) { %>
+          <ul class="bullet-list"><% openQuestions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Topics</h2>
+        <% if (topics.length) { %>
+          <div class="chips"><% topics.forEach(function(t){ %><span class="chip"># <%= t %></span><% }) %></div>
+        <% } else { %>
+          <p class="muted">No topics tagged yet.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Risks / blockers</h2>
+        <% if (risks.length) { %>
+          <ul class="bullet-list"><% risks.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Follow-ups</h2>
+        <% if (followUps.length) { %>
+          <ul class="bullet-list"><% followUps.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <% if (ai.error) { %>
+        <section class="card section-card">
+          <h2>AI processing</h2>
+          <p class="muted"><%= ai.error %></p>
+        </section>
+      <% } %>
+
       <form method="POST" action="/meetings/<%= meeting.externalId %>/analyze" style="margin-top:8px">
         <button type="submit" class="btn-ghost">Retry analysis</button>
       </form>
@@ -107,10 +259,10 @@
         <% } else { %>
           <p class="muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
           <div class="ask-suggestions">
-            <button type="button" class="chip ask-sugg" data-q="What were the key decisions?">What were the key decisions?</button>
-            <button type="button" class="chip ask-sugg" data-q="What action items were assigned?">What action items were assigned?</button>
-            <button type="button" class="chip ask-sugg" data-q="Give me a 5-bullet summary">Give me a 5-bullet summary</button>
-            <button type="button" class="chip ask-sugg" data-q="What did we discuss about next steps?">What about next steps?</button>
+            <button type="button" class="chip ask-sugg" data-q="Give me a 5-bullet summary of this meeting">5-bullet summary</button>
+            <button type="button" class="chip ask-sugg" data-q="What were the key decisions?">Key decisions?</button>
+            <button type="button" class="chip ask-sugg" data-q="What action items were assigned? List them as tasks with owners if mentioned.">Action items?</button>
+            <button type="button" class="chip ask-sugg" data-q="What are the next steps?">Next steps?</button>
           </div>
           <div id="chatHistory" class="chat-history"></div>
           <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">

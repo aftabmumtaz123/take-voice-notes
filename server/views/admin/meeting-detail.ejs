@@ -1,0 +1,207 @@
+<%- include("../partials/header", { title: (meeting.title || "Meeting") + " · Admin", bodyClass: "app-shell" }) %>
+<%
+  const ai = meeting.ai || {};
+  const owner = ownerUser || {};
+  const mins = Math.max(0, Math.round((meeting.duration || 0) / 60));
+  const title = ai.generatedTitle || meeting.title || 'Untitled meeting';
+  function platformLabel(p) {
+    const s = String(p || 'Manual');
+    if (/google\s*meet|meet\.google/i.test(s)) return 'Google Meet';
+    if (/zoom/i.test(s)) return 'Zoom';
+    if (/teams|microsoft/i.test(s)) return 'Microsoft Teams';
+    return s || 'Manual';
+  }
+  function planBadge(slug) {
+    const s = String(slug || 'free').toLowerCase();
+    if (s === 'pro') return { label: '✦ PRO', cls: 'plan-pro' };
+    if (s === 'premium' || s === 'team') return { label: '✦ PREMIUM', cls: 'plan-premium' };
+    if (s === 'business') return { label: '✦ BUSINESS', cls: 'plan-business' };
+    return { label: 'FREE', cls: 'plan-free' };
+  }
+  const badge = planBadge(owner.planSlug);
+  const hasTranscript = Boolean(meeting.fullTranscript);
+  const hasSummary = Boolean(ai.summary);
+  const hasActions = Array.isArray(ai.actionItems) && ai.actionItems.length > 0;
+  const hasError = Boolean(ai.error);
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "meetings" }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <a class="back" href="/admin/meetings">← Meetings</a>
+        <h1 style="margin-top:8px"><%= title %></h1>
+        <div class="user-detail-badges" style="margin-top:10px">
+          <% if (hasError) { %>
+            <span class="ai-status-badge ai-failed">! Failed</span>
+          <% } else if (hasSummary) { %>
+            <span class="ai-status-badge ai-ready-badge">✓ AI Ready</span>
+          <% } else if (hasTranscript) { %>
+            <span class="ai-status-badge ai-pending">— Not processed</span>
+          <% } else { %>
+            <span class="ai-status-badge ai-none">— No transcript</span>
+          <% } %>
+          <span class="platform-pill"><%= platformLabel(meeting.platform) %></span>
+          <% if (meeting.isArchived) { %><span class="status-dot disabled">Archived</span><% } %>
+        </div>
+        <p class="muted" style="margin-top:8px">
+          <% if (owner.username) { %>
+            <a href="/admin/users/<%= owner.id %>" style="color:inherit;font-weight:600">@<%= owner.username %></a>
+            <% if (owner.displayName) { %> · <%= owner.displayName %><% } %>
+            ·
+          <% } %>
+          <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %>
+          · <%= mins %> minutes
+        </p>
+      </div>
+      <div class="main-actions">
+        <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/analyze" style="display:inline">
+          <button type="submit" class="btn-primary">Retry AI processing</button>
+        </form>
+        <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/archive" style="display:inline">
+          <button type="submit" class="btn-ghost"><%= meeting.isArchived ? 'Unarchive' : 'Archive' %></button>
+        </form>
+        <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/delete" style="display:inline" onsubmit="return confirm('Delete this meeting permanently?');">
+          <button type="submit" class="btn-danger">Delete</button>
+        </form>
+      </div>
+    </header>
+
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="admin-meeting-layout">
+      <div class="admin-meeting-main">
+        <div class="tabs" data-tabs>
+          <button type="button" class="tab active" data-tab="summary">AI Summary</button>
+          <button type="button" class="tab" data-tab="transcript">Transcript</button>
+          <button type="button" class="tab" data-tab="actions">Action Items</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="summary" id="summary">
+          <section class="card section-card">
+            <h2>Executive summary</h2>
+            <% if (ai.summary) { %>
+              <div class="long-summary"><% String(ai.summary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+            <% } else { %>
+              <p class="muted">No AI summary yet.</p>
+            <% } %>
+          </section>
+          <% if (ai.detailedSummary) { %>
+            <section class="card section-card">
+              <h2>Detailed summary</h2>
+              <div class="long-summary"><% String(ai.detailedSummary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+            </section>
+          <% } %>
+          <% if (ai.keyPoints && ai.keyPoints.length) { %>
+            <section class="card section-card">
+              <h2>Key points</h2>
+              <ul class="bullet-list"><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+            </section>
+          <% } %>
+          <% if (ai.decisions && ai.decisions.length) { %>
+            <section class="card section-card">
+              <h2>Decisions</h2>
+              <ul class="bullet-list"><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+            </section>
+          <% } %>
+          <% if (ai.error) { %>
+            <section class="card section-card">
+              <h2>AI error</h2>
+              <p class="muted"><%= ai.error %></p>
+            </section>
+          <% } %>
+        </div>
+
+        <div class="tab-panel" data-panel="transcript" id="transcript">
+          <section class="card section-card">
+            <pre class="transcript"><%= meeting.fullTranscript || 'No transcript.' %></pre>
+          </section>
+        </div>
+
+        <div class="tab-panel" data-panel="actions" id="actions">
+          <section class="card section-card">
+            <h2>Action items</h2>
+            <% if (hasActions) { %>
+              <div class="table-wrap"><table class="ai-table">
+                <thead><tr><th>Status</th><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+                <tbody>
+                  <% ai.actionItems.forEach(function(a){ %>
+                    <tr>
+                      <td><%= a.completed ? '✓ Complete' : '☐ Open' %></td>
+                      <td><strong><%= a.task || '—' %></strong></td>
+                      <td><%= a.owner || 'Not specified' %></td>
+                      <td><%= a.deadline || 'Not specified' %></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table></div>
+            <% } else { %>
+              <p class="muted">None identified.</p>
+            <% } %>
+          </section>
+        </div>
+      </div>
+
+      <aside class="admin-meeting-side">
+        <section class="card section-card">
+          <h2 class="side-heading">Meeting information</h2>
+          <dl class="detail-list compact">
+            <div>
+              <dt>User</dt>
+              <dd>
+                <% if (owner.username) { %>
+                  <a href="/admin/users/<%= owner.id %>">@<%= owner.username %></a>
+                <% } else { %>
+                  <%= meeting.userId || '—' %>
+                <% } %>
+              </dd>
+            </div>
+            <div>
+              <dt>Plan</dt>
+              <dd><span class="plan-pill <%= badge.cls %>"><%= badge.label %></span></dd>
+            </div>
+            <div>
+              <dt>Platform</dt>
+              <dd><%= platformLabel(meeting.platform) %></dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd><%= mins %> minutes</dd>
+            </div>
+            <div>
+              <dt>Transcript</dt>
+              <dd><%= hasTranscript ? '✓ Available' : '— Missing' %></dd>
+            </div>
+            <div>
+              <dt>AI Summary</dt>
+              <dd><%= hasSummary ? '✓ Generated' : (hasError ? '! Failed' : '— Not generated') %></dd>
+            </div>
+            <div>
+              <dt>Created</dt>
+              <dd><%= meeting.createdAt ? new Date(meeting.createdAt).toLocaleString() : '—' %></dd>
+            </div>
+            <div>
+              <dt>External ID</dt>
+              <dd class="mono"><%= meeting.externalId %></dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="card section-card">
+          <h2 class="side-heading">AI processing</h2>
+          <ul class="proc-list">
+            <li><span>Transcript</span><span><%= hasTranscript ? '✓ Complete' : '— Missing' %></span></li>
+            <li><span>AI Summary</span><span><%= hasSummary ? '✓ Complete' : (hasError ? '⚠ Failed' : '— Waiting') %></span></li>
+            <li><span>Action Items</span><span><%= hasActions ? '✓ Complete' : (hasSummary ? '— None found' : '— Waiting') %></span></li>
+            <li><span>Ask AI</span><span><%= hasTranscript || hasSummary ? '✓ Available' : '— Unavailable' %></span></li>
+          </ul>
+          <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/analyze" style="margin-top:12px">
+            <button type="submit" class="btn-primary" style="width:100%">Retry AI processing</button>
+          </form>
+        </section>
+      </aside>
+    </div>
+  </div>
+</div>
+<%- include("../partials/footer") %>

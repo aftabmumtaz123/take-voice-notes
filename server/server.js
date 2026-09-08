@@ -24,7 +24,9 @@ import {
   updateSiteSettings,
   completeOnboarding,
   isPaidPlan,
-  planBadgeLabel
+  planBadgeLabel,
+  isUnlimited,
+  formatLimit
 } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -321,20 +323,37 @@ async function analyzeTranscript(meeting) {
 
   const prompt = `You are a meticulous AI meeting analyst. Analyze ONLY the transcript below. Never invent facts, people, dates, deadlines, decisions, action owners, disagreements, or outcomes. If information is unavailable, use an empty string, empty array, or "Not specified" only when the schema requires a string.
 
-Create a concise meeting-specific title based on the actual subject of the discussion. The title should be 4-8 words, specific and useful in a meeting history list, not generic (avoid titles like "Meeting Notes", "Team Meeting", or "Discussion").
+Create a concise meeting-specific title based on the actual subject of the discussion. The title should be 4-10 words, specific and useful in a meeting history list, not generic (avoid titles like "Meeting Notes", "Team Meeting", or "Discussion").
 
-Produce a detailed but faithful summary. Capture the purpose/context, the major discussion threads, important clarifications, requirements, constraints, decisions, and unresolved matters. Do not merely repeat the transcript.
+Write TWO levels of narrative summary:
+
+1) summary — an executive overview of 2–4 full paragraphs. Cover meeting purpose/context, who/what was involved when stated, the main topics, the most important outcomes, and any critical open issues. This should still be readable as a standalone briefing.
+
+2) detailedSummary — a thorough meeting narrative of 6–12 substantial paragraphs (or clearly separated sections). Walk through the discussion in logical order:
+   - Opening context and goals
+   - Each major topic thread: what was said, options considered, constraints, numbers/dates/requirements mentioned
+   - Clarifications and important side points
+   - Decisions reached and why
+   - Action items and ownership when stated
+   - Unresolved questions, risks, and next steps
+   Do NOT merely list bullets here — write connected prose that someone who missed the meeting can use as a full substitute for reading the transcript. Preserve concrete details (names only if spoken, amounts, deadlines, product/feature names, URLs, metrics).
 
 Also identify genuine conflicts/disagreements or competing viewpoints. Only include a conflict when the transcript shows differing opinions, requirements, interpretations, priorities, or unresolved disagreement. Do not label ordinary discussion as conflict.
 
 Return valid JSON with EXACTLY these keys:
 generatedTitle, summary, detailedSummary, discussionDetails, keyPoints, decisions, decisionDetails, actionItems, topics, risks, conflicts, openQuestions, followUps.
 
-discussionDetails must be an array of objects: {topic, details, outcome}.
-decisionDetails must be an array of objects: {decision, rationale}.
-actionItems must be an array of objects: {task, owner, deadline, completed}.
-conflicts must be an array of objects: {topic, perspectives, impact, resolution, status}.
-openQuestions must contain questions that remain unanswered or require confirmation.
+Field guidance:
+- discussionDetails: array of {topic, details, outcome}. Aim for one entry per major discussion thread. "details" should be 2–5 sentences capturing what was explored; "outcome" is the result or "Still open" if unresolved.
+- decisionDetails: array of {decision, rationale}. Prefer these over short one-liners when a decision has context.
+- decisions: short string list of the same decisions for quick scanning.
+- actionItems: array of {task, owner, deadline, completed}. owner/deadline only if explicitly stated; otherwise "".
+- keyPoints: 5–12 high-signal bullets of facts, requirements, or takeaways.
+- topics: short topic tags.
+- risks: blockers, dependencies, or risks mentioned.
+- conflicts: array of {topic, perspectives, impact, resolution, status}.
+- openQuestions: questions that remain unanswered or need confirmation.
+- followUps: concrete next-step items even if not formal action items.
 
 Rules:
 - Use only the transcript.
@@ -345,9 +364,8 @@ Rules:
 - If there is no real conflict, return conflicts as [].
 - If there are no open questions, return openQuestions as [].
 - Keep the title short and meeting-specific.
-- Keep summary around 1-2 strong paragraphs.
-- Make detailedSummary substantially richer than summary, around 3-6 paragraphs.
-- Keep each discussionDetails.details and outcome concise but informative.
+- Prefer completeness over brevity for detailedSummary and discussionDetails.
+- detailedSummary MUST be substantially longer and more specific than summary.
 
 MEETING TITLE CURRENTLY: ${meeting.title}
 PLATFORM: ${meeting.platform}
@@ -405,10 +423,24 @@ ${transcript}`;
 }
 
 async function answerMeetingQuestion(meeting, question) {
-  const prompt = `Answer the user's question using ONLY the meeting context below. If the answer is not present, say that it is not available in the transcript. Do not invent facts.
+  const prompt = `You are a meeting assistant. Answer the user's question using ONLY the meeting context below.
+If the answer is not present in the transcript or summary, say clearly that it is not available. Do not invent facts, names, deadlines, or owners.
+
+Format your answer as clean Markdown so it renders well in a product UI:
+- Use ## or ### headings for sections when helpful.
+- Use **bold** for emphasis on key terms.
+- Use bullet lists (- item) for key points.
+- For action items / tasks, use checkbox style: - [ ] Task description (Owner: Name) when applicable.
+- For decisions, prefer short headed bullets or lines like: 🔵 **Topic** — decision text
+- For short factual answers, keep it concise (one short section is fine). Do not over-format simple questions.
+- For longer answers, start with a brief "Key Takeaways" bullet list (3–5 bullets), then a "Detailed Answer" section.
+- Never wrap the entire answer in a code fence.
 
 MEETING: ${meeting.title}
 SUMMARY: ${meeting.ai?.summary || ''}
+KEY POINTS: ${(meeting.ai?.keyPoints || []).join(' | ')}
+DECISIONS: ${(meeting.ai?.decisions || []).join(' | ')}
+ACTION ITEMS: ${JSON.stringify(meeting.ai?.actionItems || [])}
 TRANSCRIPT:
 ${meeting.fullTranscript || ''}
 
@@ -524,10 +556,10 @@ async function loadUserPlanContext(user) {
     { $match: { userId: user.id, createdAt: { $gte: monthStart } } },
     { $group: { _id: null, total: { $sum: '$duration' } } }
   ]).then((r) => r[0]?.total || 0).catch(() => 0);
-  const maxMeetings = plan?.maxMeetingsPerMonth || 5;
-  const remainingPct = maxMeetings >= 9999
+  const maxMeetings = plan?.maxMeetingsPerMonth ?? 5;
+  const remainingPct = isUnlimited(maxMeetings)
     ? 100
-    : Math.max(0, Math.round((1 - usedThisMonth / maxMeetings) * 100));
+    : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
   return {
     plan,
     usage: {
@@ -927,26 +959,242 @@ app.get('/admin', requireAdmin, async (req, res) => {
   });
 });
 
+async function buildUserStatsMap(userIds) {
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const ids = userIds.map(String);
+  const [meetingCounts, aiCounts] = await Promise.all([
+    Meeting.aggregate([
+      { $match: { userId: { $in: ids }, createdAt: { $gte: monthStart } } },
+      { $group: { _id: '$userId', count: { $sum: 1 } } }
+    ]),
+    Meeting.aggregate([
+      {
+        $match: {
+          userId: { $in: ids },
+          createdAt: { $gte: monthStart },
+          'ai.summary': { $exists: true, $ne: '' }
+        }
+      },
+      { $group: { _id: '$userId', count: { $sum: 1 } } }
+    ])
+  ]);
+  const meetingsMap = Object.fromEntries(meetingCounts.map((r) => [r._id, r.count]));
+  const aiMap = Object.fromEntries(aiCounts.map((r) => [r._id, r.count]));
+  return { meetingsMap, aiMap, monthStart };
+}
+
 app.get('/admin/users', requireAdmin, async (req, res) => {
-  const users = await User.find().sort({ createdAt: -1 }).limit(200).lean();
+  try {
+    const q = String(req.query.q || '').trim();
+    const planFilter = String(req.query.plan || 'all');
+    const roleFilter = String(req.query.role || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 20;
+
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ username: rx }, { displayName: rx }];
+    }
+    if (planFilter !== 'all') filter.planSlug = planFilter;
+    if (roleFilter !== 'all') filter.role = roleFilter;
+    if (statusFilter === 'active') filter.isActive = { $ne: false };
+    if (statusFilter === 'disabled') filter.isActive = false;
+
+    const [total, usersRaw, plans, totalAll, activeAll, proAll, freeAll] = await Promise.all([
+      User.countDocuments(filter),
+      User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Plan.find().sort({ sortOrder: 1 }).lean(),
+      User.countDocuments(),
+      User.countDocuments({ isActive: { $ne: false } }),
+      User.countDocuments({ planSlug: { $nin: ['free', null, ''] }, isActive: { $ne: false } }),
+      User.countDocuments({ $or: [{ planSlug: 'free' }, { planSlug: null }, { planSlug: '' }] })
+    ]);
+
+    const planBySlug = Object.fromEntries(plans.map((p) => [p.slug, p]));
+    const { meetingsMap, aiMap } = await buildUserStatsMap(usersRaw.map((u) => u._id));
+
+    const users = usersRaw.map((u) => {
+      const pub = publicUser(u);
+      const meetings = meetingsMap[pub.id] || 0;
+      const aiNotes = aiMap[pub.id] || 0;
+      const maxM = planBySlug[pub.planSlug]?.maxMeetingsPerMonth;
+      const usagePct = isUnlimited(maxM) ? null : Math.min(100, Math.round((meetings / Math.max(1, maxM ?? 5)) * 100));
+      return {
+        ...pub,
+        _id: u._id.toString(),
+        stats: { meetings, aiNotes, usagePct }
+      };
+    });
+
+    res.render('admin/users', {
+      user: req.user,
+      users,
+      plans,
+      stats: { total: totalAll, active: activeAll, pro: proAll, free: freeAll },
+      filters: { q, plan: planFilter, role: roleFilter, status: statusFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/users', {
+      user: req.user,
+      users: [],
+      plans: [],
+      stats: { total: 0, active: 0, pro: 0, free: 0 },
+      filters: { q: '', plan: 'all', role: 'all', status: 'all' },
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/users/new', requireAdmin, async (req, res) => {
   const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
-  res.render('admin/users', {
+  res.render('admin/user-new', {
     user: req.user,
-    users: users.map((u) => ({ ...publicUser(u), _id: u._id.toString() })),
     plans,
-    error: null,
-    success: req.query.success || null
+    form: null,
+    error: req.query.error || null
   });
+});
+
+app.post('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const result = await registerUser({
+      username: req.body.username,
+      passkey: req.body.passkey,
+      displayName: req.body.displayName || ''
+    });
+    const updates = {};
+    if (req.body.role === 'admin') updates.role = 'admin';
+    if (req.body.planSlug) {
+      const plan = await Plan.findOne({ slug: String(req.body.planSlug) });
+      if (plan) {
+        updates.planSlug = plan.slug;
+        updates.planId = plan._id;
+      }
+    }
+    if (Object.keys(updates).length) {
+      await User.findByIdAndUpdate(result.user.id, { $set: updates });
+    }
+    res.redirect('/admin/users/' + result.user.id + '?success=' + encodeURIComponent('User created'));
+  } catch (error) {
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+    res.status(400).render('admin/user-new', {
+      user: req.user,
+      plans,
+      form: {
+        username: req.body.username || '',
+        displayName: req.body.displayName || ''
+      },
+      error: error.message
+    });
+  }
+});
+
+app.get('/admin/users/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const planFilter = String(req.query.plan || 'all');
+    const roleFilter = String(req.query.role || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ username: rx }, { displayName: rx }];
+    }
+    if (planFilter !== 'all') filter.planSlug = planFilter;
+    if (roleFilter !== 'all') filter.role = roleFilter;
+    if (statusFilter === 'active') filter.isActive = { $ne: false };
+    if (statusFilter === 'disabled') filter.isActive = false;
+
+    const users = await User.find(filter).sort({ createdAt: -1 }).limit(5000).lean();
+    const header = 'id,username,displayName,role,planSlug,isActive,createdAt\n';
+    const rows = users.map((u) => {
+      const cells = [
+        u._id.toString(),
+        u.username,
+        JSON.stringify(u.displayName || ''),
+        u.role || 'user',
+        u.planSlug || 'free',
+        u.isActive === false ? 'false' : 'true',
+        u.createdAt ? new Date(u.createdAt).toISOString() : ''
+      ];
+      return cells.join(',');
+    }).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="users-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/users/:id', requireAdmin, async (req, res) => {
+  try {
+    const doc = await User.findById(req.params.id).lean();
+    if (!doc) return res.redirect('/admin/users');
+    const target = publicUser(doc);
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+    const plan = plans.find((p) => p.slug === (target.planSlug || 'free')) || null;
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [meetingsUsed, aiNotes, durationAgg, recentMeetings] = await Promise.all([
+      Meeting.countDocuments({ userId: target.id, createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({
+        userId: target.id,
+        createdAt: { $gte: monthStart },
+        'ai.summary': { $exists: true, $ne: '' }
+      }),
+      Meeting.aggregate([
+        { $match: { userId: target.id, createdAt: { $gte: monthStart } } },
+        { $group: { _id: null, total: { $sum: '$duration' } } }
+      ]),
+      Meeting.find({ userId: target.id }).sort({ startedAt: -1 }).limit(8).lean()
+    ]);
+
+    const maxMeetings = plan?.maxMeetingsPerMonth ?? 5;
+    res.render('admin/user-detail', {
+      user: req.user,
+      target: { ...target, updatedAt: doc.updatedAt },
+      plan,
+      plans,
+      usageStats: {
+        meetingsUsed,
+        meetingsMax: maxMeetings,
+        aiNotes,
+        transcriptionMinutes: Math.round((durationAgg[0]?.total || 0) / 60),
+        askAi: 0
+      },
+      recentMeetings,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
 });
 
 app.post('/admin/users/:id/role', requireAdmin, async (req, res) => {
   try {
     const role = req.body.role === 'admin' ? 'admin' : 'user';
     if (req.params.id === req.user.id && role !== 'admin') {
-      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot demote yourself.'));
+      return res.redirect('/admin/users/' + req.params.id + '?success=' + encodeURIComponent('You cannot demote yourself.'));
     }
     await User.findByIdAndUpdate(req.params.id, { $set: { role } });
-    res.redirect('/admin/users?success=' + encodeURIComponent('Role updated'));
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent('Role updated'));
   } catch (error) {
     res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
   }
@@ -961,7 +1209,10 @@ app.post('/admin/users/:id/plan', requireAdmin, async (req, res) => {
         planId: plan?._id || null
       }
     });
-    res.redirect('/admin/users?success=' + encodeURIComponent('Plan updated'));
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent('Plan updated'));
   } catch (error) {
     res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
   }
@@ -976,70 +1227,194 @@ app.post('/admin/users/:id/toggle', requireAdmin, async (req, res) => {
     if (!target) return res.redirect('/admin/users');
     target.isActive = !target.isActive;
     await target.save();
-    res.redirect('/admin/users?success=' + encodeURIComponent(target.isActive ? 'User enabled' : 'User disabled'));
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent(target.isActive ? 'User enabled' : 'User disabled'));
   } catch (error) {
     res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
   }
 });
 
-app.get('/admin/plans', requireAdmin, async (req, res) => {
-  const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
-  res.render('admin/plans', {
-    user: req.user,
-    plans,
-    error: null,
-    success: req.query.success || null
-  });
+app.post('/admin/users/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot delete your own account.'));
+    }
+    await User.findByIdAndDelete(req.params.id);
+    res.redirect('/admin/users?success=' + encodeURIComponent('User deleted'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
 });
 
-app.post('/admin/plans', requireAdmin, async (req, res) => {
-  try {
-    const slug = String(req.body.slug || req.body.name || '')
+function parseOptionalLimit(raw) {
+  const s = String(raw ?? '').trim();
+  if (s === '' || s.toLowerCase() === 'unlimited') return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n >= 9999) return null;
+  return n;
+}
+
+function parseFeatureFlags(body = {}) {
+  const keys = [
+    'liveTranscription', 'aiSummaries', 'actionItems', 'askAi', 'aiInsights',
+    'pdfExport', 'markdownExport', 'txtExport', 'teamWorkspace', 'adminDashboard'
+  ];
+  const flags = {};
+  for (const k of keys) {
+    flags[k] = body[`flag_${k}`] === 'on' || body[`flag_${k}`] === 'true';
+  }
+  return flags;
+}
+
+function parsePlanBody(body = {}, { isNew = false } = {}) {
+  const features = String(body.features || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const data = {
+    name: String(body.name || '').slice(0, 80),
+    priceMonthly: Math.max(0, Number(body.priceMonthly || 0)),
+    priceAnnual: Math.max(0, Number(body.priceAnnual || 0)),
+    description: String(body.description || '').slice(0, 400),
+    features,
+    maxMeetingsPerMonth: parseOptionalLimit(body.maxMeetingsPerMonth),
+    maxTranscriptionMinutes: parseOptionalLimit(body.maxTranscriptionMinutes),
+    maxAiQuestions: parseOptionalLimit(body.maxAiQuestions),
+    maxStorageGb: parseOptionalLimit(body.maxStorageGb),
+    featureFlags: parseFeatureFlags(body),
+    isActive: body.isActive === 'on' || body.isActive === 'true',
+    isRecommended: body.isRecommended === 'on' || body.isRecommended === 'true',
+    sortOrder: Number(body.sortOrder || 0)
+  };
+  if (isNew) {
+    const slug = String(body.slug || body.name || '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
       .slice(0, 40);
-    if (!slug || !req.body.name) throw new Error('Name is required');
-    const features = String(req.body.features || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    await Plan.create({
-      name: String(req.body.name).slice(0, 80),
-      slug,
-      priceMonthly: Math.max(0, Number(req.body.priceMonthly || 0)),
-      description: String(req.body.description || '').slice(0, 400),
-      features,
-      maxMeetingsPerMonth: Math.max(0, Number(req.body.maxMeetingsPerMonth || 20)),
-      isActive: req.body.isActive !== 'off',
-      sortOrder: Number(req.body.sortOrder || 0)
+    data.slug = slug;
+  }
+  return data;
+}
+
+app.get('/admin/plans', requireAdmin, async (req, res) => {
+  try {
+    const tab = String(req.query.tab || 'plans');
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+
+    const byPlan = await User.aggregate([
+      { $group: { _id: '$planSlug', count: { $sum: 1 } } }
+    ]);
+    const subscriberCounts = Object.fromEntries(byPlan.map((r) => [r._id || 'free', r.count]));
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [totalUsers, paidUsers, freeUsers, activeUsers, newThisMonth] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ planSlug: { $nin: ['free', null, ''] }, isActive: { $ne: false } }),
+      User.countDocuments({ $or: [{ planSlug: 'free' }, { planSlug: null }, { planSlug: '' }] }),
+      User.countDocuments({ isActive: { $ne: false } }),
+      User.countDocuments({ createdAt: { $gte: monthStart }, planSlug: { $nin: ['free', null, ''] } })
+    ]);
+
+    let mrr = 0;
+    for (const p of plans) {
+      const c = subscriberCounts[p.slug] || 0;
+      mrr += (Number(p.priceMonthly) || 0) * c;
+    }
+
+    let subscribers = [];
+    const filters = { q: String(req.query.q || '').trim(), plan: String(req.query.plan || 'all') };
+    if (tab === 'subscribers') {
+      const filter = {};
+      if (filters.q) {
+        const rx = new RegExp(filters.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        filter.$or = [{ username: rx }, { displayName: rx }];
+      }
+      if (filters.plan !== 'all') filter.planSlug = filters.plan;
+      const docs = await User.find(filter).sort({ createdAt: -1 }).limit(100).lean();
+      subscribers = docs.map((u) => publicUser(u));
+    }
+
+    res.render('admin/plans', {
+      user: req.user,
+      plans,
+      activeTab: tab,
+      subscriberCounts,
+      subscribers,
+      filters,
+      billingStats: { totalUsers, paidUsers, freeUsers, activeUsers, newThisMonth, mrr },
+      error: null,
+      success: req.query.success || null
     });
-    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan created'));
+  } catch (error) {
+    res.status(500).render('admin/plans', {
+      user: req.user,
+      plans: [],
+      activeTab: 'plans',
+      subscriberCounts: {},
+      subscribers: [],
+      filters: { q: '', plan: 'all' },
+      billingStats: {},
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/plans/new', requireAdmin, async (req, res) => {
+  res.render('admin/plan-edit', {
+    user: req.user,
+    plan: null,
+    isNew: true,
+    error: null
+  });
+});
+
+app.get('/admin/plans/:id/edit', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findById(req.params.id).lean();
+    if (!plan) return res.redirect('/admin/plans');
+    res.render('admin/plan-edit', {
+      user: req.user,
+      plan,
+      isNew: false,
+      error: null
+    });
   } catch (error) {
     res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
   }
 });
 
+app.post('/admin/plans', requireAdmin, async (req, res) => {
+  try {
+    const data = parsePlanBody(req.body, { isNew: true });
+    if (!data.slug || !data.name) throw new Error('Name is required');
+    await Plan.create(data);
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan created'));
+  } catch (error) {
+    res.status(400).render('admin/plan-edit', {
+      user: req.user,
+      plan: { ...req.body, features: String(req.body.features || '').split('\n') },
+      isNew: true,
+      error: error.message
+    });
+  }
+});
+
 app.post('/admin/plans/:id', requireAdmin, async (req, res) => {
   try {
-    const features = String(req.body.features || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    await Plan.findByIdAndUpdate(req.params.id, {
-      $set: {
-        name: String(req.body.name || '').slice(0, 80),
-        priceMonthly: Math.max(0, Number(req.body.priceMonthly || 0)),
-        description: String(req.body.description || '').slice(0, 400),
-        features,
-        maxMeetingsPerMonth: Math.max(0, Number(req.body.maxMeetingsPerMonth || 20)),
-        isActive: req.body.isActive === 'on' || req.body.isActive === 'true',
-        sortOrder: Number(req.body.sortOrder || 0)
-      }
-    });
+    const data = parsePlanBody(req.body, { isNew: false });
+    if (!data.name) throw new Error('Name is required');
+    await Plan.findByIdAndUpdate(req.params.id, { $set: data });
     res.redirect('/admin/plans?success=' + encodeURIComponent('Plan updated'));
   } catch (error) {
-    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+    res.redirect('/admin/plans/' + req.params.id + '/edit?error=' + encodeURIComponent(error.message));
   }
 });
 
@@ -1058,29 +1433,431 @@ app.post('/admin/plans/:id/delete', requireAdmin, async (req, res) => {
 
 
 app.get('/admin/meetings', requireAdmin, async (req, res) => {
-  const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(100).lean();
-  res.render('admin/section', {
-    user: req.user,
-    title: 'Meetings',
-    activeNav: 'meetings',
-    description: 'Monitor meetings and recorded sessions across all users.',
-    meetings,
-    error: null,
-    success: null
-  });
+  try {
+    const q = String(req.query.q || '').trim();
+    const platformFilter = String(req.query.platform || 'all');
+    const aiFilter = String(req.query.ai || 'all');
+    const dateFilter = String(req.query.date || 'all');
+    const userFilter = String(req.query.user || '').trim().toLowerCase();
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 25;
+
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { title: rx },
+        { 'ai.generatedTitle': rx },
+        { platform: rx },
+        { userId: rx }
+      ];
+    }
+    if (platformFilter !== 'all') {
+      if (platformFilter === 'Google Meet') filter.platform = /meet|google/i;
+      else if (platformFilter === 'Zoom') filter.platform = /zoom/i;
+      else if (platformFilter === 'Microsoft Teams') filter.platform = /teams|microsoft/i;
+      else if (platformFilter === 'Manual') filter.platform = /manual|^$/i;
+      else filter.platform = platformFilter;
+    }
+    if (aiFilter === 'ready') filter['ai.summary'] = { $exists: true, $ne: '' };
+    if (aiFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+    if (aiFilter === 'pending') {
+      filter.fullTranscript = { $exists: true, $ne: '' };
+      filter.$and = [
+        { $or: [{ 'ai.summary': { $exists: false } }, { 'ai.summary': '' }] },
+        { $or: [{ 'ai.error': { $exists: false } }, { 'ai.error': '' }] }
+      ];
+    }
+    if (aiFilter === 'none') {
+      filter.$or = [{ fullTranscript: { $exists: false } }, { fullTranscript: '' }];
+    }
+    if (dateFilter === 'today') {
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      filter.createdAt = { $gte: start };
+    } else if (dateFilter === '7d') {
+      const start = new Date(); start.setDate(start.getDate() - 7);
+      filter.createdAt = { $gte: start };
+    } else if (dateFilter === '30d') {
+      const start = new Date(); start.setDate(start.getDate() - 30);
+      filter.createdAt = { $gte: start };
+    }
+
+    if (userFilter) {
+      const matchedUsers = await User.find({
+        $or: [
+          { username: new RegExp(userFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+          { displayName: new RegExp(userFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+        ]
+      }).select('_id').lean();
+      const ids = matchedUsers.map((u) => u._id.toString());
+      if (ids.length) filter.userId = { $in: ids };
+      else filter.userId = '__none__';
+    }
+
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const prevMonthStart = new Date(monthStart); prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+    const [
+      total,
+      meetingsRaw,
+      totalAll,
+      todayCount,
+      aiReadyAll,
+      issuesAll,
+      thisMonth,
+      prevMonth
+    ] = await Promise.all([
+      Meeting.countDocuments(filter),
+      Meeting.find(filter).sort({ startedAt: -1, createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Meeting.countDocuments(),
+      Meeting.countDocuments({ createdAt: { $gte: todayStart } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ 'ai.error': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } })
+    ]);
+
+    const userIds = [...new Set(meetingsRaw.map((m) => m.userId).filter(Boolean))];
+    const owners = await User.find({ _id: { $in: userIds.filter((id) => /^[a-f0-9]{24}$/i.test(id)) } }).lean().catch(() => []);
+    const ownerById = Object.fromEntries(owners.map((u) => [u._id.toString(), publicUser(u)]));
+
+    const meetings = meetingsRaw.map((m) => ({
+      ...m,
+      owner: ownerById[m.userId] || null
+    }));
+
+    const growth = prevMonth > 0
+      ? Math.round(((thisMonth - prevMonth) / prevMonth) * 1000) / 10
+      : (thisMonth > 0 ? 100 : 0);
+    const aiRate = totalAll > 0 ? Math.round((aiReadyAll / totalAll) * 1000) / 10 : 0;
+
+    res.render('admin/meetings', {
+      user: req.user,
+      meetings,
+      stats: {
+        total: totalAll,
+        today: todayCount,
+        aiReady: aiReadyAll,
+        issues: issuesAll,
+        growth,
+        aiRate
+      },
+      filters: { q, platform: platformFilter, ai: aiFilter, date: dateFilter, user: userFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/meetings', {
+      user: req.user,
+      meetings: [],
+      stats: { total: 0, today: 0, aiReady: 0, issues: 0, growth: 0, aiRate: 0 },
+      filters: { q: '', platform: 'all', ai: 'all', date: 'all', user: '' },
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/meetings/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(5000).lean();
+    const header = 'externalId,title,userId,platform,durationSec,aiReady,startedAt,createdAt\n';
+    const rows = meetings.map((m) => [
+      m.externalId,
+      JSON.stringify(m.ai?.generatedTitle || m.title || ''),
+      m.userId,
+      JSON.stringify(m.platform || ''),
+      m.duration || 0,
+      m.ai?.summary ? 'true' : 'false',
+      m.startedAt ? new Date(m.startedAt).toISOString() : '',
+      m.createdAt ? new Date(m.createdAt).toISOString() : ''
+    ].join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="meetings-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/meetings/:id', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id }).lean();
+    if (!meeting) return res.redirect('/admin/meetings');
+    let ownerUser = null;
+    if (meeting.userId && /^[a-f0-9]{24}$/i.test(meeting.userId)) {
+      const u = await User.findById(meeting.userId).lean();
+      if (u) ownerUser = publicUser(u);
+    }
+    res.render('admin/meeting-detail', {
+      user: req.user,
+      meeting,
+      ownerUser,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/analyze', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id });
+    if (!meeting) return res.redirect('/admin/meetings');
+    const generated = await analyzeTranscript(meeting);
+    if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+    meeting.ai = { ...generated, generatedAt: new Date(), error: '' };
+    await meeting.save();
+    res.redirect('/admin/meetings/' + req.params.id + '?success=' + encodeURIComponent('AI analysis updated'));
+  } catch (error) {
+    try {
+      await Meeting.findOneAndUpdate(
+        { externalId: req.params.id },
+        { $set: { 'ai.error': error.message } }
+      );
+    } catch (_) {}
+    res.redirect('/admin/meetings/' + req.params.id + '?success=' + encodeURIComponent('Analysis failed: ' + error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/archive', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id });
+    if (!meeting) return res.redirect('/admin/meetings');
+    meeting.isArchived = !meeting.isArchived;
+    await meeting.save();
+    const back = req.get('Referer')?.includes('/admin/meetings/')
+      ? '/admin/meetings/' + req.params.id
+      : '/admin/meetings';
+    res.redirect(back + '?success=' + encodeURIComponent(meeting.isArchived ? 'Meeting archived' : 'Meeting unarchived'));
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    await Meeting.deleteOne({ externalId: req.params.id });
+    res.redirect('/admin/meetings?success=' + encodeURIComponent('Meeting deleted'));
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
 });
 
 app.get('/admin/ai-notes', requireAdmin, async (req, res) => {
-  const meetings = await Meeting.find({ 'ai.summary': { $exists: true, $ne: '' } }).sort({ updatedAt: -1 }).limit(100).lean();
-  res.render('admin/section', {
-    user: req.user,
-    title: 'AI Notes',
-    activeNav: 'ai-notes',
-    description: 'Monitor generated notes and AI activity.',
-    meetings,
-    error: null,
-    success: null
-  });
+  try {
+    const q = String(req.query.q || '').trim();
+    const contentFilter = String(req.query.content || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const planFilter = String(req.query.plan || 'all');
+    const dateFilter = String(req.query.date || 'all');
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 25;
+
+    const filter = {};
+    if (statusFilter === 'ready') filter['ai.summary'] = { $exists: true, $ne: '' };
+    else if (statusFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+    else if (statusFilter === 'pending') {
+      filter.fullTranscript = { $exists: true, $ne: '' };
+      filter.$and = [
+        { $or: [{ 'ai.summary': { $exists: false } }, { 'ai.summary': '' }] },
+        { $or: [{ 'ai.error': { $exists: false } }, { 'ai.error': '' }] }
+      ];
+    } else {
+      filter.$or = [
+        { 'ai.summary': { $exists: true, $ne: '' } },
+        { 'ai.error': { $exists: true, $ne: '' } },
+        { fullTranscript: { $exists: true, $ne: '' } }
+      ];
+    }
+
+    if (contentFilter === 'summary') filter['ai.summary'] = { $exists: true, $ne: '' };
+    if (contentFilter === 'actions') filter['ai.actionItems.0'] = { $exists: true };
+    if (contentFilter === 'insights') filter['ai.keyPoints.0'] = { $exists: true };
+    if (contentFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$and = (filter.$and || []).concat([{
+        $or: [
+          { title: rx },
+          { 'ai.generatedTitle': rx },
+          { 'ai.summary': rx },
+          { userId: rx }
+        ]
+      }]);
+    }
+
+    if (dateFilter === 'today') {
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      filter.updatedAt = { $gte: start };
+    } else if (dateFilter === '7d') {
+      const start = new Date(); start.setDate(start.getDate() - 7);
+      filter.updatedAt = { $gte: start };
+    } else if (dateFilter === '30d') {
+      const start = new Date(); start.setDate(start.getDate() - 30);
+      filter.updatedAt = { $gte: start };
+    }
+
+    if (planFilter !== 'all') {
+      const planUsers = await User.find({ planSlug: planFilter }).select('_id').lean();
+      const ids = planUsers.map((u) => u._id.toString());
+      filter.userId = { $in: ids.length ? ids : ['__none__'] };
+    }
+
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const prevMonthStart = new Date(monthStart); prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+    const [
+      total,
+      notesRaw,
+      totalAi,
+      todayAi,
+      withActions,
+      failedCount,
+      thisMonthAi,
+      prevMonthAi,
+      plans
+    ] = await Promise.all([
+      Meeting.countDocuments(filter),
+      Meeting.find(filter).sort({ 'ai.generatedAt': -1, updatedAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({
+        'ai.summary': { $exists: true, $ne: '' },
+        $or: [
+          { 'ai.generatedAt': { $gte: todayStart } },
+          { updatedAt: { $gte: todayStart }, 'ai.summary': { $exists: true, $ne: '' } }
+        ]
+      }),
+      Meeting.countDocuments({ 'ai.actionItems.0': { $exists: true } }),
+      Meeting.countDocuments({ 'ai.error': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' }, createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' }, createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+      Plan.find().sort({ sortOrder: 1 }).lean()
+    ]);
+
+    const userIds = [...new Set(notesRaw.map((m) => m.userId).filter(Boolean))];
+    const owners = await User.find({ _id: { $in: userIds.filter((id) => /^[a-f0-9]{24}$/i.test(id)) } }).lean().catch(() => []);
+    const ownerById = Object.fromEntries(owners.map((u) => [u._id.toString(), publicUser(u)]));
+    const notes = notesRaw.map((m) => ({ ...m, owner: ownerById[m.userId] || null }));
+
+    const growth = prevMonthAi > 0
+      ? Math.round(((thisMonthAi - prevMonthAi) / prevMonthAi) * 1000) / 10
+      : (thisMonthAi > 0 ? 100 : 0);
+    const actionRate = totalAi > 0 ? Math.round((withActions / totalAi) * 1000) / 10 : 0;
+    const failRate = (totalAi + failedCount) > 0
+      ? Math.round((failedCount / Math.max(1, totalAi + failedCount)) * 1000) / 10
+      : 0;
+    const successRate = Math.max(0, Math.round(1000 - failRate * 10) / 10);
+
+    const activitySeries = [];
+    for (let i = 13; i >= 0; i--) {
+      const day = new Date();
+      day.setHours(0, 0, 0, 0);
+      day.setDate(day.getDate() - i);
+      const next = new Date(day);
+      next.setDate(next.getDate() + 1);
+      // sequential is fine for 14 days
+      // eslint-disable-next-line no-await-in-loop
+      const value = await Meeting.countDocuments({
+        'ai.summary': { $exists: true, $ne: '' },
+        $or: [
+          { 'ai.generatedAt': { $gte: day, $lt: next } },
+          { updatedAt: { $gte: day, $lt: next } }
+        ]
+      });
+      activitySeries.push({
+        label: day.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+        short: day.toLocaleDateString([], { weekday: 'narrow' }),
+        value
+      });
+    }
+
+    res.render('admin/ai-notes', {
+      user: req.user,
+      notes,
+      plans,
+      stats: {
+        total: totalAi,
+        today: todayAi,
+        withActions,
+        failed: failedCount,
+        growth,
+        actionRate,
+        failRate,
+        successRate
+      },
+      activitySeries,
+      filters: { q, content: contentFilter, status: statusFilter, plan: planFilter, date: dateFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/ai-notes', {
+      user: req.user,
+      notes: [],
+      plans: [],
+      stats: { total: 0, today: 0, withActions: 0, failed: 0, growth: 0, actionRate: 0, failRate: 0, successRate: 100 },
+      activitySeries: [],
+      filters: { q: '', content: 'all', status: 'all', plan: 'all', date: 'all' },
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/ai-notes/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const meetings = await Meeting.find({
+      $or: [
+        { 'ai.summary': { $exists: true, $ne: '' } },
+        { 'ai.error': { $exists: true, $ne: '' } }
+      ]
+    }).sort({ updatedAt: -1 }).limit(5000).lean();
+    const header = 'externalId,title,userId,hasSummary,hasActions,hasError,generatedAt\n';
+    const rows = meetings.map((m) => [
+      m.externalId,
+      JSON.stringify(m.ai?.generatedTitle || m.title || ''),
+      m.userId,
+      m.ai?.summary ? 'true' : 'false',
+      m.ai?.actionItems?.length ? 'true' : 'false',
+      m.ai?.error ? 'true' : 'false',
+      m.ai?.generatedAt ? new Date(m.ai.generatedAt).toISOString() : ''
+    ].join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ai-notes-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/ai-notes/:id', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id }).lean();
+    if (!meeting) return res.redirect('/admin/ai-notes');
+    let ownerUser = null;
+    if (meeting.userId && /^[a-f0-9]{24}$/i.test(meeting.userId)) {
+      const u = await User.findById(meeting.userId).lean();
+      if (u) ownerUser = publicUser(u);
+    }
+    res.render('admin/ai-note-detail', {
+      user: req.user,
+      meeting,
+      ownerUser,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/ai-notes?success=' + encodeURIComponent(error.message));
+  }
 });
 
 app.get('/admin/transcriptions', requireAdmin, async (req, res) => {

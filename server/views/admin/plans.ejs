@@ -1,60 +1,255 @@
-<%- include("../partials/header", { title: "Plans · Admin", bodyClass: "app-shell" }) %>
+<%- include("../partials/header", { title: "Plans & Billing · Admin", bodyClass: "app-shell" }) %>
+<%
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return n.toLocaleString();
+    return String(n);
+  }
+  function money(n) {
+    return '$' + (Number(n) || 0).toFixed(Number(n) % 1 ? 2 : 0);
+  }
+  function limitLabel(v, unit) {
+    if (v == null || v < 0 || v >= 9999) return 'Unlimited';
+    return unit ? (v + ' ' + unit) : String(v);
+  }
+  function planIcon(slug) {
+    const s = String(slug || '').toLowerCase();
+    if (s === 'pro') return '✦ PRO';
+    if (s === 'team') return 'TEAM';
+    if (s === 'premium' || s === 'business') return '✦ ' + s.toUpperCase();
+    return (slug || 'FREE').toUpperCase();
+  }
+  const tab = activeTab || 'plans';
+  const counts = subscriberCounts || {};
+%>
 <div class="shell">
   <%- include("partials/admin-sidebar", { user, activeNav: "plans" }) %>
-  <div class="main">
-    <header class="main-top">
-      <h1>Subscription plans</h1>
+  <div class="main admin-main">
+    <header class="main-top admin-hero">
+      <div>
+        <h1>Plans &amp; Billing</h1>
+        <p class="admin-sub">Create and manage pricing, usage limits, subscribers, and revenue for AI Notes.</p>
+      </div>
+      <div class="main-actions">
+        <% if (tab === 'plans') { %>
+          <a class="btn-primary" href="/admin/plans/new">+ Create plan</a>
+        <% } %>
+      </div>
     </header>
+
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
 
-    <section class="card section-card">
-      <h2>Create plan</h2>
-      <form method="POST" action="/admin/plans" class="form admin-form">
-        <div class="form-row">
-          <label>Name <input name="name" required placeholder="Pro" /></label>
-          <label>Slug <input name="slug" placeholder="pro (optional)" /></label>
-          <label>Price / month (USD) <input name="priceMonthly" type="number" min="0" step="1" value="0" /></label>
-        </div>
-        <label>Description <input name="description" placeholder="Short description" /></label>
-        <label>Features (one per line)
-          <textarea name="features" rows="4" placeholder="Unlimited meetings&#10;AI chat"></textarea>
-        </label>
-        <div class="form-row">
-          <label>Max meetings / month <input name="maxMeetingsPerMonth" type="number" min="0" value="20" /></label>
-          <label>Sort order <input name="sortOrder" type="number" value="0" /></label>
-        </div>
-        <button type="submit" class="btn-primary">Create plan</button>
-      </form>
-    </section>
+    <div class="billing-tabs">
+      <a class="billing-tab <%= tab === 'plans' ? 'active' : '' %>" href="/admin/plans">Plans</a>
+      <a class="billing-tab <%= tab === 'subscribers' ? 'active' : '' %>" href="/admin/plans?tab=subscribers">Subscribers</a>
+      <a class="billing-tab <%= tab === 'revenue' ? 'active' : '' %>" href="/admin/plans?tab=revenue">Revenue</a>
+      <a class="billing-tab <%= tab === 'transactions' ? 'active' : '' %>" href="/admin/plans?tab=transactions">Transactions</a>
+    </div>
 
-    <section class="card section-card" style="margin-top:16px">
-      <h2>Existing plans</h2>
-      <% (plans || []).forEach(function(p) { %>
-        <form method="POST" action="/admin/plans/<%= p._id %>" class="plan-edit form">
-          <div class="form-row">
-            <label>Name <input name="name" value="<%= p.name %>" required /></label>
-            <label>Price / mo <input name="priceMonthly" type="number" min="0" value="<%= p.priceMonthly %>" /></label>
-            <label>Max meetings <input name="maxMeetingsPerMonth" type="number" min="0" value="<%= p.maxMeetingsPerMonth %>" /></label>
-            <label>Sort <input name="sortOrder" type="number" value="<%= p.sortOrder %>" /></label>
-          </div>
-          <label>Description <input name="description" value="<%= p.description || '' %>" /></label>
-          <label>Features
-            <textarea name="features" rows="3"><%= (p.features || []).join('\n') %></textarea>
-          </label>
-          <label class="check-label">
-            <input type="checkbox" name="isActive" value="on" <%= p.isActive ? 'checked' : '' %> /> Active
-          </label>
-          <div class="form-row">
-            <button type="submit" class="btn-primary">Save</button>
-            <% if (p.slug !== 'free') { %>
-              <button type="submit" formaction="/admin/plans/<%= p._id %>/delete" class="btn-danger" onclick="return confirm('Delete this plan?')">Delete</button>
+    <% if (tab === 'plans') { %>
+      <p class="muted" style="margin:0 0 14px"><%= (plans || []).length %> plan<%= (plans || []).length === 1 ? '' : 's' %> configured</p>
+
+      <div class="plan-cards">
+        <% (plans || []).forEach(function(p) {
+          const subCount = counts[p.slug] || 0;
+          const isFree = p.slug === 'free';
+        %>
+          <article class="plan-card <%= p.isRecommended ? 'recommended' : '' %> <%= p.isActive ? '' : 'inactive' %>">
+            <% if (p.isRecommended) { %><div class="plan-card-ribbon">Most popular</div><% } %>
+            <header class="plan-card-head">
+              <h2><%= planIcon(p.slug) %></h2>
+              <span class="plan-status-pill <%= p.isActive ? 'on' : 'off' %>"><%= p.isActive ? '● Active' : '○ Inactive' %></span>
+            </header>
+            <div class="plan-card-price">
+              <strong><%= money(p.priceMonthly) %></strong>
+              <span>/ month</span>
+              <% if (p.priceAnnual > 0) { %>
+                <div class="plan-annual muted"><%= money(p.priceAnnual) %> / year</div>
+              <% } %>
+            </div>
+            <p class="plan-card-desc"><%= p.description || '—' %></p>
+            <ul class="plan-card-features">
+              <li><strong><%= limitLabel(p.maxMeetingsPerMonth, 'meetings') %></strong> / month</li>
+              <% (p.features || []).slice(0, 5).forEach(function(f) { %>
+                <li><%= f %></li>
+              <% }) %>
+            </ul>
+            <div class="plan-card-foot">
+              <a class="plan-sub-count" href="/admin/plans?tab=subscribers&plan=<%= p.slug %>">
+                <%= fmt(subCount) %> subscriber<%= subCount === 1 ? '' : 's' %>
+              </a>
+              <div class="plan-card-actions">
+                <a class="btn-ghost" href="/admin/plans/<%= p._id %>/edit">Edit</a>
+                <% if (!isFree) { %>
+                  <form method="POST" action="/admin/plans/<%= p._id %>/delete" onsubmit="return confirm('Delete plan <%= p.name %>?');" style="display:inline">
+                    <button type="submit" class="btn-ghost danger-text">Delete</button>
+                  </form>
+                <% } %>
+              </div>
+            </div>
+          </article>
+        <% }) %>
+      </div>
+
+      <div style="margin-top:18px">
+        <a class="btn-primary" href="/admin/plans/new">+ Create new plan</a>
+      </div>
+    <% } %>
+
+    <% if (tab === 'subscribers') { %>
+      <div class="admin-stats stats-4" style="margin-bottom:14px">
+        <div class="stat-card rich">
+          <span class="stat-label">Total users</span>
+          <strong><%= fmt(billingStats?.totalUsers || 0) %></strong>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">Paid subscribers</span>
+          <strong><%= fmt(billingStats?.paidUsers || 0) %></strong>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">Free</span>
+          <strong><%= fmt(billingStats?.freeUsers || 0) %></strong>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">Active</span>
+          <strong><%= fmt(billingStats?.activeUsers || 0) %></strong>
+        </div>
+      </div>
+
+      <form class="users-toolbar card" method="GET" action="/admin/plans">
+        <input type="hidden" name="tab" value="subscribers" />
+        <div class="users-search">
+          <span class="search-icon">🔍</span>
+          <input type="search" name="q" value="<%= filters?.q || '' %>" placeholder="Search users…" />
+        </div>
+        <div class="users-filters">
+          <select name="plan">
+            <option value="all">All plans</option>
+            <% (plans || []).forEach(function(p) { %>
+              <option value="<%= p.slug %>" <%= filters?.plan === p.slug ? 'selected' : '' %>><%= p.name %></option>
+            <% }) %>
+          </select>
+          <button type="submit" class="btn-ghost">Filter</button>
+        </div>
+      </form>
+
+      <div class="table-wrap card users-table-card">
+        <table class="users-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Plan</th>
+              <th>Joined</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <% if (!(subscribers || []).length) { %>
+              <tr><td colspan="5" class="empty-row">No subscribers match.</td></tr>
             <% } %>
-            <span class="muted">slug: <%= p.slug %></span>
-          </div>
-        </form>
-      <% }) %>
-    </section>
+            <% (subscribers || []).forEach(function(u) {
+              const slug = u.planSlug || 'free';
+              const label = slug === 'pro' ? '✦ PRO' : slug === 'team' ? 'TEAM' : slug === 'free' ? 'FREE' : slug.toUpperCase();
+              const cls = slug === 'pro' ? 'plan-pro' : slug === 'team' ? 'plan-business' : slug === 'free' ? 'plan-free' : 'plan-premium';
+            %>
+              <tr>
+                <td>
+                  <a class="user-cell" href="/admin/users/<%= u.id %>">
+                    <span class="user-avatar"><%= (u.displayName || u.username || '?').charAt(0).toUpperCase() %></span>
+                    <span class="user-meta">
+                      <strong><%= u.displayName || u.username %></strong>
+                      <span class="muted">@<%= u.username %></span>
+                    </span>
+                  </a>
+                </td>
+                <td><span class="plan-pill <%= cls %>"><%= label %></span></td>
+                <td class="muted" style="font-size:12px"><%= u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '—' %></td>
+                <td>
+                  <% if (u.isActive === false) { %>
+                    <span class="status-dot disabled">● Disabled</span>
+                  <% } else { %>
+                    <span class="status-dot active">● Active</span>
+                  <% } %>
+                </td>
+                <td><a class="btn-ghost" href="/admin/users/<%= u.id %>#plan">Change plan</a></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    <% } %>
+
+    <% if (tab === 'revenue') { %>
+      <div class="admin-stats stats-4">
+        <div class="stat-card rich">
+          <span class="stat-label">Est. MRR</span>
+          <strong><%= money(billingStats?.mrr || 0) %></strong>
+          <span class="stat-delta up">From active paid plans</span>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">Paid users</span>
+          <strong><%= fmt(billingStats?.paidUsers || 0) %></strong>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">New this month</span>
+          <strong><%= fmt(billingStats?.newThisMonth || 0) %></strong>
+        </div>
+        <div class="stat-card rich">
+          <span class="stat-label">Plans active</span>
+          <strong><%= fmt((plans || []).filter(function(p){ return p.isActive; }).length) %></strong>
+        </div>
+      </div>
+
+      <section class="card section-card" style="margin-top:14px">
+        <h2>Revenue by plan</h2>
+        <div class="table-wrap">
+          <table class="ai-table">
+            <thead>
+              <tr>
+                <th>Plan</th>
+                <th>Price / mo</th>
+                <th>Subscribers</th>
+                <th>Est. MRR</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% (plans || []).forEach(function(p) {
+                const c = counts[p.slug] || 0;
+                const mrr = (Number(p.priceMonthly) || 0) * c;
+              %>
+                <tr>
+                  <td><strong><%= p.name %></strong></td>
+                  <td><%= money(p.priceMonthly) %></td>
+                  <td><%= fmt(c) %></td>
+                  <td><strong><%= money(mrr) %></strong></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted" style="margin-top:12px;font-size:13px">
+          Revenue estimates are derived from plan prices × active subscribers. Connect Stripe (or another provider) for live payment data and transaction history.
+        </p>
+      </section>
+    <% } %>
+
+    <% if (tab === 'transactions') { %>
+      <section class="card section-card">
+        <h2>Payment system</h2>
+        <ul class="proc-list">
+          <li><span>Provider</span><span class="muted">Not connected</span></li>
+          <li><span>Payments</span><span class="muted">—</span></li>
+          <li><span>Subscriptions</span><span class="muted">—</span></li>
+          <li><span>Webhooks</span><span class="muted">—</span></li>
+        </ul>
+        <p class="muted" style="margin-top:14px;font-size:13px">
+          Transaction history will appear here once a payment provider (e.g. Stripe) is connected. Plan assignment and limits already work without billing integration.
+        </p>
+      </section>
+    <% } %>
   </div>
 </div>
 <%- include("../partials/footer") %>

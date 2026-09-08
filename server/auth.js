@@ -11,11 +11,29 @@ const planSchema = new mongoose.Schema({
   name: { type: String, required: true },
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
   priceMonthly: { type: Number, default: 0 },
+  priceAnnual: { type: Number, default: 0 },
   currency: { type: String, default: "USD" },
   description: { type: String, default: "" },
   features: { type: [String], default: [] },
+  // null / undefined / -1 means unlimited
   maxMeetingsPerMonth: { type: Number, default: 20 },
+  maxTranscriptionMinutes: { type: Number, default: 60 },
+  maxAiQuestions: { type: Number, default: 20 },
+  maxStorageGb: { type: Number, default: 1 },
+  featureFlags: {
+    liveTranscription: { type: Boolean, default: true },
+    aiSummaries: { type: Boolean, default: true },
+    actionItems: { type: Boolean, default: true },
+    askAi: { type: Boolean, default: false },
+    aiInsights: { type: Boolean, default: false },
+    pdfExport: { type: Boolean, default: false },
+    markdownExport: { type: Boolean, default: false },
+    txtExport: { type: Boolean, default: true },
+    teamWorkspace: { type: Boolean, default: false },
+    adminDashboard: { type: Boolean, default: false }
+  },
   isActive: { type: Boolean, default: true },
+  isRecommended: { type: Boolean, default: false },
   sortOrder: { type: Number, default: 0 }
 }, { timestamps: true });
 
@@ -192,9 +210,23 @@ export function isPaidPlan(slug) {
 
 export function planBadgeLabel(slug) {
   const s = String(slug || "free").toLowerCase();
-  if (s === "team" || s === "premium" || s === "business") return "PREMIUM";
+  if (s === "team") return "TEAM";
+  if (s === "premium" || s === "business") return "PREMIUM";
   if (s === "pro") return "PRO";
   return "FREE";
+}
+
+/** Treat null, undefined, -1, or >= 9999 as unlimited */
+export function isUnlimited(limit) {
+  if (limit == null) return true;
+  const n = Number(limit);
+  return !Number.isFinite(n) || n < 0 || n >= 9999;
+}
+
+export function formatLimit(limit, unit = "") {
+  if (isUnlimited(limit)) return "Unlimited";
+  const n = Number(limit) || 0;
+  return unit ? `${n} ${unit}` : String(n);
 }
 
 
@@ -376,30 +408,108 @@ export async function seedDefaults() {
         name: "Free",
         slug: "free",
         priceMonthly: 0,
-        description: "Get started with live transcription and basic AI summaries.",
-        features: ["Live meeting transcription", "AI summary", "5 meetings / month", "Chrome extension"],
+        priceAnnual: 0,
+        description: "Get started with AI-powered meeting notes.",
+        features: [
+          "5 meetings / month",
+          "Live transcription",
+          "Basic AI summaries",
+          "Basic action items",
+          "Chrome extension",
+          "Limited Ask AI",
+          "Basic exports"
+        ],
         maxMeetingsPerMonth: 5,
+        maxTranscriptionMinutes: 60,
+        maxAiQuestions: 10,
+        maxStorageGb: 1,
+        featureFlags: {
+          liveTranscription: true,
+          aiSummaries: true,
+          actionItems: true,
+          askAi: true,
+          aiInsights: false,
+          pdfExport: false,
+          markdownExport: false,
+          txtExport: true,
+          teamWorkspace: false,
+          adminDashboard: false
+        },
         isActive: true,
+        isRecommended: false,
         sortOrder: 0
       },
       {
         name: "Pro",
         slug: "pro",
         priceMonthly: 12,
-        description: "Unlimited notes, richer AI insights, and priority support.",
-        features: ["Unlimited meetings", "Detailed AI analysis", "Action items & chat", "Export PDF / MD / TXT", "Favourites & archive"],
-        maxMeetingsPerMonth: 9999,
+        priceAnnual: 120,
+        description: "Advanced AI meeting intelligence for individuals.",
+        features: [
+          "Unlimited meetings",
+          "Extended transcription",
+          "Detailed AI summaries",
+          "Action items",
+          "Ask AI",
+          "AI Insights",
+          "PDF / Markdown / TXT export",
+          "Meeting history",
+          "Priority processing"
+        ],
+        maxMeetingsPerMonth: null,
+        maxTranscriptionMinutes: 1000,
+        maxAiQuestions: 500,
+        maxStorageGb: 10,
+        featureFlags: {
+          liveTranscription: true,
+          aiSummaries: true,
+          actionItems: true,
+          askAi: true,
+          aiInsights: true,
+          pdfExport: true,
+          markdownExport: true,
+          txtExport: true,
+          teamWorkspace: false,
+          adminDashboard: false
+        },
         isActive: true,
+        isRecommended: true,
         sortOrder: 1
       },
       {
         name: "Team",
         slug: "team",
         priceMonthly: 29,
-        description: "For teams that need shared workspaces and admin controls.",
-        features: ["Everything in Pro", "Team seats", "Admin dashboard", "Priority support"],
-        maxMeetingsPerMonth: 9999,
+        priceAnnual: 290,
+        description: "AI Notes for teams that collaborate on meetings.",
+        features: [
+          "Everything in Pro",
+          "Team workspace",
+          "Multiple team members",
+          "Shared meetings",
+          "Team AI insights",
+          "Admin controls",
+          "Team usage analytics",
+          "Priority support"
+        ],
+        maxMeetingsPerMonth: null,
+        maxTranscriptionMinutes: null,
+        maxAiQuestions: null,
+        maxStorageGb: 50,
+        featureFlags: {
+          liveTranscription: true,
+          aiSummaries: true,
+          actionItems: true,
+          askAi: true,
+          aiInsights: true,
+          pdfExport: true,
+          markdownExport: true,
+          txtExport: true,
+          teamWorkspace: true,
+          adminDashboard: true
+        },
         isActive: true,
+        isRecommended: false,
         sortOrder: 2
       }
     ]);

@@ -1,0 +1,52 @@
+<%- include("../partials/header", { title: "Add user · Admin", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "users" }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <a class="back" href="/admin/users">← Users</a>
+        <h1>Add user</h1>
+        <p class="admin-sub">Create an account with a username and passkey.</p>
+      </div>
+    </header>
+
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <section class="card section-card" style="max-width:480px">
+      <form method="POST" action="/admin/users" class="admin-form">
+        <label>
+          Display name
+          <input type="text" name="displayName" value="<%= form?.displayName || '' %>" placeholder="Aftab Mumtaz" />
+        </label>
+        <label>
+          Username
+          <input type="text" name="username" value="<%= form?.username || '' %>" required pattern="[a-zA-Z0-9_]{3,32}" placeholder="aftabmumtaz" />
+        </label>
+        <label>
+          Passkey
+          <input type="password" name="passkey" required minlength="6" placeholder="At least 6 characters" />
+        </label>
+        <label>
+          Role
+          <select name="role">
+            <option value="user" selected>User</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+        <label>
+          Plan
+          <select name="planSlug">
+            <% (plans || []).forEach(function(p) { %>
+              <option value="<%= p.slug %>" <%= p.slug === 'free' ? 'selected' : '' %>><%= p.name %></option>
+            <% }) %>
+          </select>
+        </label>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="submit" class="btn-primary">Create user</button>
+          <a class="btn-ghost" href="/admin/users">Cancel</a>
+        </div>
+      </form>
+    </section>
+  </div>
+</div>
+<%- include("../partials/footer") %>

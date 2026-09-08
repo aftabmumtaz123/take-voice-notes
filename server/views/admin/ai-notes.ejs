@@ -1,0 +1,263 @@
+<%- include("../partials/header", { title: "AI Notes · Admin", bodyClass: "app-shell" }) %>
+<%
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return n.toLocaleString();
+    return String(n);
+  }
+  function fmtWhen(d) {
+    if (!d) return '—';
+    const dt = new Date(d);
+    const now = new Date();
+    const startToday = new Date(now); startToday.setHours(0,0,0,0);
+    const startThat = new Date(dt); startThat.setHours(0,0,0,0);
+    const diff = (startToday - startThat) / 86400000;
+    const time = dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (diff < 1) return 'Today ' + time;
+    if (diff < 2) return 'Yesterday ' + time;
+    return dt.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  }
+  function planPill(slug) {
+    const s = String(slug || 'free').toLowerCase();
+    if (s === 'pro') return { label: '✦ PRO', cls: 'plan-pro' };
+    if (s === 'team') return { label: 'TEAM', cls: 'plan-business' };
+    if (s === 'premium' || s === 'business') return { label: '✦ ' + s.toUpperCase(), cls: 'plan-premium' };
+    return { label: 'FREE', cls: 'plan-free' };
+  }
+  function aiNoteStatus(m) {
+    const ai = m.ai || {};
+    if (ai.error) return { key: 'failed', label: '⚠ Failed', cls: 'ai-failed' };
+    if (ai.summary) return { key: 'ready', label: '✓ Ready', cls: 'ai-ready-badge' };
+    if (m.fullTranscript) return { key: 'pending', label: '◌ Pending', cls: 'ai-pending' };
+    return { key: 'none', label: '— None', cls: 'ai-none' };
+  }
+  function contentBits(m) {
+    const ai = m.ai || {};
+    const bits = [];
+    if (ai.summary) bits.push({ t: 'Summary', ok: true });
+    if (ai.actionItems && ai.actionItems.length) bits.push({ t: 'Actions', ok: true });
+    if (ai.keyPoints && ai.keyPoints.length) bits.push({ t: 'Insights', ok: true });
+    if (ai.detailedSummary) bits.push({ t: 'Detailed', ok: true });
+    if (!bits.length && m.fullTranscript) bits.push({ t: 'Transcript only', ok: false });
+    if (!bits.length) bits.push({ t: 'No AI content', ok: false });
+    return bits;
+  }
+  const page = Number(pagination?.page || 1);
+  const totalPages = Number(pagination?.totalPages || 1);
+  const total = Number(pagination?.total || 0);
+  const limit = Number(pagination?.limit || 25);
+  const from = total === 0 ? 0 : (page - 1) * limit + 1;
+  const to = Math.min(page * limit, total);
+  const q = filters?.q || '';
+  const contentFilter = filters?.content || 'all';
+  const statusFilter = filters?.status || 'all';
+  const planFilter = filters?.plan || 'all';
+  const dateFilter = filters?.date || 'all';
+  const series = activitySeries || [];
+  const maxSeries = Math.max(1, ...series.map((s) => s.value || 0));
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "ai-notes" }) %>
+  <div class="main admin-main">
+    <header class="main-top admin-hero">
+      <div>
+        <h1>AI Notes</h1>
+        <p class="admin-sub">Monitor AI-generated summaries, action items, insights, and AI processing across all users.</p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-ghost" href="/admin/ai-notes/export.csv?q=<%= encodeURIComponent(q) %>&content=<%= contentFilter %>&status=<%= statusFilter %>&plan=<%= planFilter %>&date=<%= dateFilter %>">Export</a>
+        <a class="btn-ghost" href="/admin/ai-notes?q=<%= encodeURIComponent(q) %>&content=<%= contentFilter %>&status=<%= statusFilter %>&plan=<%= planFilter %>&date=<%= dateFilter %>&page=<%= page %>">Refresh</a>
+        <a class="btn-ghost" href="/admin">Overview</a>
+      </div>
+    </header>
+
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="admin-stats stats-4">
+      <div class="stat-card rich">
+        <span class="stat-label">AI Notes</span>
+        <strong><%= fmt(stats.total) %></strong>
+        <% if (stats.growth != null) { %>
+          <span class="stat-delta <%= stats.growth >= 0 ? 'up' : '' %>"><%= stats.growth >= 0 ? '+' : '' %><%= stats.growth %>% this month</span>
+        <% } %>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Generated today</span>
+        <strong><%= fmt(stats.today) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">With action items</span>
+        <strong><%= fmt(stats.withActions) %></strong>
+        <span class="stat-delta up"><%= stats.actionRate %>% of AI notes</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Failed / needs review</span>
+        <strong><%= fmt(stats.failed) %></strong>
+        <span class="stat-delta"><%= stats.failRate %>% failure rate</span>
+      </div>
+    </div>
+
+    <!-- AI activity spark bars -->
+    <section class="card section-card ai-activity-card">
+      <div class="ai-activity-head">
+        <h2>AI activity</h2>
+        <span class="muted">Last 14 days · notes generated</span>
+      </div>
+      <div class="ai-spark">
+        <% series.forEach(function(s) {
+          const h = Math.max(4, Math.round(((s.value || 0) / maxSeries) * 100));
+        %>
+          <div class="ai-spark-col" title="<%= s.label %>: <%= s.value %>">
+            <div class="ai-spark-bar" style="height:<%= h %>%"></div>
+            <span class="ai-spark-label"><%= s.short %></span>
+          </div>
+        <% }) %>
+      </div>
+      <div class="ai-health-row">
+        <div class="ai-health-item"><span class="status-dot active">●</span> Summarization <strong>Operational</strong></div>
+        <div class="ai-health-item"><span class="status-dot active">●</span> Action items <strong>Operational</strong></div>
+        <div class="ai-health-item"><span class="status-dot active">●</span> Ask AI <strong>Operational</strong></div>
+        <div class="ai-health-item">Success rate <strong><%= stats.successRate %>%</strong></div>
+      </div>
+    </section>
+
+    <form class="users-toolbar card" method="GET" action="/admin/ai-notes">
+      <div class="users-search">
+        <span class="search-icon">🔍</span>
+        <input type="search" name="q" value="<%= q %>" placeholder="Search notes, meetings, users…" />
+      </div>
+      <div class="users-filters">
+        <select name="content">
+          <option value="all" <%= contentFilter === 'all' ? 'selected' : '' %>>All content</option>
+          <option value="summary" <%= contentFilter === 'summary' ? 'selected' : '' %>>AI Summary</option>
+          <option value="actions" <%= contentFilter === 'actions' ? 'selected' : '' %>>Action items</option>
+          <option value="insights" <%= contentFilter === 'insights' ? 'selected' : '' %>>Key points / insights</option>
+          <option value="failed" <%= contentFilter === 'failed' ? 'selected' : '' %>>Failed only</option>
+        </select>
+        <select name="status">
+          <option value="all" <%= statusFilter === 'all' ? 'selected' : '' %>>All status</option>
+          <option value="ready" <%= statusFilter === 'ready' ? 'selected' : '' %>>Ready</option>
+          <option value="pending" <%= statusFilter === 'pending' ? 'selected' : '' %>>Pending</option>
+          <option value="failed" <%= statusFilter === 'failed' ? 'selected' : '' %>>Failed</option>
+        </select>
+        <select name="plan">
+          <option value="all" <%= planFilter === 'all' ? 'selected' : '' %>>All plans</option>
+          <% (plans || []).forEach(function(p) { %>
+            <option value="<%= p.slug %>" <%= planFilter === p.slug ? 'selected' : '' %>><%= p.name %></option>
+          <% }) %>
+        </select>
+        <select name="date">
+          <option value="all" <%= dateFilter === 'all' ? 'selected' : '' %>>All dates</option>
+          <option value="today" <%= dateFilter === 'today' ? 'selected' : '' %>>Today</option>
+          <option value="7d" <%= dateFilter === '7d' ? 'selected' : '' %>>Last 7 days</option>
+          <option value="30d" <%= dateFilter === '30d' ? 'selected' : '' %>>Last 30 days</option>
+        </select>
+        <button type="submit" class="btn-ghost">Filter</button>
+      </div>
+    </form>
+
+    <div class="table-wrap card users-table-card">
+      <table class="users-table">
+        <thead>
+          <tr>
+            <th>Meeting / Note</th>
+            <th>User</th>
+            <th>Plan</th>
+            <th>AI content</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% if (!(notes || []).length) { %>
+            <tr><td colspan="7" class="empty-row">No AI notes match your filters.</td></tr>
+          <% } %>
+          <% (notes || []).forEach(function(m) {
+            const st = aiNoteStatus(m);
+            const bits = contentBits(m);
+            const owner = m.owner || {};
+            const pill = planPill(owner.planSlug);
+            const title = (m.ai && m.ai.generatedTitle) || m.title || 'Untitled meeting';
+          %>
+            <tr>
+              <td>
+                <a class="meeting-title-link" href="/admin/ai-notes/<%= m.externalId %>">
+                  <strong><%= title %></strong>
+                </a>
+              </td>
+              <td>
+                <% if (owner.username) { %>
+                  <a class="user-cell compact" href="/admin/users/<%= owner.id %>">
+                    <span class="user-avatar sm"><%= (owner.displayName || owner.username || '?').charAt(0).toUpperCase() %></span>
+                    <span class="user-meta">
+                      <strong>@<%= owner.username %></strong>
+                    </span>
+                  </a>
+                <% } else { %>
+                  <span class="muted"><%= m.userId || '—' %></span>
+                <% } %>
+              </td>
+              <td><span class="plan-pill <%= pill.cls %>"><%= pill.label %></span></td>
+              <td>
+                <div class="ai-content-bits">
+                  <% bits.forEach(function(b) { %>
+                    <span class="ai-bit <%= b.ok ? 'ok' : 'muted-bit' %>"><%= b.t %></span>
+                  <% }) %>
+                </div>
+              </td>
+              <td><span class="ai-status-badge <%= st.cls %>"><%= st.label %></span></td>
+              <td class="muted" style="white-space:nowrap;font-size:12px"><%= fmtWhen(m.ai?.generatedAt || m.updatedAt || m.createdAt) %></td>
+              <td class="actions-cell">
+                <div class="menu-wrap">
+                  <button type="button" class="menu-trigger" aria-label="Actions">⋮</button>
+                  <div class="menu-dropdown">
+                    <a href="/admin/ai-notes/<%= m.externalId %>">View AI note</a>
+                    <a href="/admin/meetings/<%= m.externalId %>">View meeting</a>
+                    <% if (owner.id) { %><a href="/admin/users/<%= owner.id %>">View user</a><% } %>
+                    <form method="POST" action="/admin/meetings/<%= m.externalId %>/analyze">
+                      <button type="submit">Retry AI processing</button>
+                    </form>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+
+    <% if (totalPages > 1 || total > 0) { %>
+      <div class="users-pagination">
+        <span class="muted">Showing <%= from %>–<%= to %> of <%= fmt(total) %> AI notes</span>
+        <div class="pager">
+          <% if (page > 1) { %>
+            <a class="btn-ghost" href="/admin/ai-notes?q=<%= encodeURIComponent(q) %>&content=<%= contentFilter %>&status=<%= statusFilter %>&plan=<%= planFilter %>&date=<%= dateFilter %>&page=<%= page - 1 %>">← Previous</a>
+          <% } %>
+          <% for (let p = 1; p <= totalPages && p <= 7; p++) { %>
+            <a class="page-num <%= p === page ? 'active' : '' %>" href="/admin/ai-notes?q=<%= encodeURIComponent(q) %>&content=<%= contentFilter %>&status=<%= statusFilter %>&plan=<%= planFilter %>&date=<%= dateFilter %>&page=<%= p %>"><%= p %></a>
+          <% } %>
+          <% if (page < totalPages) { %>
+            <a class="btn-ghost" href="/admin/ai-notes?q=<%= encodeURIComponent(q) %>&content=<%= contentFilter %>&status=<%= statusFilter %>&plan=<%= planFilter %>&date=<%= dateFilter %>&page=<%= page + 1 %>">Next →</a>
+          <% } %>
+        </div>
+      </div>
+    <% } %>
+  </div>
+</div>
+<script>
+  document.querySelectorAll('.menu-trigger').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wrap = btn.closest('.menu-wrap');
+      document.querySelectorAll('.menu-wrap.open').forEach((w) => { if (w !== wrap) w.classList.remove('open'); });
+      wrap.classList.toggle('open');
+    });
+  });
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.menu-wrap.open').forEach((w) => w.classList.remove('open'));
+  });
+</script>
+<%- include("../partials/footer") %>

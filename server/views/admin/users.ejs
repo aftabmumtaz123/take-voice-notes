@@ -1,59 +1,203 @@
 <%- include("../partials/header", { title: "Users · Admin", bodyClass: "app-shell" }) %>
+<%
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return n.toLocaleString();
+    return String(n);
+  }
+  function planBadge(slug) {
+    const s = String(slug || 'free').toLowerCase();
+    if (s === 'pro') return { label: '✦ PRO', cls: 'plan-pro' };
+    if (s === 'premium' || s === 'team') return { label: '✦ PREMIUM', cls: 'plan-premium' };
+    if (s === 'business') return { label: '✦ BUSINESS', cls: 'plan-business' };
+    return { label: 'FREE', cls: 'plan-free' };
+  }
+  const page = Number(pagination?.page || 1);
+  const totalPages = Number(pagination?.totalPages || 1);
+  const total = Number(pagination?.total || (users || []).length);
+  const limit = Number(pagination?.limit || 20);
+  const from = total === 0 ? 0 : (page - 1) * limit + 1;
+  const to = Math.min(page * limit, total);
+  const q = filters?.q || '';
+  const planFilter = filters?.plan || 'all';
+  const roleFilter = filters?.role || 'all';
+  const statusFilter = filters?.status || 'all';
+%>
 <div class="shell">
   <%- include("partials/admin-sidebar", { user, activeNav: "users" }) %>
-  <div class="main">
-    <header class="main-top">
-      <h1>Users</h1>
+  <div class="main admin-main">
+    <header class="main-top admin-hero users-hero">
+      <div>
+        <h1>Users</h1>
+        <p class="admin-sub">Manage accounts, subscriptions, access and AI Notes usage.</p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-primary" href="/admin/users/new">+ Add user</a>
+      </div>
     </header>
+
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
 
-    <div class="table-wrap card" style="padding:0; overflow:auto">
-      <table>
+    <!-- Summary cards -->
+    <div class="admin-stats stats-4">
+      <div class="stat-card rich">
+        <span class="stat-label">Total Users</span>
+        <strong><%= fmt(stats.total) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Active</span>
+        <strong><%= fmt(stats.active) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">✦ Pro Users</span>
+        <strong><%= fmt(stats.pro) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Free Users</span>
+        <strong><%= fmt(stats.free) %></strong>
+      </div>
+    </div>
+
+    <!-- Search + filters -->
+    <form class="users-toolbar card" method="GET" action="/admin/users">
+      <div class="users-search">
+        <span class="search-icon" aria-hidden="true">🔍</span>
+        <input type="search" name="q" value="<%= q %>" placeholder="Search username or display name…" />
+      </div>
+      <div class="users-filters">
+        <select name="plan">
+          <option value="all" <%= planFilter === 'all' ? 'selected' : '' %>>All Plans</option>
+          <% (plans || []).forEach(function(p) { %>
+            <option value="<%= p.slug %>" <%= planFilter === p.slug ? 'selected' : '' %>><%= p.name %></option>
+          <% }) %>
+        </select>
+        <select name="role">
+          <option value="all" <%= roleFilter === 'all' ? 'selected' : '' %>>All Roles</option>
+          <option value="user" <%= roleFilter === 'user' ? 'selected' : '' %>>User</option>
+          <option value="admin" <%= roleFilter === 'admin' ? 'selected' : '' %>>Admin</option>
+        </select>
+        <select name="status">
+          <option value="all" <%= statusFilter === 'all' ? 'selected' : '' %>>All Status</option>
+          <option value="active" <%= statusFilter === 'active' ? 'selected' : '' %>>Active</option>
+          <option value="disabled" <%= statusFilter === 'disabled' ? 'selected' : '' %>>Disabled</option>
+        </select>
+        <button type="submit" class="btn-ghost">Filter</button>
+        <a class="btn-ghost" href="/admin/users/export.csv?q=<%= encodeURIComponent(q) %>&plan=<%= encodeURIComponent(planFilter) %>&role=<%= encodeURIComponent(roleFilter) %>&status=<%= encodeURIComponent(statusFilter) %>">Export</a>
+      </div>
+    </form>
+
+    <!-- Users table -->
+    <div class="table-wrap card users-table-card">
+      <table class="users-table">
         <thead>
           <tr>
             <th>User</th>
-            <th>Role</th>
             <th>Plan</th>
+            <th>Role</th>
+            <th>Meetings</th>
+            <th>AI Notes</th>
+            <th>Usage</th>
             <th>Status</th>
-            <th>Actions</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
-          <% (users || []).forEach(function(u) { %>
+          <% if (!(users || []).length) { %>
+            <tr><td colspan="8" class="empty-row">No users match your filters.</td></tr>
+          <% } %>
+          <% (users || []).forEach(function(u) {
+            const badge = planBadge(u.planSlug);
+            const meetings = u.stats?.meetings ?? 0;
+            const aiNotes = u.stats?.aiNotes ?? 0;
+            const usagePct = u.stats?.usagePct;
+            const isSelf = String(u.id || u._id) === String(user.id);
+          %>
             <tr>
               <td>
-                <strong>@<%= u.username %></strong>
-                <div class="muted" style="font-size:12px"><%= u.displayName %></div>
+                <a class="user-cell" href="/admin/users/<%= u.id || u._id %>">
+                  <span class="user-avatar"><%= (u.displayName || u.username || '?').charAt(0).toUpperCase() %></span>
+                  <span class="user-meta">
+                    <strong><%= u.displayName || u.username %></strong>
+                    <span class="muted">@<%= u.username %></span>
+                  </span>
+                </a>
+              </td>
+              <td><span class="plan-pill <%= badge.cls %>"><%= badge.label %></span></td>
+              <td><span class="role-pill role-<%= u.role || 'user' %>"><%= (u.role || 'user').toUpperCase() %></span></td>
+              <td class="num"><%= u.role === 'admin' && meetings === 0 ? '—' : fmt(meetings) %></td>
+              <td class="num"><%= u.role === 'admin' && aiNotes === 0 ? '—' : fmt(aiNotes) %></td>
+              <td class="num">
+                <% if (usagePct == null || (u.role === 'admin' && meetings === 0)) { %>
+                  —
+                <% } else { %>
+                  <span class="usage-pct <%= usagePct >= 90 ? 'high' : usagePct >= 70 ? 'mid' : '' %>"><%= usagePct %>%</span>
+                <% } %>
               </td>
               <td>
-                <form method="POST" action="/admin/users/<%= u.id || u._id %>/role" class="inline-form">
-                  <select name="role" onchange="this.form.submit()">
-                    <option value="user" <%= u.role === 'user' ? 'selected' : '' %>>user</option>
-                    <option value="admin" <%= u.role === 'admin' ? 'selected' : '' %>>admin</option>
-                  </select>
-                </form>
+                <% if (u.isActive === false) { %>
+                  <span class="status-dot disabled">● Disabled</span>
+                <% } else { %>
+                  <span class="status-dot active">● Active</span>
+                <% } %>
               </td>
-              <td>
-                <form method="POST" action="/admin/users/<%= u.id || u._id %>/plan" class="inline-form">
-                  <select name="planSlug" onchange="this.form.submit()">
-                    <% (plans || []).forEach(function(p) { %>
-                      <option value="<%= p.slug %>" <%= (u.planSlug || 'free') === p.slug ? 'selected' : '' %>><%= p.name %></option>
-                    <% }) %>
-                  </select>
-                </form>
-              </td>
-              <td><%= u.isActive === false ? 'Disabled' : 'Active' %></td>
-              <td>
-                <form method="POST" action="/admin/users/<%= u.id || u._id %>/toggle" style="display:inline">
-                  <button type="submit" class="btn-ghost"><%= u.isActive === false ? 'Enable' : 'Disable' %></button>
-                </form>
+              <td class="actions-cell">
+                <div class="menu-wrap">
+                  <button type="button" class="menu-trigger" aria-label="Actions">⋮</button>
+                  <div class="menu-dropdown">
+                    <a href="/admin/users/<%= u.id || u._id %>">View user</a>
+                    <a href="/admin/users/<%= u.id || u._id %>#usage">View usage</a>
+                    <a href="/admin/users/<%= u.id || u._id %>#meetings">View meetings</a>
+                    <a href="/admin/users/<%= u.id || u._id %>#plan">Change plan</a>
+                    <a href="/admin/users/<%= u.id || u._id %>#role">Change role</a>
+                    <% if (!isSelf) { %>
+                      <form method="POST" action="/admin/users/<%= u.id || u._id %>/toggle">
+                        <button type="submit"><%= u.isActive === false ? 'Enable account' : 'Disable account' %></button>
+                      </form>
+                      <form method="POST" action="/admin/users/<%= u.id || u._id %>/delete" onsubmit="return confirm('Delete @<%= u.username %> permanently? This cannot be undone.');">
+                        <button type="submit" class="danger">Delete user</button>
+                      </form>
+                    <% } %>
+                  </div>
+                </div>
               </td>
             </tr>
           <% }) %>
         </tbody>
       </table>
     </div>
+
+    <!-- Pagination -->
+    <% if (totalPages > 1 || total > 0) { %>
+      <div class="users-pagination">
+        <span class="muted">Showing <%= from %>–<%= to %> of <%= fmt(total) %> users</span>
+        <div class="pager">
+          <% if (page > 1) { %>
+            <a class="btn-ghost" href="/admin/users?q=<%= encodeURIComponent(q) %>&plan=<%= planFilter %>&role=<%= roleFilter %>&status=<%= statusFilter %>&page=<%= page - 1 %>">← Previous</a>
+          <% } %>
+          <% for (let p = 1; p <= totalPages && p <= 7; p++) { %>
+            <a class="page-num <%= p === page ? 'active' : '' %>" href="/admin/users?q=<%= encodeURIComponent(q) %>&plan=<%= planFilter %>&role=<%= roleFilter %>&status=<%= statusFilter %>&page=<%= p %>"><%= p %></a>
+          <% } %>
+          <% if (page < totalPages) { %>
+            <a class="btn-ghost" href="/admin/users?q=<%= encodeURIComponent(q) %>&plan=<%= planFilter %>&role=<%= roleFilter %>&status=<%= statusFilter %>&page=<%= page + 1 %>">Next →</a>
+          <% } %>
+        </div>
+      </div>
+    <% } %>
   </div>
 </div>
+<script>
+  document.querySelectorAll('.menu-trigger').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wrap = btn.closest('.menu-wrap');
+      document.querySelectorAll('.menu-wrap.open').forEach((w) => { if (w !== wrap) w.classList.remove('open'); });
+      wrap.classList.toggle('open');
+    });
+  });
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.menu-wrap.open').forEach((w) => w.classList.remove('open'));
+  });
+</script>
 <%- include("../partials/footer") %>
