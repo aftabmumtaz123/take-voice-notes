@@ -46,7 +46,8 @@ const config = {
   deepgramModel: env.DEEPGRAM_MODEL || 'nova-3',
   assemblyaiModel: env.ASSEMBLYAI_MODEL || 'universal-3-5-pro',
   openaiModel: env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
-  backendUrl: env.BACKEND_URL || 'http://localhost:4000'
+  backendUrl: env.BACKEND_URL || 'http://localhost:4000',
+  clientUrl: env.CLIENT_URL || 'http://localhost:3000'
 };
 
 fs.rmSync(dist, { recursive: true, force: true });

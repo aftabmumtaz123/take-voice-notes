@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Note Taker — Account</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Auth screens -->
+    <section id="authView" class="auth-shell">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">✦</div>
+          <div>
+            <h1>AI Note Taker</h1>
+            <p>Sign in to sync meetings across the extension and web.</p>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button type="button" class="tab active" data-tab="login">Log in</button>
+          <button type="button" class="tab" data-tab="register">Create account</button>
+        </div>
+
+        <form id="loginForm" class="auth-form">
+          <label>Username
+            <input id="loginUsername" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" placeholder="e.g. aftab" />
+          </label>
+          <label>Passkey
+            <input id="loginPasskey" name="passkey" type="password" autocomplete="current-password" required minlength="6" placeholder="At least 6 characters" />
+          </label>
+          <button type="submit" class="primary">Log in</button>
+          <p class="hint">Username is unique. Use the same account in the Chrome extension.</p>
+        </form>
+
+        <form id="registerForm" class="auth-form hidden">
+          <label>Username
+            <input id="regUsername" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" placeholder="letters, numbers, _" />
+          </label>
+          <label>Display name <span class="optional">(optional)</span>
+            <input id="regDisplay" name="displayName" maxlength="80" placeholder="Your name" />
+          </label>
+          <label>Passkey
+            <input id="regPasskey" name="passkey" type="password" autocomplete="new-password" required minlength="6" placeholder="At least 6 characters" />
+          </label>
+          <label>Confirm passkey
+            <input id="regPasskey2" type="password" autocomplete="new-password" required minlength="6" />
+          </label>
+          <button type="submit" class="primary">Create account</button>
+        </form>
+
+        <p id="authError" class="error hidden"></p>
+      </div>
+    </section>
+
+    <!-- Logged-in app -->
+    <section id="appView" class="hidden">
+      <header class="top">
+        <div class="top-left">
+          <span class="logo">✦</span>
+          <strong>My Meetings</strong>
+        </div>
+        <div class="top-right">
+          <span id="whoami" class="who"></span>
+          <button type="button" id="btnLogout" class="ghost">Log out</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <div class="search-row">
+            <input id="searchInput" type="search" placeholder="Search meetings…" />
+          </div>
+          <div id="meetingList" class="meeting-list">
+            <div class="loading">Loading…</div>
+          </div>
+        </aside>
+        <section class="detail" id="detailPane">
+          <div class="empty-detail">
+            <h2>Select a meeting</h2>
+            <p>Your saved transcripts and AI summaries appear here. Record from the Chrome extension while logged in with the same account.</p>
+          </div>
+        </section>
+      </main>
+    </section>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

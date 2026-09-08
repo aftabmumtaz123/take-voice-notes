@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title><%= typeof title !== "undefined" ? title + " · " : "" %>AI Note Taker</title>
+  <link rel="stylesheet" href="/public/app.css" />
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">
+      <span class="mark">✦</span>
+      <strong>AI Note Taker</strong>
+    </a>
+    <nav>
+      <% if (user) { %>
+        <span class="who">@<%= user.username %></span>
+        <a href="/account">API key</a>
+        <a href="/logout">Log out</a>
+      <% } else { %>
+        <a href="/login">Log in</a>
+        <a class="btn" href="/register">Create account</a>
+      <% } %>
+    </nav>
+  </header>
+  <main class="wrap">
+    <% if (typeof error !== "undefined" && error) { %>
+      <div class="flash error"><%= error %></div>
+    <% } %>
+    <% if (typeof success !== "undefined" && success) { %>
+      <div class="flash ok"><%= success %></div>
+    <% } %>
+    <%- body %>
+  </main>
+  <script src="/public/app.js"></script>
+</body>
+</html>

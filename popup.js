@@ -19,8 +19,18 @@ const btnNewNote = $('btnNewNote');
 const btnClear = $('btnClear');
 const btnCopy = $('btnCopy');
 const btnDownload = $('btnDownload');
+const btnSaveAnalyze = $('btnSaveAnalyze');
 const optionsLink = $('optionsLink');
 const dashboardLink = $('dashboardLink');
+const authGate = $('authGate');
+const mainApp = $('mainApp');
+const authServerUrl = $('authServerUrl');
+const authApiKey = $('authApiKey');
+const btnSaveApiKey = $('btnSaveApiKey');
+const btnOpenWebAuth = $('btnOpenWebAuth');
+const authGateError = $('authGateError');
+const authFooter = $('authFooter');
+const logoutLink = $('logoutLink');
 const meetingDetected = $('meetingDetected');
 const meetingDetectedIcon = $('meetingDetectedIcon');
 const meetingDetectedTitle = $('meetingDetectedTitle');
@@ -171,7 +181,27 @@ function renderMeetingDetected(meeting) {
   meetingDetected.classList.remove('hidden');
 }
 
+function applyAuthUI(snapshot) {
+  const loggedIn = Boolean(snapshot?.isLoggedIn && snapshot?.authUser);
+  if (authGate) authGate.classList.toggle('hidden', loggedIn);
+  if (mainApp) mainApp.classList.toggle('hidden', !loggedIn);
+  if (authFooter) {
+    authFooter.textContent = loggedIn
+      ? `@${snapshot.authUser.username}`
+      : 'Not signed in';
+  }
+  if (logoutLink) logoutLink.classList.toggle('hidden', !loggedIn);
+  if (!loggedIn && authServerUrl && snapshot?.backendUrl) {
+    authServerUrl.value = snapshot.backendUrl;
+  }
+  if (!loggedIn && authApiKey) {
+    setTimeout(() => authApiKey.focus(), 50);
+  }
+}
+
 function applySnapshot(snapshot) {
+  applyAuthUI(snapshot);
+  if (!snapshot?.isLoggedIn) return;
   if (!userIsEditing) setTranscript(snapshot.transcript || '');
   if (snapshot.noteTitle !== undefined && document.activeElement !== sessionTitle) {
     sessionTitle.value = snapshot.noteTitle || 'Untitled meeting';
@@ -180,6 +210,12 @@ function applySnapshot(snapshot) {
   currentState = snapshot.recordingState || currentState;
   renderMeetingDetected(snapshot.pendingMeeting || null);
   updateUI(); manageTimer();
+}
+
+function showAuthError(msg) {
+  if (!authGateError) return;
+  authGateError.textContent = msg || '';
+  authGateError.classList.toggle('hidden', !msg);
 }
 
 async function loadScriptMode() {
@@ -292,10 +328,35 @@ btnStart.addEventListener('click', async () => {
 });
 
 btnStop.addEventListener('click', async () => {
-  const result = await send('STOP_RECORDING');
-  if (result?.ok) {
-    currentState = {isRecording:false,isPaused:false,startTime:null,totalPausedMs:0,provider:null};
-    setInterim(''); updateUI(); manageTimer();
+  btnStop.disabled = true;
+  try {
+    const result = await send('STOP_RECORDING');
+    if (result?.ok) {
+      currentState = { isRecording: false, isPaused: false, startTime: null, totalPausedMs: 0, provider: null };
+      setInterim('');
+      updateUI();
+      manageTimer();
+      if (result.synced) {
+        showToast(
+          result.analysisReady
+            ? 'Meeting saved and AI summary is ready.'
+            : (result.analysisError
+              ? `Saved. AI analysis issue: ${result.analysisError}`
+              : 'Meeting saved to MongoDB.'),
+          { title: 'Recording stopped', type: result.analysisReady ? 'success' : 'info', duration: 4200 }
+        );
+      } else if (result.syncError) {
+        showToast(`Saved locally. Sync later: ${result.syncError}`, {
+          title: 'Backend offline',
+          type: 'warn',
+          duration: 5000
+        });
+      }
+    } else {
+      showToast(result?.error || 'Stop failed.', { title: 'Error', type: 'error' });
+    }
+  } finally {
+    btnStop.disabled = !currentState.isRecording;
   }
 });
 
@@ -387,6 +448,72 @@ btnDownload.addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
+btnSaveAnalyze.addEventListener('click', async () => {
+  const text = transcriptArea.value.trim();
+  const title = sessionTitle.value.trim() || 'Untitled meeting';
+  if (!text) {
+    showToast('Type or paste notes in the transcript box first.', {
+      title: 'Nothing to save',
+      type: 'info',
+      duration: 3200
+    });
+    return;
+  }
+
+  btnSaveAnalyze.disabled = true;
+  const originalLabel = btnSaveAnalyze.innerHTML;
+  btnSaveAnalyze.innerHTML = '<span class="btn-icon">…</span> Saving…';
+
+  try {
+    // Persist any in-progress edits before save
+    await chrome.storage.local.set({
+      currentTranscript: text,
+      noteTitle: title,
+      lastUpdated: Date.now()
+    });
+
+    const result = await send('SAVE_AND_ANALYZE', {
+      transcript: text,
+      title,
+      platform: pendingMeeting?.platform || 'Manual'
+    });
+
+    if (!result?.ok) {
+      showToast(result?.error || 'Could not save to the backend.', {
+        title: 'Save failed',
+        type: 'error',
+        duration: 5500
+      });
+      return;
+    }
+
+    if (result.synced) {
+      const aiNote = result.analysisReady
+        ? 'AI summary is ready.'
+        : (result.analysisError
+          ? `Saved, but AI analysis failed: ${result.analysisError}`
+          : 'Saved. AI analysis may still be processing.');
+      showToast(aiNote, {
+        title: 'Saved to MongoDB',
+        type: result.analysisReady ? 'success' : 'warn',
+        duration: 4500
+      });
+    } else {
+      showToast(
+        result.syncError
+          ? `Queued offline. Will retry when the server is back. (${result.syncError})`
+          : 'Queued offline. Start the server to sync.',
+        { title: 'Saved locally', type: 'warn', duration: 5500 }
+      );
+    }
+  } catch (err) {
+    showToast(err.message || String(err), { title: 'Save failed', type: 'error', duration: 5000 });
+  } finally {
+    btnSaveAnalyze.disabled = false;
+    btnSaveAnalyze.innerHTML = originalLabel;
+  }
+});
+
 transcriptArea.addEventListener('focus', () => userIsEditing = true);
 transcriptArea.addEventListener('blur', () => { userIsEditing = false; saveEditedTranscript(); });
 transcriptArea.addEventListener('input', () => { updateCounts(); saveEditedTranscript(); });
@@ -397,7 +524,14 @@ meetingDismiss.addEventListener('click', async () => {
   meetingDetected.classList.add('hidden');
 });
 
-dashboardLink.addEventListener('click', async (e) => { e.preventDefault(); try { await chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html') }); } catch (error) { showToast(error.message || String(error), { title: 'Could not open dashboard', type: 'error' }); } });
+dashboardLink.addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    await chrome.tabs.create({ url: 'http://localhost:4000/' });
+  } catch (error) {
+    showToast(error.message || String(error), { title: 'Could not open dashboard', type: 'error' });
+  }
+});
 optionsLink.addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -439,6 +573,44 @@ async function ensureMicrophonePermission() {
   }
   return false;
 }
+
+btnSaveApiKey?.addEventListener('click', async () => {
+  const apiKey = (authApiKey?.value || '').trim();
+  const serverUrl = (authServerUrl?.value || '').trim().replace(/\/$/, '') || 'http://localhost:4000';
+  if (!apiKey) {
+    showAuthError('Paste your API key from the web account page.');
+    return;
+  }
+  showAuthError('');
+  btnSaveApiKey.disabled = true;
+  const prevLabel = btnSaveApiKey.textContent;
+  btnSaveApiKey.textContent = 'Connecting…';
+  try {
+    const result = await send('SET_API_KEY', { apiKey, serverUrl });
+    if (!result?.ok) {
+      showAuthError(result?.error || 'Could not connect. Check server and API key.');
+      return;
+    }
+    showToast(`Connected as @${result.user?.username || 'user'}`, { type: 'success', duration: 2500 });
+    await loadState();
+  } finally {
+    btnSaveApiKey.disabled = false;
+    btnSaveApiKey.textContent = prevLabel;
+  }
+});
+
+btnOpenWebAuth?.addEventListener('click', async () => {
+  const result = await send('OPEN_CLIENT_AUTH');
+  if (!result?.ok) {
+    showAuthError(result?.error || 'Could not open http://localhost:4000 — is the server running?');
+  }
+});
+logoutLink?.addEventListener('click', async (e) => {
+  e.preventDefault();
+  await send('AUTH_LOGOUT');
+  showToast('Signed out.', { type: 'info', duration: 2000 });
+  await loadState();
+});
 
 loadScriptMode();
 loadState();

@@ -1,0 +1,17 @@
+<%- include("partials/header", { title: "Register" }) %>
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="auth-brand"><span class="logo">✦</span><h1>Create account</h1></div>
+    <p class="lead">Username is unique. You will receive an API key for the Chrome extension.</p>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+    <form method="POST" action="/register" class="form">
+      <label>Username<input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" /></label>
+      <label>Display name <span class="opt">(optional)</span><input name="displayName" maxlength="80" /></label>
+      <label>Passkey<input name="passkey" type="password" required minlength="6" /></label>
+      <label>Confirm passkey<input name="passkey2" type="password" required minlength="6" /></label>
+      <button type="submit" class="btn-primary">Create account</button>
+    </form>
+    <p class="muted center">Already have an account? <a href="/login">Log in</a></p>
+  </div>
+</div>
+<%- include("partials/footer") %>

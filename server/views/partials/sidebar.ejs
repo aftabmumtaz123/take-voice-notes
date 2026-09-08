@@ -1,0 +1,37 @@
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <span class="logo">✦</span>
+    <div>
+      <strong>AI Note Taker</strong>
+      <small>Meeting intelligence</small>
+    </div>
+  </div>
+  <nav class="sidebar-nav">
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'meetings' ? 'active' : '' %>" href="/?view=all">
+      <span class="nav-ico">⌂</span> My Meetings
+    </a>
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'favorites' ? 'active' : '' %>" href="/?view=favorites">
+      <span class="nav-ico">★</span> Favourites
+    </a>
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'archived' ? 'active' : '' %>" href="/?view=archived">
+      <span class="nav-ico">▤</span> Archived
+    </a>
+    <% if (typeof user !== "undefined" && user) { %>
+    <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'account' ? 'active' : '' %>" href="/account">
+      <span class="nav-ico">⚙</span> Account & API key
+    </a>
+    <a class="nav-item" href="/logout">
+      <span class="nav-ico">↪</span> Log out
+    </a>
+    <% } %>
+  </nav>
+  <% if (typeof user !== "undefined" && user) { %>
+  <div class="sidebar-user">
+    <div class="avatar"><%= (user.displayName || user.username || "?").charAt(0).toUpperCase() %></div>
+    <div>
+      <strong>@<%= user.username %></strong>
+      <small>Local workspace</small>
+    </div>
+  </div>
+  <% } %>
+</aside>

@@ -1,0 +1,15 @@
+<%- include("partials/header", { title: "Log in" }) %>
+<div class="auth-page">
+  <div class="auth-card">
+    <div class="auth-brand"><span class="logo">✦</span><h1>AI Note Taker</h1></div>
+    <p class="lead">Log in to view meetings and get your extension API key.</p>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+    <form method="POST" action="/login" class="form">
+      <label>Username<input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" value="<%= typeof formUsername !== 'undefined' ? formUsername : '' %>" /></label>
+      <label>Passkey<input name="passkey" type="password" required minlength="6" /></label>
+      <button type="submit" class="btn-primary">Log in</button>
+    </form>
+    <p class="muted center">No account? <a href="/register">Create one</a></p>
+  </div>
+</div>
+<%- include("partials/footer") %>

@@ -1,0 +1,69 @@
+<%- include("partials/header", { title: "My Meetings", bodyClass: "app-shell" }) %>
+<% const currentView = typeof view !== 'undefined' ? view : 'all'; %>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: currentView === 'favorites' ? 'favorites' : (currentView === 'archived' ? 'archived' : 'meetings') }) %>
+  <div class="main">
+    <header class="main-top">
+      <h1><%= currentView === 'favorites' ? 'Favourites' : (currentView === 'archived' ? 'Archived' : 'My Meetings') %></h1>
+      <div class="main-actions">
+        <a class="btn-primary" href="/account">API key for extension</a>
+      </div>
+    </header>
+    <div class="toolbar">
+      <form method="GET" action="/" class="search-bar">
+        <input type="hidden" name="view" value="<%= currentView %>" />
+        <input type="search" name="q" value="<%= typeof q !== 'undefined' ? q : '' %>" placeholder="Search for keywords, titles, and more…" />
+      </form>
+      <div class="view-tabs">
+        <a class="view-tab <%= currentView === 'all' ? 'active' : '' %>" href="/?view=all<%= q ? '&q=' + encodeURIComponent(q) : '' %>">All</a>
+        <a class="view-tab <%= currentView === 'favorites' ? 'active' : '' %>" href="/?view=favorites<%= q ? '&q=' + encodeURIComponent(q) : '' %>">★ Favourites</a>
+        <a class="view-tab <%= currentView === 'archived' ? 'active' : '' %>" href="/?view=archived<%= q ? '&q=' + encodeURIComponent(q) : '' %>">Archive</a>
+      </div>
+    </div>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (!meetings || !meetings.length) { %>
+      <div class="empty-state card">
+        <h3>No meetings yet</h3>
+        <p><% if (currentView === 'favorites') { %>Star meetings from the list to see them here.<% } else if (currentView === 'archived') { %>Archived meetings will appear here.<% } else { %>Connect the Chrome extension with your API key, then use Save &amp; Analyze.<% } %></p>
+      </div>
+    <% } else { %>
+      <div class="meeting-groups">
+        <% meetings.forEach(function(m) { %>
+          <div class="meeting-row-wrap">
+            <a class="meeting-row" href="/meetings/<%= m.externalId %>">
+              <div class="meeting-dur">
+                <strong><%= Math.max(1, Math.round((m.duration || 0) / 60)) %>m</strong>
+                <span><%= m.startedAt ? new Date(m.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %></span>
+              </div>
+              <div class="meeting-avatar"><%= (m.platform || 'M').charAt(0) %></div>
+              <div class="meeting-body">
+                <strong>
+                  <% if (m.isFavorite) { %><span class="fav-mark" title="Favourite">★</span> <% } %>
+                  <%= m.title || 'Untitled meeting' %>
+                  <% if (m.isArchived) { %><span class="badge-archived">Archived</span><% } %>
+                </strong>
+                <span class="participants"><%= m.platform || 'Manual' %><% if (m.ai && m.ai.summary) { %> · AI summary ready<% } %></span>
+              </div>
+              <div class="meeting-chevron">›</div>
+            </a>
+            <div class="meeting-actions" onclick="event.stopPropagation()">
+              <form method="POST" action="/meetings/<%= m.externalId %>/favorite">
+                <input type="hidden" name="redirect" value="/?view=<%= currentView %><%= q ? '&q=' + encodeURIComponent(q) : '' %>" />
+                <button type="submit" class="icon-btn <%= m.isFavorite ? 'is-on' : '' %>" title="<%= m.isFavorite ? 'Remove favourite' : 'Mark favourite' %>"><%= m.isFavorite ? '★' : '☆' %></button>
+              </form>
+              <form method="POST" action="/meetings/<%= m.externalId %>/archive">
+                <input type="hidden" name="redirect" value="/?view=<%= currentView %><%= q ? '&q=' + encodeURIComponent(q) : '' %>" />
+                <button type="submit" class="icon-btn" title="<%= m.isArchived ? 'Unarchive' : 'Archive' %>"><%= m.isArchived ? '↩' : 'Archive' %></button>
+              </form>
+              <form method="POST" action="/meetings/<%= m.externalId %>/delete" onsubmit="return confirm('Delete this meeting permanently?');">
+                <button type="submit" class="icon-btn danger" title="Delete">Delete</button>
+              </form>
+            </div>
+          </div>
+        <% }) %>
+      </div>
+    <% } %>
+  </div>
+</div>
+<%- include("partials/footer") %>

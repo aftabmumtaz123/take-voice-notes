@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Note Taker",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "AI meeting transcription, post-meeting summaries, searchable history and meeting intelligence.",
   "permissions": [
     "storage",
@@ -9,7 +9,8 @@
     "tabs",
     "activeTab",
     "tabCapture",
-    "windows"
+    "windows",
+    "alarms"
   ],
   "host_permissions": [
     "https://api.deepgram.com/*",
@@ -18,7 +19,8 @@
     "wss://streaming.assemblyai.com/*",
     "https://api.openai.com/*",
     "wss://api.openai.com/*",
-    "http://localhost:4000/*"
+    "http://localhost:4000/*",
+    "http://localhost:3000/*"
   ],
   "background": {
     "service_worker": "background.js"

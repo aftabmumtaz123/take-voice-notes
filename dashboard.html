@@ -25,13 +25,21 @@
           <div><div class="crumb">My Meetings</div><h1>My Meetings</h1><p>Search, review and revisit your meeting history.</p></div>
           <div class="header-actions"><button id="refreshBtn" class="ghost-btn">↻ Refresh</button><button id="startBtn" class="primary-btn">● Start meeting</button></div>
         </header>
-        <div class="toolbar"><div class="search-wrap">⌕<input id="searchInput" placeholder="Search keywords, participants, titles and transcripts…"></div><select id="sortSelect"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="longest">Longest first</option></select></div>
+        <div class="toolbar">
+          <div class="search-wrap">⌕<input id="searchInput" placeholder="Search keywords, participants, titles and transcripts…"></div>
+          <div class="view-filter">
+            <button type="button" class="filter-chip active" data-filter="all">All</button>
+            <button type="button" class="filter-chip" data-filter="favorites">★ Favourites</button>
+            <button type="button" class="filter-chip" data-filter="archived">Archive</button>
+          </div>
+          <select id="sortSelect"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="longest">Longest first</option></select>
+        </div>
         <div id="listState" class="state-card hidden"></div>
         <section id="meetingList" class="meeting-list"></section>
       </div>
 
       <div id="detailView" class="view hidden">
-        <header class="detail-header"><button id="backBtn" class="back-btn">← My Meetings</button><div class="detail-actions"><button id="exportSummaryBtn" class="primary-btn">Export Summary PDF</button><button id="exportTranscriptBtn" class="ghost-btn">Export Transcript PDF</button><button id="exportAllBtn" class="ghost-btn">Export All PDF</button><button id="deleteBtn" class="danger-outline">Delete</button></div></header>
+        <header class="detail-header"><button id="backBtn" class="back-btn">← My Meetings</button><div class="detail-actions"><button id="favoriteBtn" class="ghost-btn">☆ Favourite</button><button id="archiveBtn" class="ghost-btn">Archive</button><button id="exportSummaryBtn" class="primary-btn">Export Summary PDF</button><button id="exportTranscriptBtn" class="ghost-btn">Export Transcript PDF</button><button id="exportAllBtn" class="ghost-btn">Export All PDF</button><button id="deleteBtn" class="danger-outline">Delete</button></div></header>
         <section id="meetingHero" class="meeting-hero"></section>
         <div class="tabs"><button class="tab active" data-tab="summary">AI Summary</button><button class="tab" data-tab="transcript">Transcript</button><button class="tab" data-tab="chat">AI Chat</button><button class="tab" data-tab="notes">Notes</button></div>
         <section id="detailContent" class="detail-content"></section>

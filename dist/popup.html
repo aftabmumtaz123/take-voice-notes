@@ -8,6 +8,24 @@
 </head>
 <body>
   <main class="app">
+    <section id="authGate" class="auth-gate hidden">
+      <div class="auth-gate-card">
+        <div class="auth-gate-icon">✦</div>
+        <strong>Connect to server</strong>
+        <p>Create an account on the web app, copy your API key, and paste it here. The extension talks only to the API.</p>
+        <label class="auth-label">Server URL
+          <input id="authServerUrl" type="url" value="http://localhost:4000" placeholder="http://localhost:4000" />
+        </label>
+        <label class="auth-label">API key
+          <input id="authApiKey" type="password" autocomplete="off" placeholder="ntk_…" />
+        </label>
+        <button id="btnSaveApiKey" class="btn btn-start" type="button">Connect</button>
+        <button id="btnOpenWebAuth" class="btn btn-ghost auth-web-link" type="button">Create account / get API key</button>
+        <p id="authGateError" class="auth-gate-error hidden"></p>
+      </div>
+    </section>
+
+    <div id="mainApp">
     <header class="topbar">
       <div class="brand">
         <div class="brand-icon">✦</div>
@@ -83,6 +101,12 @@
       <button id="btnStop" class="btn btn-stop" disabled><span class="btn-icon">■</span> Stop</button>
     </div>
 
+    <div class="save-analyze-row">
+      <button id="btnSaveAnalyze" class="btn btn-save" type="button" title="Save transcript to MongoDB and run AI summary">
+        <span class="btn-icon">✦</span> Save &amp; Analyze
+      </button>
+    </div>
+
     <div class="secondary-actions">
       <button id="btnPause" class="btn btn-ghost" disabled>Pause</button>
       <button id="btnResume" class="btn btn-ghost" disabled>Resume</button>
@@ -93,9 +117,14 @@
     </div>
 
     <footer>
-      <span>Developer configured</span>
-      <a href="#" id="dashboardLink">Dashboard</a><a href="#" id="optionsLink">Settings</a>
+      <span id="authFooter">Not signed in</span>
+      <span>
+        <a href="#" id="logoutLink" class="hidden">Log out</a>
+        <a href="#" id="dashboardLink">Dashboard</a>
+        <a href="#" id="optionsLink">Settings</a>
+      </span>
     </footer>
+    </div>
   </main>
   <div id="toastHost" class="toast-host" aria-live="polite"></div>
   <div id="modalHost"></div>

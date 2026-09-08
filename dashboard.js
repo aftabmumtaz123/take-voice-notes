@@ -1,23 +1,28 @@
 const CONFIG = globalThis.AI_NOTE_CONFIG || {};
-const API = CONFIG.backendUrl || 'http://localhost:4000';
+let API = CONFIG.backendUrl || 'http://localhost:4000';
+const CLIENT = CONFIG.clientUrl || CONFIG.backendUrl || 'http://localhost:4000';
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 let userId = '';
+let authToken = '';
 let meetings = [];
 let activeMeeting = null;
 let activeTab = 'summary';
+let listViewFilter = 'all'; // all | favorites | archived
 
-async function getUserId() {
-  const stored = await chrome.storage.local.get({ noteUserId: '' });
-  if (stored.noteUserId) return stored.noteUserId;
-  const id = crypto.randomUUID();
-  await chrome.storage.local.set({ noteUserId: id });
-  return id;
+async function getAuth() {
+  const stored = await chrome.storage.local.get({ authToken: '', authApiKey: '', authUser: null, noteUserId: '', backendUrlOverride: '' });
+  authToken = stored.authToken || stored.authApiKey || '';
+  userId = stored.authUser?.id || stored.noteUserId || '';
+  if (stored.backendUrlOverride) API = String(stored.backendUrlOverride).replace(/\/$/, '');
+  return stored;
 }
 async function api(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
   const res = await fetch(`${API}${path}`, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) throw new Error(data.error || 'Please log in from the extension popup or web app.');
   if (!res.ok || data.ok === false) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -31,7 +36,7 @@ async function loadMeetings() {
   $('meetingList').innerHTML = '<div class="loading">Loading your meeting history…</div>';
   try {
     const q = $('searchInput').value.trim();
-    const data = await api(`/api/meetings?userId=${encodeURIComponent(userId)}&q=${encodeURIComponent(q)}`);
+    const data = await api(`/api/meetings?userId=${encodeURIComponent(userId)}&q=${encodeURIComponent(q)}&view=${encodeURIComponent(listViewFilter)}`);
     meetings = data.meetings || [];
     const sort = $('sortSelect').value;
     if (sort === 'oldest') meetings.sort((a,b)=>new Date(a.startedAt)-new Date(b.startedAt));
@@ -46,14 +51,75 @@ async function loadMeetings() {
 function renderMeetings() {
   $('listState').classList.add('hidden');
   if (!meetings.length) {
-    $('meetingList').innerHTML='<div class="state-card"><strong>No meetings yet</strong><p>Your completed meetings will appear here automatically.</p></div>';
+    const emptyMsg = listViewFilter === 'favorites'
+      ? 'Star meetings to see them here.'
+      : listViewFilter === 'archived'
+        ? 'Archived meetings will appear here.'
+        : 'Your completed meetings will appear here automatically.';
+    $('meetingList').innerHTML=`<div class="state-card"><strong>No meetings yet</strong><p>${emptyMsg}</p></div>`;
     return;
   }
   $('meetingList').innerHTML=meetings.map(m=>`<article class="meeting-card" data-id="${esc(m.externalId)}">
-    <div><div class="meeting-title">${esc(m.title)}</div><div class="meeting-meta">${esc(fmtDate(m.startedAt))} · ${(m.participants||[]).length || 0} participants</div><div class="meeting-preview">${esc(m.ai?.summary || m.fullTranscript || 'No transcript preview available.')}</div></div>
-    <div class="meeting-right"><span class="platform">${esc(m.platform)}</span><div class="duration">${fmtDuration(m.duration)}</div></div>
+    <div class="meeting-card-main">
+      <div class="meeting-title">${m.isFavorite ? '★ ' : ''}${esc(m.title)}${m.isArchived ? ' <span class="badge-archived">Archived</span>' : ''}</div>
+      <div class="meeting-meta">${esc(fmtDate(m.startedAt))} · ${(m.participants||[]).length || 0} participants</div>
+      <div class="meeting-preview">${esc(m.ai?.summary || m.fullTranscript || 'No transcript preview available.')}</div>
+    </div>
+    <div class="meeting-right">
+      <span class="platform">${esc(m.platform)}</span>
+      <div class="duration">${fmtDuration(m.duration)}</div>
+      <div class="meeting-card-actions">
+        <button type="button" class="mini-btn fav-btn" data-action="favorite" data-id="${esc(m.externalId)}" title="Favourite">${m.isFavorite ? '★' : '☆'}</button>
+        <button type="button" class="mini-btn" data-action="archive" data-id="${esc(m.externalId)}" title="${m.isArchived ? 'Unarchive' : 'Archive'}">${m.isArchived ? '↩' : 'Arch'}</button>
+        <button type="button" class="mini-btn danger" data-action="delete" data-id="${esc(m.externalId)}" title="Delete">Del</button>
+      </div>
+    </div>
   </article>`).join('');
-  document.querySelectorAll('.meeting-card').forEach(el=>el.addEventListener('click',()=>openMeeting(el.dataset.id)));
+  document.querySelectorAll('.meeting-card').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-action]')) return;
+      openMeeting(el.dataset.id);
+    });
+  });
+  document.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const action = btn.dataset.action;
+      const m = meetings.find(x => x.externalId === id);
+      if (!m) return;
+      try {
+        if (action === 'delete') {
+          if (!confirm('Delete this meeting permanently?')) return;
+          await api(`/api/meetings/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`, { method: 'DELETE' });
+          toast('Meeting deleted.');
+          await loadMeetings();
+          return;
+        }
+        if (action === 'favorite') {
+          const data = await api(`/api/meetings/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ userId, isFavorite: !m.isFavorite })
+          });
+          Object.assign(m, data.meeting || { isFavorite: !m.isFavorite });
+          toast(m.isFavorite ? 'Marked favourite.' : 'Removed from favourites.');
+          renderMeetings();
+          return;
+        }
+        if (action === 'archive') {
+          const data = await api(`/api/meetings/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ userId, isArchived: !m.isArchived })
+          });
+          Object.assign(m, data.meeting || { isArchived: !m.isArchived });
+          toast(m.isArchived ? 'Archived.' : 'Unarchived.');
+          await loadMeetings();
+        }
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  });
 }
 async function openMeeting(id) {
   $('listView').classList.add('hidden'); $('detailView').classList.remove('hidden'); $('detailContent').innerHTML='<div class="loading">Loading meeting…</div>';
@@ -61,7 +127,9 @@ async function openMeeting(id) {
 }
 function renderDetail() {
   const m=activeMeeting;
-  $('meetingHero').innerHTML=`<div class="hero-kicker">${esc(m.platform)} · MEETING NOTES</div><div class="hero-title">${esc(m.title)}</div><div class="hero-meta">${esc(fmtDate(m.startedAt))} · ${fmtDuration(m.duration)} · ${m.ai?.summary ? 'AI summary ready' : 'Transcript saved'}</div>`;
+  $('meetingHero').innerHTML=`<div class="hero-kicker">${esc(m.platform)} · MEETING NOTES</div><div class="hero-title">${m.isFavorite ? '★ ' : ''}${esc(m.title)}${m.isArchived ? ' · Archived' : ''}</div><div class="hero-meta">${esc(fmtDate(m.startedAt))} · ${fmtDuration(m.duration)} · ${m.ai?.summary ? 'AI summary ready' : 'Transcript saved'}</div>`;
+  if ($('favoriteBtn')) $('favoriteBtn').textContent = m.isFavorite ? '★ Favourited' : '☆ Favourite';
+  if ($('archiveBtn')) $('archiveBtn').textContent = m.isArchived ? '↩ Unarchive' : 'Archive';
   renderTab();
 }
 function renderTab() {
@@ -243,6 +311,43 @@ function exportAllPdf(){
 }
 
 async function deleteMeeting(){if(!confirm('Delete this meeting and its saved transcript?'))return;try{await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}?userId=${encodeURIComponent(userId)}`,{method:'DELETE'});activeMeeting=null;showList();toast('Meeting deleted.');}catch(error){toast(error.message);}}
+async function toggleFavorite(){
+  if(!activeMeeting) return;
+  try{
+    const data=await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}`,{method:'PATCH',body:JSON.stringify({userId,isFavorite:!activeMeeting.isFavorite})});
+    activeMeeting=data.meeting||{...activeMeeting,isFavorite:!activeMeeting.isFavorite};
+    renderDetail();
+    toast(activeMeeting.isFavorite?'Marked favourite.':'Removed from favourites.');
+  }catch(error){toast(error.message);}
+}
+async function toggleArchive(){
+  if(!activeMeeting) return;
+  try{
+    const data=await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}`,{method:'PATCH',body:JSON.stringify({userId,isArchived:!activeMeeting.isArchived})});
+    activeMeeting=data.meeting||{...activeMeeting,isArchived:!activeMeeting.isArchived};
+    renderDetail();
+    toast(activeMeeting.isArchived?'Archived.':'Unarchived.');
+  }catch(error){toast(error.message);}
+}
 function showList(){ $('detailView').classList.add('hidden');$('listView').classList.remove('hidden');loadMeetings(); }
-$('backBtn').addEventListener('click',showList);$('refreshBtn').addEventListener('click',loadMeetings);$('searchInput').addEventListener('input',()=>{clearTimeout(window.searchTimer);window.searchTimer=setTimeout(loadMeetings,250)});$('sortSelect').addEventListener('change',renderMeetings);$('openExtension').addEventListener('click',openExtension);$('startBtn').addEventListener('click',openExtension);$('exportSummaryBtn').addEventListener('click',exportSummaryPdf);$('exportTranscriptBtn').addEventListener('click',exportTranscriptPdf);$('exportAllBtn').addEventListener('click',exportAllPdf);$('deleteBtn').addEventListener('click',deleteMeeting);document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{activeTab=t.dataset.tab;renderTab();}));
-(async()=>{userId=await getUserId();$('userIdShort').textContent=userId.slice(0,8);const id=params.get('meeting');if(id)openMeeting(id);else loadMeetings();})();
+$('backBtn').addEventListener('click',showList);$('refreshBtn').addEventListener('click',loadMeetings);$('searchInput').addEventListener('input',()=>{clearTimeout(window.searchTimer);window.searchTimer=setTimeout(loadMeetings,250)});$('sortSelect').addEventListener('change',renderMeetings);$('openExtension').addEventListener('click',openExtension);$('startBtn').addEventListener('click',openExtension);$('exportSummaryBtn').addEventListener('click',exportSummaryPdf);$('exportTranscriptBtn').addEventListener('click',exportTranscriptPdf);$('exportAllBtn').addEventListener('click',exportAllPdf);$('deleteBtn').addEventListener('click',deleteMeeting);$('favoriteBtn')?.addEventListener('click',toggleFavorite);$('archiveBtn')?.addEventListener('click',toggleArchive);document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{activeTab=t.dataset.tab;renderTab();}));
+document.querySelectorAll('.filter-chip').forEach(chip=>{
+  chip.addEventListener('click',()=>{
+    document.querySelectorAll('.filter-chip').forEach(c=>c.classList.toggle('active',c===chip));
+    listViewFilter=chip.dataset.filter||'all';
+    loadMeetings();
+  });
+});
+(async()=>{
+  const auth=await getAuth();
+  if(!authToken){
+    $('meetingList').innerHTML='';
+    $('listState').classList.remove('hidden');
+    $('listState').innerHTML=`<strong>Sign in required</strong><p>Log in from the extension popup, or open the web app at <a href="${CLIENT}" target="_blank">${CLIENT}</a>.</p>`;
+    if($('userIdShort')) $('userIdShort').textContent='guest';
+    return;
+  }
+  if($('userIdShort')) $('userIdShort').textContent=(auth.authUser?.username||userId).toString().slice(0,12);
+  const id=params.get('meeting');
+  if(id)openMeeting(id);else loadMeetings();
+})();

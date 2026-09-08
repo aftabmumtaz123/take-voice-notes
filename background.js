@@ -332,15 +332,142 @@ async function getMeetingState() {
 }
 
 async function ensureUserId() {
-  const result = await chrome.storage.local.get({ noteUserId: '' });
-  if (result.noteUserId) return result.noteUserId;
+  const { authUser, noteUserId } = await chrome.storage.local.get({ authUser: null, noteUserId: '' });
+  if (authUser?.id) return authUser.id;
+  if (noteUserId) return noteUserId;
   const id = crypto.randomUUID();
   await chrome.storage.local.set({ noteUserId: id });
   return id;
 }
 
-async function getBackendUrl() {
+async function getAuthSession() {
+  const { authToken, authApiKey, authUser } = await chrome.storage.local.get({
+    authToken: '', authApiKey: '', authUser: null
+  });
+  const token = authApiKey || authToken || '';
+  return { token, user: authUser || null, apiKey: authApiKey || '' };
+}
+
+async function setAuthSession({ token, user, apiKey }) {
+  const key = apiKey || user?.apiKey || token || '';
+  if (key && user) {
+    await chrome.storage.local.set({
+      authToken: token || key,
+      authApiKey: key,
+      authUser: user,
+      noteUserId: user.id
+    });
+  } else if (key) {
+    await chrome.storage.local.set({ authApiKey: key, authToken: key });
+  } else {
+    await chrome.storage.local.remove(['authToken', 'authApiKey', 'authUser']);
+  }
+}
+
+async function requireAuthOrThrow() {
+  const { authApiKey, authUser, authToken } = await chrome.storage.local.get({
+    authApiKey: '', authUser: null, authToken: ''
+  });
+  const key = authApiKey || authToken || '';
+  if (!key) {
+    const err = new Error('Connect the extension with your API key from http://localhost:4000/account');
+    err.code = 'AUTH_REQUIRED';
+    throw err;
+  }
+  return { token: key, user: authUser, apiKey: key };
+}
+
+function getClientUrl() {
+  // Web UI is served by the same backend (EJS) on :4000
   return String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+}
+
+async function getBackendUrl() {
+  const { backendUrlOverride } = await chrome.storage.local.get({ backendUrlOverride: '' });
+  return String(backendUrlOverride || globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+}
+
+async function postMeetingToBackend(payload) {
+  const { token } = await requireAuthOrThrow();
+  const response = await fetch(`${await getBackendUrl()}/api/meetings/complete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    await setAuthSession({ token: '', user: null });
+    throw new Error(data.error || 'Session expired. Please log in again.');
+  }
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || data.analysisError || `Backend returned ${response.status}`);
+  }
+  return data;
+}
+
+async function enqueuePendingMeeting(payload, errorMessage) {
+  const { pendingMeetingQueue = [] } = await chrome.storage.local.get({ pendingMeetingQueue: [] });
+  const filtered = pendingMeetingQueue.filter((p) => p.externalId !== payload.externalId);
+  filtered.push({ ...payload, queuedAt: Date.now(), lastError: errorMessage || '' });
+  // Keep last 20
+  await chrome.storage.local.set({
+    pendingMeetingQueue: filtered.slice(-20),
+    lastCompletedMeeting: payload,
+    lastMeetingSyncError: { ok: false, error: errorMessage || 'Backend unavailable.', meetingId: payload.externalId }
+  });
+}
+
+async function flushPendingMeetingQueue() {
+  const { pendingMeetingQueue = [] } = await chrome.storage.local.get({ pendingMeetingQueue: [] });
+  if (!pendingMeetingQueue.length) return { flushed: 0, remaining: 0 };
+
+  const remaining = [];
+  let flushed = 0;
+  for (const item of pendingMeetingQueue) {
+    try {
+      await postMeetingToBackend(item);
+      flushed += 1;
+    } catch (err) {
+      remaining.push({ ...item, lastError: err.message || String(err), queuedAt: item.queuedAt || Date.now() });
+    }
+  }
+  await chrome.storage.local.set({ pendingMeetingQueue: remaining });
+  if (!remaining.length) {
+    await chrome.storage.local.remove(['lastCompletedMeeting', 'lastMeetingSyncError']);
+  }
+  return { flushed, remaining: remaining.length };
+}
+
+async function saveMeetingPayload(payload, { clearActiveMeeting = true } = {}) {
+  await chrome.storage.local.set({ lastCompletedMeeting: payload });
+  let sync = { ok: false, error: 'Backend unavailable.', meetingId: payload.externalId, analysisReady: false, analysisError: '' };
+  try {
+    const data = await postMeetingToBackend(payload);
+    sync = {
+      ok: true,
+      meetingId: data.meeting?.externalId || payload.externalId,
+      analysisReady: Boolean(data.analysisReady),
+      analysisError: data.analysisError || ''
+    };
+    await chrome.storage.local.remove(['lastCompletedMeeting', 'lastMeetingSyncError']);
+    // Also drop this id from any offline queue
+    const { pendingMeetingQueue = [] } = await chrome.storage.local.get({ pendingMeetingQueue: [] });
+    await chrome.storage.local.set({
+      pendingMeetingQueue: pendingMeetingQueue.filter((p) => p.externalId !== payload.externalId)
+    });
+  } catch (error) {
+    const msg = error.message || String(error);
+    sync = { ok: false, error: msg, meetingId: payload.externalId, analysisReady: false, analysisError: msg };
+    await enqueuePendingMeeting(payload, msg);
+  }
+
+  if (clearActiveMeeting) {
+    await chrome.storage.session.remove('activeMeeting');
+  }
+  return { payload, sync };
 }
 
 async function saveCompletedMeeting() {
@@ -364,38 +491,70 @@ async function saveCompletedMeeting() {
     duration,
     participants: [],
     fullTranscript: transcript,
-    transcript: transcript ? [{ speaker: 'Speaker', text: transcript, startTime: 0, endTime: duration, confidence: null }] : []
+    transcript: transcript
+      ? [{ speaker: 'Speaker', text: transcript, startTime: 0, endTime: duration, confidence: null }]
+      : []
   };
+  return saveMeetingPayload(payload, { clearActiveMeeting: true });
+}
 
-  await chrome.storage.local.set({ lastCompletedMeeting: payload });
-  let sync = { ok: false, error: 'Backend unavailable.' };
-  try {
-    const response = await fetch(`${await getBackendUrl()}/api/meetings/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) throw new Error(data.error || `Backend returned ${response.status}`);
-    sync = { ok: true, meetingId: data.meeting?.externalId || payload.externalId, analysisReady: Boolean(data.analysisReady) };
-    await chrome.storage.local.remove('lastCompletedMeeting');
-  } catch (error) {
-    sync = { ok: false, error: error.message || String(error), meetingId: payload.externalId };
-    await chrome.storage.local.set({ lastMeetingSyncError: sync });
+/** Save whatever is currently in the transcript (no recording required). */
+async function saveAndAnalyzeFromText({ transcript, title, platform = 'Manual' } = {}) {
+  const text = String(transcript || '').trim();
+  if (!text) {
+    throw new Error('Transcript is empty. Type or paste notes first.');
   }
-
-  await chrome.storage.session.remove('activeMeeting');
-  return { payload, sync };
+  const now = Date.now();
+  const payload = {
+    externalId: crypto.randomUUID(),
+    userId: await ensureUserId(),
+    title: String(title || 'Untitled meeting').trim().slice(0, 160) || 'Untitled meeting',
+    platform: String(platform || 'Manual').slice(0, 80),
+    meetingUrl: '',
+    startedAt: new Date(now).toISOString(),
+    endedAt: new Date(now).toISOString(),
+    duration: 0,
+    participants: [],
+    fullTranscript: text,
+    transcript: [{ speaker: 'Speaker', text, startTime: 0, endTime: 0, confidence: null }]
+  };
+  // Persist local transcript so UI stays consistent
+  await setTranscript(text);
+  await chrome.storage.local.set({ noteTitle: payload.title, lastUpdated: Date.now() });
+  return saveMeetingPayload(payload, { clearActiveMeeting: false });
 }
 
 async function openDashboard(meetingId = '') {
-  const url = chrome.runtime.getURL(`dashboard.html${meetingId ? `?meeting=${encodeURIComponent(meetingId)}` : ''}`);
+  // Prefer the EJS web dashboard on the API server so the user sees summary/chat there
+  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  const url = meetingId
+    ? `${base}/meetings/${encodeURIComponent(meetingId)}`
+    : `${base}/`;
   try {
     await chrome.tabs.create({ url });
   } catch (error) {
-    console.warn('[background] dashboard open failed:', error);
+    console.warn('[background] web dashboard open failed, falling back to extension page:', error);
+    try {
+      const fallback = chrome.runtime.getURL(`dashboard.html${meetingId ? `?meeting=${encodeURIComponent(meetingId)}` : ''}`);
+      await chrome.tabs.create({ url: fallback });
+    } catch (e2) {
+      console.warn('[background] dashboard open failed:', e2);
+    }
   }
 }
+
+// Periodic offline queue flush (every 2 minutes when the service worker is alive)
+chrome.alarms?.create?.('flushPendingMeetings', { periodInMinutes: 2 });
+chrome.alarms?.onAlarm?.addListener?.(async (alarm) => {
+  if (alarm.name === 'flushPendingMeetings') {
+    try {
+      const result = await flushPendingMeetingQueue();
+      if (result.flushed) console.log('[background] flushed pending meetings:', result);
+    } catch (err) {
+      console.warn('[background] queue flush failed:', err);
+    }
+  }
+});
 
 async function markMeetingDetected(tabId, url) {
   const key = `${tabId}:${url}`;
@@ -616,13 +775,92 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const snapshot = await getNoteSnapshot();
           const providers = await configuredProviders();
           const meetingState = await getMeetingState();
+          const auth = await getAuthSession();
           sendResponse({
             ok: true, ...snapshot,
             pendingMeeting: meetingState.pendingMeeting || null,
             activeMeeting: meetingState.activeMeeting || null,
             activeProvider: globalThis.AI_NOTE_CONFIG?.activeProvider || 'assemblyai',
-            configuredProviders: providers
+            configuredProviders: providers,
+            authUser: auth.user,
+            isLoggedIn: Boolean(auth.token),
+            backendUrl: await getBackendUrl()
           });
+          break;
+        }
+
+        case 'GET_AUTH': {
+          const auth = await getAuthSession();
+          sendResponse({ ok: true, user: auth.user, isLoggedIn: Boolean(auth.token), clientUrl: getClientUrl() });
+          break;
+        }
+
+        case 'AUTH_LOGIN': {
+          try {
+            const response = await fetch(`${await getBackendUrl()}/api/auth/login`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                username: message.username,
+                passkey: message.passkey,
+                label: 'extension'
+              })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.ok) throw new Error(data.error || 'Login failed');
+            await setAuthSession({ token: data.token, user: data.user, apiKey: data.apiKey || data.user?.apiKey });
+            sendResponse({ ok: true, user: data.user, apiKey: data.apiKey || data.user?.apiKey });
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
+          break;
+        }
+
+        case 'AUTH_REGISTER': {
+          try {
+            const response = await fetch(`${await getBackendUrl()}/api/auth/register`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                username: message.username,
+                passkey: message.passkey,
+                displayName: message.displayName || ''
+              })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.ok) throw new Error(data.error || 'Register failed');
+            await setAuthSession({ token: data.token, user: data.user, apiKey: data.apiKey || data.user?.apiKey });
+            sendResponse({ ok: true, user: data.user, apiKey: data.apiKey || data.user?.apiKey });
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
+          break;
+        }
+
+        case 'AUTH_LOGOUT': {
+          try {
+            const { token } = await getAuthSession();
+            if (token) {
+              await fetch(`${await getBackendUrl()}/api/auth/logout`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ token })
+              }).catch(() => {});
+            }
+          } catch (_) {}
+          await setAuthSession({ token: '', user: null });
+          sendResponse({ ok: true });
+          break;
+        }
+
+        case 'OPEN_CLIENT_AUTH': {
+          const url = `${getClientUrl()}/register`;
+          try {
+            await chrome.tabs.create({ url });
+            sendResponse({ ok: true, url });
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
           break;
         }
 
@@ -653,10 +891,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const tabs = await chrome.tabs.query({});
             for (const tab of tabs) { if (tab.id) await chrome.action.setBadgeText({ tabId: tab.id, text: '' }).catch(() => {}); }
           } catch {}
-          sendResponse({ ok: true, meetingId: completed.sync.meetingId, synced: completed.sync.ok, syncError: completed.sync.error || '', analysisReady: completed.sync.analysisReady });
+          sendResponse({
+            ok: true,
+            meetingId: completed.sync.meetingId,
+            synced: completed.sync.ok,
+            syncError: completed.sync.error || '',
+            analysisReady: completed.sync.analysisReady,
+            analysisError: completed.sync.analysisError || ''
+          });
           // Always show the saved local/server result immediately. If MongoDB is
           // unavailable, the dashboard explains the recovery state instead.
           await openDashboard(completed.sync.meetingId || completed.payload.externalId);
+          break;
+        }
+
+        case 'SAVE_AND_ANALYZE': {
+          try {
+            const completed = await saveAndAnalyzeFromText({
+              transcript: message.transcript,
+              title: message.title,
+              platform: message.platform || 'Manual'
+            });
+            sendResponse({
+              ok: true,
+              meetingId: completed.sync.meetingId,
+              synced: completed.sync.ok,
+              syncError: completed.sync.error || '',
+              analysisReady: completed.sync.analysisReady,
+              analysisError: completed.sync.analysisError || ''
+            });
+            await openDashboard(completed.sync.meetingId || completed.payload.externalId);
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
+          break;
+        }
+
+        case 'SET_API_KEY': {
+          try {
+            const apiKey = String(message.apiKey || '').trim();
+            const serverUrl = String(message.serverUrl || '').trim().replace(/\/$/, '') || 'http://localhost:4000';
+            if (!apiKey) throw new Error('API key is required');
+            await chrome.storage.local.set({ backendUrlOverride: serverUrl });
+            // Validate key against server
+            const response = await fetch(`${serverUrl}/api/auth/me`, {
+              headers: { Authorization: `Bearer ${apiKey}`, 'X-API-Key': apiKey }
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.ok) throw new Error(data.error || 'Invalid API key');
+            await setAuthSession({ token: apiKey, user: data.user, apiKey });
+            sendResponse({ ok: true, user: data.user });
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
+          break;
+        }
+
+        case 'FLUSH_PENDING_MEETINGS': {
+          const result = await flushPendingMeetingQueue();
+          sendResponse({ ok: true, ...result });
           break;
         }
 

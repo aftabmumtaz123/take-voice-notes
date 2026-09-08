@@ -1,0 +1,120 @@
+<%- include("partials/header", { title: meeting.title || "Meeting", bodyClass: "app-shell" }) %>
+<% const ai = meeting.ai || {}; %>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "meetings" }) %>
+  <div class="main">
+    <header class="main-top">
+      <a class="back" href="/">← My Meetings</a>
+      <div class="main-actions">
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/favorite" style="display:inline">
+          <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
+          <button type="submit" class="btn-ghost <%= meeting.isFavorite ? 'is-fav' : '' %>"><%= meeting.isFavorite ? '★ Favourited' : '☆ Favourite' %></button>
+        </form>
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/archive" style="display:inline">
+          <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
+          <button type="submit" class="btn-ghost"><%= meeting.isArchived ? '↩ Unarchive' : 'Archive' %></button>
+        </form>
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/delete" style="display:inline" onsubmit="return confirm('Delete this meeting permanently?');">
+          <button type="submit" class="btn-danger">Delete</button>
+        </form>
+        <a class="btn-primary" href="/meetings/<%= meeting.externalId %>/export.pdf" target="_blank">Export PDF</a>
+        <a class="btn-ghost" href="/meetings/<%= meeting.externalId %>/export.txt">Export TXT</a>
+        <a class="btn-ghost" href="/meetings/<%= meeting.externalId %>/export.md">Export MD</a>
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/analyze" style="display:inline">
+          <button type="submit" class="btn-ghost">Retry analysis</button>
+        </form>
+      </div>
+    </header>
+
+    <div class="hero-card card">
+      <div class="kicker"><%= meeting.platform || "Manual" %> · MEETING NOTES</div>
+      <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
+      <p class="meta">
+        <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
+        · <%= Math.max(0, Math.round((meeting.duration || 0) / 60)) %> min
+        · <%= ai.summary ? 'AI summary ready' : 'Transcript saved' %>
+      </p>
+    </div>
+
+    <div class="tabs" data-tabs>
+      <button type="button" class="tab active" data-tab="summary">AI Summary</button>
+      <button type="button" class="tab" data-tab="transcript">Transcript</button>
+      <button type="button" class="tab" data-tab="chat">AI Chat</button>
+      <button type="button" class="tab" data-tab="notes">Notes</button>
+    </div>
+
+    <div class="tab-panel active" data-panel="summary">
+      <section class="card section-card">
+        <h2>Executive summary</h2>
+        <p><%= ai.summary || "No summary yet. Use Retry analysis." %></p>
+      </section>
+      <section class="card section-card">
+        <h2>Detailed summary</h2>
+        <p class="long"><%= ai.detailedSummary || ai.summary || "—" %></p>
+      </section>
+      <section class="card section-card">
+        <h2>Key points</h2>
+        <% if (ai.keyPoints && ai.keyPoints.length) { %><ul><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
+      </section>
+      <section class="card section-card">
+        <h2>Decisions</h2>
+        <% if (ai.decisions && ai.decisions.length) { %><ul><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None identified.</p><% } %>
+      </section>
+      <section class="card section-card">
+        <h2>Action items</h2>
+        <% if (ai.actionItems && ai.actionItems.length) { %>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+            <tbody>
+              <% ai.actionItems.forEach(function(a){ %>
+                <tr><td><%= a.task %></td><td><%= a.owner || "—" %></td><td><%= a.deadline || "—" %></td></tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %><p class="muted">None identified.</p><% } %>
+      </section>
+      <section class="card section-card">
+        <h2>Topics</h2>
+        <div class="chips"><% (ai.topics || []).forEach(function(t){ %><span class="chip"># <%= t %></span><% }) %></div>
+      </section>
+      <section class="card section-card">
+        <h2>Open questions</h2>
+        <% if (ai.openQuestions && ai.openQuestions.length) { %><ul><% ai.openQuestions.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } else { %><p class="muted">None.</p><% } %>
+      </section>
+      <section class="card section-card">
+        <h2>Risks / follow-ups</h2>
+        <% if (ai.risks && ai.risks.length) { %><ul><% ai.risks.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } %>
+        <% if (ai.followUps && ai.followUps.length) { %><ul><% ai.followUps.forEach(function(x){ %><li><%= x %></li><% }) %></ul><% } %>
+        <% if (!(ai.risks && ai.risks.length) && !(ai.followUps && ai.followUps.length)) { %><p class="muted">None.</p><% } %>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="transcript">
+      <section class="card section-card">
+        <input type="search" id="transcriptSearch" class="inline-search" placeholder="Search in transcript…" />
+        <pre class="transcript" id="transcriptBody"><%= meeting.fullTranscript || "No transcript." %></pre>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="chat">
+      <section class="card section-card chat-card">
+        <p class="muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
+        <div id="chatHistory" class="chat-history"></div>
+        <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">
+          <input id="chatInput" type="text" placeholder="What were the main decisions?" autocomplete="off" />
+          <button type="submit" class="btn-primary">Ask AI</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="notes">
+      <section class="card section-card">
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/notes">
+          <textarea name="notes" class="notes-area" rows="12" placeholder="Private notes…"><%= meeting.notes || "" %></textarea>
+          <button type="submit" class="btn-primary" style="margin-top:12px">Save notes</button>
+        </form>
+      </section>
+    </div>
+  </div>
+</div>
+<%- include("partials/footer") %>

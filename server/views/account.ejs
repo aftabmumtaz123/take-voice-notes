@@ -1,0 +1,30 @@
+<%- include("partials/header", { title: "API key", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "account" }) %>
+  <div class="main">
+    <header class="main-top"><h1>Account &amp; API key</h1></header>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <section class="card section-card">
+      <h2>Extension API key</h2>
+      <p class="muted">Paste this into the Chrome extension. The extension only needs this key and the server URL.</p>
+      <div class="key-row">
+        <code id="apiKey"><%= user.apiKey || "(none)" %></code>
+        <button type="button" id="copyKey" class="btn-ghost">Copy</button>
+      </div>
+      <form method="POST" action="/account/rotate-key" onsubmit="return confirm('Rotate API key? Update the extension afterward.');">
+        <button type="submit" class="btn-danger">Rotate key</button>
+      </form>
+    </section>
+    <section class="card section-card">
+      <h2>Extension setup</h2>
+      <ol class="steps">
+        <li>Server URL: <code>http://localhost:4000</code></li>
+        <li>Copy the API key above</li>
+        <li>Open the extension popup → Connect → paste key</li>
+        <li>Meetings save under <strong>@<%= user.username %></strong></li>
+      </ol>
+    </section>
+  </div>
+</div>
+<%- include("partials/footer") %>
