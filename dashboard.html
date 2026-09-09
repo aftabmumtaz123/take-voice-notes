@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Note Taker — My Meetings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,500,0,0" rel="stylesheet">
   <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
@@ -23,19 +26,41 @@
       <div id="listView" class="view">
         <header class="page-header">
           <div><div class="crumb">My Meetings</div><h1>My Meetings</h1><p>Search, review and revisit your meeting history.</p></div>
-          <div class="header-actions"><button id="refreshBtn" class="ghost-btn">↻ Refresh</button><button id="startBtn" class="primary-btn">● Start meeting</button></div>
+          <div class="header-actions"><button id="startBtn" class="primary-btn"><span class="material-symbols-outlined">add</span> New Meeting</button><button id="refreshBtn" class="ghost-btn"><span class="material-symbols-outlined">refresh</span> Refresh</button></div>
         </header>
         <div class="toolbar">
-          <div class="search-wrap">⌕<input id="searchInput" placeholder="Search keywords, participants, titles and transcripts…"></div>
-          <div class="view-filter">
+          <div class="search-wrap"><span class="material-symbols-outlined">search</span><input id="searchInput" placeholder="Search meetings, transcripts, action items…"></div>
+          <div class="view-filter" role="tablist" aria-label="Meeting views">
             <button type="button" class="filter-chip active" data-filter="all">All</button>
             <button type="button" class="filter-chip" data-filter="favorites">★ Favourites</button>
-            <button type="button" class="filter-chip" data-filter="archived">Archive</button>
+            <button type="button" class="filter-chip" data-filter="archived">Archived</button>
           </div>
-          <select id="sortSelect"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="longest">Longest first</option></select>
+          <button id="advancedFilterBtn" class="filter-button"><span class="material-symbols-outlined">filter_list</span> Filter <span id="filterCount" class="filter-count hidden">0</span></button>
+          <select id="sortSelect" aria-label="Sort meetings">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="longest">Longest</option>
+            <option value="shortest">Shortest</option>
+            <option value="updated">Recently updated</option>
+            <option value="actions">Most action items</option>
+            <option value="viewed">Most viewed</option>
+          </select>
+        </div>
+        <div id="filterPanel" class="filter-panel hidden">
+          <div class="filter-panel-head"><strong>Filter meetings</strong><button id="clearFiltersBtn" class="text-btn">Clear all</button></div>
+          <div class="filter-grid">
+            <label>Date<select id="dateFilter"><option value="all">Any date</option><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="week">This week</option><option value="month">This month</option></select></label>
+            <label>Source<select id="sourceFilter"><option value="all">Any source</option><option value="Google Meet">Google Meet</option><option value="Zoom">Zoom</option><option value="Microsoft Teams">Microsoft Teams</option><option value="Manual">Manual</option><option value="Uploaded">Uploaded</option></select></label>
+            <label>Status<select id="statusFilter"><option value="all">Any status</option><option value="processing">Processing</option><option value="ready">Ready</option><option value="failed">Failed</option></select></label>
+            <label>AI availability<select id="aiFilter"><option value="all">Any AI state</option><option value="summary">Summary ready</option><option value="actions">Action items available</option><option value="insights">Insights available</option></select></label>
+          </div>
+        </div>
+        <div id="selectionBar" class="selection-bar hidden">
+          <div><strong id="selectedCount">0</strong> meetings selected</div>
+          <div class="selection-actions"><button data-bulk="favorite" class="ghost-btn">Add to favourites</button><button data-bulk="archive" class="ghost-btn">Archive</button><button data-bulk="export" class="ghost-btn">Export</button><button data-bulk="delete" class="danger-outline">Delete</button><button id="clearSelectionBtn" class="text-btn">Clear</button></div>
         </div>
         <div id="listState" class="state-card hidden"></div>
-        <section id="meetingList" class="meeting-list"></section>
+        <section id="meetingList" class="meeting-list"></section><div id="loadMoreWrap" class="load-more-wrap hidden"><button id="loadMoreBtn" class="ghost-btn"><span class="material-symbols-outlined">expand_more</span> Load more</button></div>
       </div>
 
       <div id="detailView" class="view hidden">

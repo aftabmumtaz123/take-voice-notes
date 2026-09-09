@@ -1,87 +1,128 @@
 <%- include("partials/header", { title: "Overview", bodyClass: "app-shell" }) %>
 <%
   const name = user.displayName || user.username || 'there';
+  const firstName = name.split(/\s+/)[0];
   const u = usage || {};
+  const t = today || { meetings: 0, summaries: 0, actionItems: 0, minutes: 0 };
+  const ai = insights || { decisions: 0, topics: 0, followUps: 0 };
 %>
 <div class="shell">
   <%- include("partials/sidebar", { user, activeNav: "overview", settings, usage, q: "" }) %>
-  <div class="main tactiq-main">
-    <div class="top-banner">
-      <span>Add the Chrome extension to capture Meet, Zoom, and Teams.</span>
-      <a class="banner-cta" href="/install">Install now</a>
+  <div class="main tactiq-main overview-page">
+    <div class="top-banner overview-extension-banner">
+      <div class="banner-copy"><span class="status-dot"></span><strong>AI Note Taker is ready</strong><span>Capture Google Meet, Zoom, and Teams meetings automatically.</span></div>
+      <div class="banner-actions"><a class="banner-cta" href="/install">Open extension</a></div>
     </div>
 
-    <header class="main-top page-head">
+    <header class="main-top page-head overview-head">
       <div>
-        <h1><%= greet || 'Hello' %>, <%= name %> 👋</h1>
-        <p class="admin-sub">Here's an overview of your meetings and AI activity.</p>
+        <span class="eyebrow">YOUR WORKSPACE</span>
+        <h1><%= greet || 'Hello' %>, <%= firstName %> 👋</h1>
+        <p class="admin-sub">Your meetings and AI activity at a glance.</p>
       </div>
       <div class="main-actions">
-        <a class="btn-primary" href="/app/meetings">My Meetings</a>
-        <a class="btn-ghost" href="/install">Install extension</a>
+        <button class="btn-primary overview-new-meeting" type="button" data-new-meeting><span class="material-symbols-outlined">add</span> New Meeting</button>
+        <a class="btn-ghost" href="/app/meetings">View meetings</a>
       </div>
     </header>
 
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
 
-    <div class="admin-stats stats-4" style="padding: 0 28px;">
-      <div class="stat-card rich">
-        <span class="stat-label">Meetings</span>
-        <strong><%= u.meetingsUsed || 0 %></strong>
-        <span class="stat-delta">This month · max <%= u.meetingsMax >= 9999 ? '∞' : u.meetingsMax %></span>
+    <section class="overview-section">
+      <div class="overview-section-head"><div><span class="eyebrow">THIS MONTH</span><h2>Meeting activity</h2></div></div>
+      <div class="admin-stats stats-4 overview-stats">
+        <div class="stat-card rich overview-stat"><div class="stat-icon"><span class="material-symbols-outlined">video_camera_front</span></div><span class="stat-label">Meetings</span><strong><%= u.meetingsUsed || 0 %></strong><span class="stat-delta">meetings this month</span></div>
+        <div class="stat-card rich overview-stat"><div class="stat-icon"><span class="material-symbols-outlined">graphic_eq</span></div><span class="stat-label">Transcription</span><strong><%= u.transcriptionMinutes || 0 %><small> min</small></strong><span class="stat-delta">audio processed</span></div>
+        <div class="stat-card rich overview-stat"><div class="stat-icon"><span class="material-symbols-outlined">checklist</span></div><span class="stat-label">Action items</span><strong><%= aiActionCount || 0 %></strong><span class="stat-delta">tasks identified</span></div>
+        <div class="stat-card rich overview-stat"><div class="stat-icon"><span class="material-symbols-outlined">auto_awesome</span></div><span class="stat-label">AI notes</span><strong><%= u.aiNotes || 0 %></strong><span class="stat-delta">summaries generated</span></div>
       </div>
-      <div class="stat-card rich">
-        <span class="stat-label">AI Notes</span>
-        <strong><%= u.aiNotes || 0 %></strong>
-        <span class="stat-delta">Generated</span>
-      </div>
-      <div class="stat-card rich">
-        <span class="stat-label">Transcription</span>
-        <strong><%= u.transcriptionMinutes || 0 %></strong>
-        <span class="stat-delta">Minutes this month</span>
-      </div>
-      <div class="stat-card rich">
-        <span class="stat-label">Usage remaining</span>
-        <strong><%= u.remainingPct != null ? u.remainingPct : 100 %>%</strong>
-        <span class="stat-delta"><%= u.badge || 'FREE' %> plan</span>
-      </div>
-    </div>
+    </section>
 
-    <section class="card section-card" style="margin: 16px 28px;">
-      <div class="section-head">
-        <h2>Recent meetings</h2>
-        <a href="/app/meetings">View all →</a>
-      </div>
+    <section class="today-strip">
+      <div class="today-title"><span class="material-symbols-outlined">today</span><strong>Today</strong></div>
+      <div><strong><%= t.meetings %></strong><span> meetings</span></div>
+      <div><strong><%= t.summaries %></strong><span> AI summaries</span></div>
+      <div><strong><%= t.actionItems %></strong><span> action items</span></div>
+      <div><strong><%= t.minutes %> min</strong><span> transcribed</span></div>
+    </section>
+
+    <section class="card section-card overview-card recent-overview-card">
+      <div class="section-head"><div><span class="eyebrow">YOUR LATEST</span><h2>Recent meetings</h2></div><a href="/app/meetings">View all →</a></div>
+      <div class="quick-filters"><a class="active" href="/app/meetings">All</a><a href="/app/meetings?view=today">Today</a><a href="/app/meetings?view=week">This week</a></div>
       <% if (!recent || !recent.length) { %>
-        <p class="muted">No meetings yet. Install the extension and save your first call.</p>
+        <div class="empty-hero overview-empty"><div class="empty-icon"><span class="material-symbols-outlined">mic</span></div><h3>Your meeting workspace is ready</h3><p>Start your first meeting and AI Note Taker will create your transcript, summary, action items, and insights.</p><div class="empty-actions"><button class="btn-primary" type="button" data-new-meeting><span class="material-symbols-outlined">add</span> Start your first meeting</button></div></div>
       <% } else { %>
-        <div class="meeting-groups" style="padding:0">
-          <% recent.forEach(function(m) { %>
-            <a class="meeting-row" href="/meetings/<%= m.externalId %>" style="border:1px solid #ebe7f2;margin-bottom:8px;border-radius:12px">
-              <div class="meeting-dur">
-                <strong><%= Math.max(1, Math.round((m.duration || 0) / 60)) %>m</strong>
-                <span><%= m.startedAt ? new Date(m.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %></span>
-              </div>
-              <div class="meeting-avatar"><%= (m.title || 'M').charAt(0).toUpperCase() %></div>
-              <div class="meeting-body">
-                <strong><%= m.title || 'Untitled meeting' %></strong>
-                <span class="participants"><%= m.platform || 'Manual' %><% if (m.ai && m.ai.summary) { %> · ✦ AI summary ready<% } %></span>
-              </div>
-            </a>
+        <div class="overview-meeting-list">
+          <% recent.forEach(function(m) { 
+            const mins = Math.max(1, Math.round((m.duration || 0) / 60));
+            const hasAi = !!(m.ai && m.ai.summary);
+            const actionCount = (m.ai && Array.isArray(m.ai.actionItems)) ? m.ai.actionItems.filter(a => !a.completed).length : 0;
+            const status = hasAi ? 'AI summary ready' : (m.fullTranscript ? 'Processing AI notes…' : 'Transcript received');
+          %>
+            <div class="overview-meeting-item">
+              <a class="overview-meeting-main" href="/meetings/<%= m.externalId %>">
+                <div class="meeting-avatar"><%= (m.title || 'M').charAt(0).toUpperCase() %></div>
+                <div class="meeting-body"><strong><%= m.title || 'Untitled meeting' %></strong><span><%= m.startedAt ? new Date(m.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %> · <%= mins %> min · <%= m.platform || 'Manual' %></span><div class="meeting-meta"><span class="status-pill <%= hasAi ? 'ready' : 'processing' %>"><span class="material-symbols-outlined"><%= hasAi ? 'check_circle' : 'progress_activity' %></span><%= status %></span><% if (actionCount) { %><span><%= actionCount %> action item<%= actionCount === 1 ? '' : 's' %></span><% } %></div></div>
+              </a>
+              <div class="overview-meeting-actions"><a class="icon-btn" href="/meetings/<%= m.externalId %>?tab=chat" title="Ask AI"><span class="material-symbols-outlined">chat</span></a><button class="icon-btn" type="button" title="More actions"><span class="material-symbols-outlined">more_horiz</span></button></div>
+            </div>
           <% }) %>
         </div>
       <% } %>
     </section>
 
+    <div class="overview-two-col">
+      <section class="card section-card overview-card">
+        <div class="section-head"><div><span class="eyebrow">NEEDS ATTENTION</span><h2>Action items</h2></div><a href="/app/meetings">View all →</a></div>
+        <% if (!actionItems || !actionItems.length) { %><div class="mini-empty"><span class="material-symbols-outlined">check_circle</span><div><strong>You're all caught up</strong><p>No open action items found.</p></div></div><% } else { %>
+          <div class="action-list">
+          <% actionItems.slice(0,5).forEach(function(item, i) { %>
+            <a href="/meetings/<%= item.meetingId %>?tab=summary" class="action-item"><span class="action-dot <%= i === 0 ? 'urgent' : '' %>"></span><span class="action-task"><strong><%= item.task %></strong><small><%= item.meetingTitle %><%= item.owner ? ' · ' + item.owner : '' %></small></span><span class="action-deadline"><%= item.deadline || 'No deadline' %></span></a>
+          <% }) %>
+          </div>
+        <% } %>
+      </section>
+
+      <section class="card section-card overview-card">
+        <div class="section-head"><div><span class="eyebrow">AI ACTIVITY</span><h2>Meeting insights</h2></div><a href="/app/insights">View insights →</a></div>
+        <div class="insight-grid">
+          <div><strong><%= ai.decisions || 0 %></strong><span>Decisions</span></div>
+          <div><strong><%= ai.topics || 0 %></strong><span>Topics</span></div>
+          <div><strong><%= ai.followUps || 0 %></strong><span>Follow-ups</span></div>
+        </div>
+        <div class="insight-callout"><span class="material-symbols-outlined">auto_awesome</span><span>AI insights are generated from your saved meeting transcripts.</span></div>
+      </section>
+    </div>
+
     <% if (!u.isPaid) { %>
     <section class="card section-card upgrade-banner" style="margin: 0 28px 24px;">
-      <div>
-        <h2>Unlock AI Insights &amp; Ask AI</h2>
-        <p class="muted">Pro includes unlimited meetings, action items, and cross-meeting insights.</p>
-      </div>
-      <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
+      <div><h2>Unlock more AI value</h2><p class="muted">Pro includes higher meeting limits, advanced AI insights, and Ask AI capabilities.</p></div><a class="btn-primary" href="/app/usage">See Pro plan</a>
     </section>
     <% } %>
   </div>
 </div>
+
+<div class="modal-backdrop overview-modal" data-new-meeting-modal hidden>
+  <div class="new-meeting-modal" role="dialog" aria-modal="true" aria-labelledby="newMeetingTitle">
+    <button class="modal-close" type="button" data-close-new-meeting aria-label="Close"><span class="material-symbols-outlined">close</span></button>
+    <span class="modal-icon"><span class="material-symbols-outlined">add_circle</span></span>
+    <span class="eyebrow">NEW MEETING</span><h2 id="newMeetingTitle">How would you like to capture your meeting?</h2><p>Choose the capture method that matches your meeting.</p>
+    <div class="capture-options">
+      <a class="capture-option" href="/install"><span class="capture-option-icon"><span class="material-symbols-outlined">extension</span></span><span><strong>Browser extension</strong><small>Capture Google Meet, Zoom, and Teams automatically.</small></span><span class="material-symbols-outlined">arrow_forward</span></a>
+      <a class="capture-option" href="/app/meetings"><span class="capture-option-icon"><span class="material-symbols-outlined">folder_open</span></span><span><strong>Open my meetings</strong><small>Review, search, and manage your saved meetings.</small></span><span class="material-symbols-outlined">arrow_forward</span></a>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const modal = document.querySelector('[data-new-meeting-modal]');
+  if (!modal) return;
+  const open = () => { modal.hidden = false; document.body.classList.add('modal-open'); setTimeout(() => modal.querySelector('.capture-option')?.focus(), 0); };
+  const close = () => { modal.hidden = true; document.body.classList.remove('modal-open'); };
+  document.querySelectorAll('[data-new-meeting]').forEach(btn => btn.addEventListener('click', open));
+  modal.querySelector('[data-close-new-meeting]')?.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.hidden) close(); });
+})();
+</script>
 <%- include("partials/footer") %>

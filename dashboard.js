@@ -32,94 +32,170 @@ function fmtDuration(seconds) { const n = Math.max(0, Math.round(Number(seconds 
 function toast(message) { const el=$('toast'); el.textContent=message; el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),2600); }
 function openExtension() { chrome.windows.create({ url: chrome.runtime.getURL('popup.html'), type: 'popup', width: 440, height: 760, focused: true }).catch(()=>{}); }
 
+let filterState = { date: 'all', source: 'all', status: 'all', ai: 'all' };
+let selectedMeetingIds = new Set();
+let meetingsOffset = 0;
+const meetingsPageSize = 100;
+let hasMoreMeetings = false;
+
+function actionCount(m) { return Array.isArray(m?.ai?.actionItems) ? m.ai.actionItems.length : 0; }
+function hasInsights(m) {
+  const ai = m?.ai || {};
+  return Boolean((ai.decisions||[]).length || (ai.topics||[]).length || (ai.followUps||[]).length || (ai.keyPoints||[]).length);
+}
+function meetingStatus(m) {
+  if (m?.ai?.error || m?.lastSyncError) return { key:'failed', label:'AI analysis failed', icon:'warning', tone:'danger' };
+  if (m?.ai?.summary) return { key:'ready', label:'AI summary ready', icon:'check_circle', tone:'success' };
+  if (m?.fullTranscript || (m?.transcript||[]).length) return { key:'processing', label:'AI analysis in progress', icon:'progress_activity', tone:'processing' };
+  return { key:'processing', label:'Transcript processing', icon:'sync', tone:'processing' };
+}
+function matchesDate(m, filter) {
+  if (filter === 'all') return true;
+  const d = new Date(m.startedAt || m.createdAt || 0); if (Number.isNaN(d.getTime())) return false;
+  const now = new Date(); const start = new Date(now); start.setHours(0,0,0,0);
+  if (filter === 'today') return d >= start;
+  if (filter === 'yesterday') { const y = new Date(start); y.setDate(y.getDate()-1); return d >= y && d < start; }
+  if (filter === 'week') { const w = new Date(start); const day=(w.getDay()+6)%7; w.setDate(w.getDate()-day); return d >= w; }
+  if (filter === 'month') { return d.getMonth()===now.getMonth() && d.getFullYear()===now.getFullYear(); }
+  return true;
+}
+function matchesSearch(m, q) {
+  if (!q) return true;
+  const ai=m.ai||{};
+  const hay=[m.title,m.platform,m.meetingUrl,m.fullTranscript,...(m.participants||[]).flatMap(p=>[p.name,p.email]),ai.summary,ai.detailedSummary,...(ai.keyPoints||[]),...(ai.decisions||[]),...(ai.topics||[]),...(ai.followUps||[]),...(ai.actionItems||[]).flatMap(a=>[a.task,a.owner,a.deadline])].join(' ').toLowerCase();
+  return hay.includes(q.toLowerCase());
+}
+function applyClientFilters(source) {
+  const q=$('searchInput').value.trim();
+  return source.filter(m=>{
+    if (!matchesSearch(m,q)) return false;
+    if (filterState.date !== 'all' && !matchesDate(m,filterState.date)) return false;
+    if (filterState.source !== 'all' && String(m.platform||'Manual').toLowerCase() !== filterState.source.toLowerCase()) return false;
+    const st=meetingStatus(m).key; if (filterState.status !== 'all' && st !== filterState.status) return false;
+    if (filterState.ai==='summary' && !m.ai?.summary) return false;
+    if (filterState.ai==='actions' && actionCount(m)===0) return false;
+    if (filterState.ai==='insights' && !hasInsights(m)) return false;
+    return true;
+  });
+}
+function dedupeMeetings(items) {
+  const seen=new Map();
+  for(const m of items){
+    const key=String(m.externalId||m._id||`${m.userId||''}:${m.startedAt||''}:${m.title||''}`);
+    if(!seen.has(key)) seen.set(key,m);
+    else {
+      const existing=seen.get(key);
+      const existingScore=(existing.ai?.summary?4:0)+(existing.fullTranscript?2:0)+(existing.participants?.length||0);
+      const currentScore=(m.ai?.summary?4:0)+(m.fullTranscript?2:0)+(m.participants?.length||0);
+      if(currentScore>existingScore) seen.set(key,m);
+    }
+  }
+  return [...seen.values()];
+}
 async function loadMeetings() {
   $('meetingList').innerHTML = '<div class="loading">Loading your meeting history…</div>';
   try {
     const q = $('searchInput').value.trim();
-    const data = await api(`/api/meetings?userId=${encodeURIComponent(userId)}&q=${encodeURIComponent(q)}&view=${encodeURIComponent(listViewFilter)}`);
-    meetings = data.meetings || [];
+    const data = await api(`/api/meetings?userId=${encodeURIComponent(userId)}&q=${encodeURIComponent(q)}&view=${encodeURIComponent(listViewFilter)}&limit=${meetingsPageSize}&offset=${meetingsOffset}`);
+    const incoming = dedupeMeetings(data.meetings || []);
+    meetings = meetingsOffset > 0 ? dedupeMeetings([...meetings, ...incoming]) : incoming;
+    hasMoreMeetings = Boolean(data.hasMore);
+    window.meetingsTotal = Number(data.total || meetings.length);
+    const filtered = applyClientFilters(meetings);
     const sort = $('sortSelect').value;
-    if (sort === 'oldest') meetings.sort((a,b)=>new Date(a.startedAt)-new Date(b.startedAt));
-    if (sort === 'longest') meetings.sort((a,b)=>(b.duration||0)-(a.duration||0));
-    renderMeetings();
+    if (sort === 'oldest') filtered.sort((a,b)=>new Date(a.startedAt)-new Date(b.startedAt));
+    if (sort === 'longest') filtered.sort((a,b)=>(b.duration||0)-(a.duration||0));
+    if (sort === 'shortest') filtered.sort((a,b)=>(a.duration||0)-(b.duration||0));
+    if (sort === 'updated') filtered.sort((a,b)=>new Date(b.updatedAt||b.endedAt||b.startedAt)-new Date(a.updatedAt||a.endedAt||a.startedAt));
+    if (sort === 'actions') filtered.sort((a,b)=>actionCount(b)-actionCount(a));
+    if (sort === 'viewed') filtered.sort((a,b)=>(b.viewCount||0)-(a.viewCount||0));
+    renderMeetings(filtered);
+    updateFilterCount();
+    $('loadMoreWrap')?.classList.toggle('hidden', !hasMoreMeetings || Boolean($('searchInput').value.trim()) || Object.values(filterState).some(v=>v!=='all'));
   } catch (error) {
-    $('meetingList').innerHTML='';
-    $('listState').classList.remove('hidden');
+    $('meetingList').innerHTML=''; $('listState').classList.remove('hidden');
     $('listState').innerHTML=`<strong>Could not load meetings</strong><p>${esc(error.message)}<br>Start the backend with <code>server/npm install</code> and <code>npm start</code>.</p>`;
   }
 }
-function renderMeetings() {
+function groupLabel(date) {
+  const d=new Date(date), now=new Date(); const today=new Date(now); today.setHours(0,0,0,0);
+  const yesterday=new Date(today); yesterday.setDate(yesterday.getDate()-1);
+  if(d>=today) return 'Today'; if(d>=yesterday) return 'Yesterday';
+  const week=new Date(today); const day=(week.getDay()+6)%7; week.setDate(week.getDate()-day);
+  if(d>=week) return 'This week'; return 'Earlier';
+}
+function platformIcon(platform) {
+  const p=String(platform||'Manual').toLowerCase();
+  if(p.includes('meet')) return 'videocam'; if(p.includes('zoom')) return 'video_camera_front'; if(p.includes('team')) return 'groups'; if(p.includes('upload')) return 'upload_file'; return 'mic';
+}
+function renderMeetings(items=meetings) {
   $('listState').classList.add('hidden');
-  if (!meetings.length) {
-    const emptyMsg = listViewFilter === 'favorites'
-      ? 'Star meetings to see them here.'
-      : listViewFilter === 'archived'
-        ? 'Archived meetings will appear here.'
-        : 'Your completed meetings will appear here automatically.';
-    $('meetingList').innerHTML=`<div class="state-card"><strong>No meetings yet</strong><p>${emptyMsg}</p></div>`;
-    return;
+  $('loadMoreWrap')?.classList.toggle('hidden', !hasMoreMeetings);
+  if (!items.length) {
+    const q=$('searchInput').value.trim();
+    let title='No meetings yet', msg='Your recorded meetings will appear here automatically.';
+    if(q || Object.values(filterState).some(v=>v!=='all')) { title='No meetings found'; msg='Try a different keyword or clear some filters.'; }
+    else if(listViewFilter==='favorites'){title='No favourite meetings';msg='Star important meetings to find them quickly.';}
+    else if(listViewFilter==='archived'){title='Nothing archived';msg='Archived meetings will appear here.';}
+    $('meetingList').innerHTML=`<div class="state-card"><strong>${title}</strong><p>${msg}</p><button class="primary-btn empty-cta" id="emptyNewMeeting"><span class="material-symbols-outlined">add</span> New Meeting</button></div>`;
+    $('emptyNewMeeting')?.addEventListener('click',openExtension); updateSelectionBar(); return;
   }
-  $('meetingList').innerHTML=meetings.map(m=>`<article class="meeting-card" data-id="${esc(m.externalId)}">
-    <div class="meeting-card-main">
-      <div class="meeting-title">${m.isFavorite ? '★ ' : ''}${esc(m.title)}${m.isArchived ? ' <span class="badge-archived">Archived</span>' : ''}</div>
-      <div class="meeting-meta">${esc(fmtDate(m.startedAt))} · ${(m.participants||[]).length || 0} participants</div>
-      <div class="meeting-preview">${esc(m.ai?.summary || m.fullTranscript || 'No transcript preview available.')}</div>
-    </div>
-    <div class="meeting-right">
-      <span class="platform">${esc(m.platform)}</span>
-      <div class="duration">${fmtDuration(m.duration)}</div>
-      <div class="meeting-card-actions">
-        <button type="button" class="mini-btn fav-btn" data-action="favorite" data-id="${esc(m.externalId)}" title="Favourite">${m.isFavorite ? '★' : '☆'}</button>
-        <button type="button" class="mini-btn" data-action="archive" data-id="${esc(m.externalId)}" title="${m.isArchived ? 'Unarchive' : 'Archive'}">${m.isArchived ? '↩' : 'Arch'}</button>
-        <button type="button" class="mini-btn danger" data-action="delete" data-id="${esc(m.externalId)}" title="Delete">Del</button>
+  let lastGroup=''; let html='';
+  for(const m of items){
+    const group=groupLabel(m.startedAt); if(group!==lastGroup){html+=`<div class="meeting-group-title">${group}</div>`;lastGroup=group;}
+    const st=meetingStatus(m), actions=actionCount(m), selected=selectedMeetingIds.has(String(m.externalId));
+    const participants=(m.participants||[]).filter(p=>p?.name).slice(0,3).map(p=>esc(p.name)).join(', ');
+    const participantText=participants ? ` · ${participants}` : ` · ${(m.participants||[]).length || 0} participant${(m.participants||[]).length===1?'':'s'}`;
+    html+=`<article class="meeting-card ${selected?'selected':''}" data-id="${esc(m.externalId)}">
+      <label class="meeting-select" title="Select meeting"><input type="checkbox" data-select-id="${esc(m.externalId)}" ${selected?'checked':''}><span></span></label>
+      <div class="meeting-card-main">
+        <div class="meeting-title-row"><div class="meeting-title">${esc(m.title||'Untitled meeting')}</div>${m.isArchived?'<span class="badge-archived">Archived</span>':''}</div>
+        <div class="meeting-meta">${esc(new Date(m.startedAt||m.createdAt||Date.now()).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))} · ${fmtDuration(m.duration)} · ${esc(m.platform||'Manual')}${participantText}</div>
+        <div class="meeting-status-row"><span class="status-pill status-${st.tone}"><span class="material-symbols-outlined">${st.icon}</span>${esc(st.label)}</span>${m.fullTranscript||m.transcript?.length?'<span class="availability-pill"><span class="material-symbols-outlined">check_circle</span>Transcript</span>':''}${actions?`<span class="availability-pill"><span class="material-symbols-outlined">task_alt</span>${actions} action${actions===1?'':'s'}</span>`:''}</div>
       </div>
-    </div>
-  </article>`).join('');
-  document.querySelectorAll('.meeting-card').forEach(el => {
-    el.addEventListener('click', (e) => {
-      if (e.target.closest('[data-action]')) return;
-      openMeeting(el.dataset.id);
-    });
-  });
-  document.querySelectorAll('[data-action]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      const action = btn.dataset.action;
-      const m = meetings.find(x => x.externalId === id);
-      if (!m) return;
-      try {
-        if (action === 'delete') {
-          if (!confirm('Delete this meeting permanently?')) return;
-          await api(`/api/meetings/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`, { method: 'DELETE' });
-          toast('Meeting deleted.');
-          await loadMeetings();
-          return;
-        }
-        if (action === 'favorite') {
-          const data = await api(`/api/meetings/${encodeURIComponent(id)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ userId, isFavorite: !m.isFavorite })
-          });
-          Object.assign(m, data.meeting || { isFavorite: !m.isFavorite });
-          toast(m.isFavorite ? 'Marked favourite.' : 'Removed from favourites.');
-          renderMeetings();
-          return;
-        }
-        if (action === 'archive') {
-          const data = await api(`/api/meetings/${encodeURIComponent(id)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ userId, isArchived: !m.isArchived })
-          });
-          Object.assign(m, data.meeting || { isArchived: !m.isArchived });
-          toast(m.isArchived ? 'Archived.' : 'Unarchived.');
-          await loadMeetings();
-        }
-      } catch (error) {
-        toast(error.message);
-      }
-    });
-  });
+      <div class="meeting-right"><div class="platform"><span class="material-symbols-outlined">${platformIcon(m.platform)}</span>${esc(m.platform||'Manual')}</div><div class="meeting-card-actions"><button type="button" class="mini-btn fav-btn" data-action="favorite" data-id="${esc(m.externalId)}" title="${m.isFavorite?'Remove favourite':'Add to favourites'}">${m.isFavorite?'★':'☆'}</button><button type="button" class="mini-btn menu-btn" data-action="menu" data-id="${esc(m.externalId)}" title="More actions"><span class="material-symbols-outlined">more_horiz</span></button></div></div>
+      <div class="meeting-menu hidden" data-menu-id="${esc(m.externalId)}"><button data-menu-action="open">Open meeting</button><button data-menu-action="ask">Ask AI</button><button data-menu-action="favorite">${m.isFavorite?'Remove from favourites':'Add to favourites'}</button><button data-menu-action="rename">Rename</button><button data-menu-action="export">Export</button><button data-menu-action="archive">${m.isArchived?'Unarchive':'Archive'}</button><button data-menu-action="delete" class="danger-menu">Delete</button></div>
+    </article>`;
+  }
+  $('meetingList').innerHTML=html;
+  bindMeetingInteractions(); updateSelectionBar();
+}
+function bindMeetingInteractions(){
+  document.querySelectorAll('.meeting-card').forEach(el=>el.addEventListener('click',e=>{ if(e.target.closest('[data-action]')||e.target.closest('.meeting-select')||e.target.closest('.meeting-menu'))return; openMeeting(el.dataset.id); }));
+  document.querySelectorAll('[data-select-id]').forEach(cb=>cb.addEventListener('change',e=>{const id=String(e.target.dataset.selectId);e.target.checked?selectedMeetingIds.add(id):selectedMeetingIds.delete(id);e.target.closest('.meeting-card')?.classList.toggle('selected',e.target.checked);updateSelectionBar();}));
+  document.querySelectorAll('[data-action="favorite"]').forEach(btn=>btn.addEventListener('click',()=>runMeetingAction(btn.dataset.id,'favorite')));
+  document.querySelectorAll('[data-action="menu"]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();document.querySelectorAll('.meeting-menu').forEach(m=>m.classList.add('hidden'));document.querySelector(`[data-menu-id="${CSS.escape(btn.dataset.id)}"]`)?.classList.toggle('hidden');}));
+  document.querySelectorAll('.meeting-menu button').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();const menu=btn.closest('.meeting-menu'),id=menu.dataset.menuId,action=btn.dataset.menuAction;menu.classList.add('hidden');runMeetingMenuAction(id,action);}));
+}
+async function runMeetingAction(id,action){
+  const m=meetings.find(x=>String(x.externalId)===String(id)); if(!m)return;
+  try{ if(action==='favorite'){await api(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({userId,isFavorite:!m.isFavorite})});toast(m.isFavorite?'Removed from favourites.':'Marked favourite.');await loadMeetings();} }
+  catch(e){toast(e.message);}
+}
+async function runMeetingMenuAction(id,action){
+  const m=meetings.find(x=>String(x.externalId)===String(id)); if(!m)return;
+  if(action==='open') return openMeeting(id);
+  if(action==='ask'){await openMeeting(id);activeTab='chat';renderTab();return;}
+  if(action==='favorite') return runMeetingAction(id,'favorite');
+  if(action==='rename'){const title=prompt('Meeting title',m.title||'Untitled meeting');if(title&&title.trim()){await api(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({userId,title:title.trim()})});await loadMeetings();toast('Meeting renamed.');}return;}
+  if(action==='export'){await openMeeting(id);return exportAllPdf();}
+  if(action==='archive'){await api(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({userId,isArchived:!m.isArchived})});toast(m.isArchived?'Unarchived.':'Archived.');await loadMeetings();return;}
+  if(action==='delete'){if(!confirm('Delete this meeting? This removes its transcript and AI analysis.'))return;await api(`/api/meetings/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`,{method:'DELETE'});toast('Meeting deleted.');await loadMeetings();}
+}
+function updateFilterCount(){const n=Object.values(filterState).filter(v=>v!=='all').length;$('filterCount')?.classList.toggle('hidden',n===0);if($('filterCount'))$('filterCount').textContent=n;}
+function updateSelectionBar(){const n=selectedMeetingIds.size;$('selectionBar')?.classList.toggle('hidden',n===0);if($('selectedCount'))$('selectedCount').textContent=n;}
+async function bulkAction(action){
+  const ids=[...selectedMeetingIds]; if(!ids.length)return;
+  if(action==='delete' && !confirm(`Delete ${ids.length} selected meeting${ids.length>1?'s':''}?`))return;
+  for(const id of ids){
+    try{
+      if(action==='delete') await api(`/api/meetings/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`,{method:'DELETE'});
+      else if(action==='favorite') await api(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({userId,isFavorite:true})});
+      else if(action==='archive') await api(`/api/meetings/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify({userId,isArchived:true})});
+    }catch(e){toast(e.message);break;}
+  }
+  if(action==='export'){for(const id of ids){await openMeeting(id);exportAllPdf();}}
+  selectedMeetingIds.clear();await loadMeetings();toast(`${ids.length} meeting${ids.length>1?'s':''} updated.`);
 }
 async function openMeeting(id) {
   $('listView').classList.add('hidden'); $('detailView').classList.remove('hidden'); $('detailContent').innerHTML='<div class="loading">Loading meeting…</div>';
@@ -478,15 +554,28 @@ async function toggleArchive(){
     toast(activeMeeting.isArchived?'Archived.':'Unarchived.');
   }catch(error){toast(error.message);}
 }
-function showList(){ $('detailView').classList.add('hidden');$('listView').classList.remove('hidden');loadMeetings(); }
-$('backBtn').addEventListener('click',showList);$('refreshBtn').addEventListener('click',loadMeetings);$('searchInput').addEventListener('input',()=>{clearTimeout(window.searchTimer);window.searchTimer=setTimeout(loadMeetings,250)});$('sortSelect').addEventListener('change',renderMeetings);$('openExtension').addEventListener('click',openExtension);$('startBtn').addEventListener('click',openExtension);$('exportSummaryBtn').addEventListener('click',exportSummaryPdf);$('exportTranscriptBtn').addEventListener('click',exportTranscriptPdf);$('exportAllBtn').addEventListener('click',exportAllPdf);$('deleteBtn').addEventListener('click',deleteMeeting);$('favoriteBtn')?.addEventListener('click',toggleFavorite);$('archiveBtn')?.addEventListener('click',toggleArchive);document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{activeTab=t.dataset.tab;renderTab();}));
-document.querySelectorAll('.filter-chip').forEach(chip=>{
-  chip.addEventListener('click',()=>{
-    document.querySelectorAll('.filter-chip').forEach(c=>c.classList.toggle('active',c===chip));
-    listViewFilter=chip.dataset.filter||'all';
-    loadMeetings();
-  });
-});
+function showList(){ $('detailView').classList.add('hidden');$('listView').classList.remove('hidden');loadMeetings();}
+$('backBtn').addEventListener('click',showList);
+$('refreshBtn').addEventListener('click',loadMeetings);
+$('searchInput').addEventListener('input',()=>{clearTimeout(window.searchTimer);window.searchTimer=setTimeout(()=>{meetingsOffset=0;loadMeetings();},250)});
+$('sortSelect').addEventListener('change',loadMeetings);
+$('openExtension').addEventListener('click',openExtension);
+$('startBtn').addEventListener('click',openExtension);
+$('exportSummaryBtn').addEventListener('click',exportSummaryPdf);
+$('exportTranscriptBtn').addEventListener('click',exportTranscriptPdf);
+$('exportAllBtn').addEventListener('click',exportAllPdf);
+$('deleteBtn').addEventListener('click',deleteMeeting);
+$('favoriteBtn')?.addEventListener('click',toggleFavorite);
+$('archiveBtn')?.addEventListener('click',toggleArchive);
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{activeTab=t.dataset.tab;renderTab();}));
+document.querySelectorAll('.filter-chip').forEach(chip=>chip.addEventListener('click',()=>{document.querySelectorAll('.filter-chip').forEach(c=>c.classList.toggle('active',c===chip));listViewFilter=chip.dataset.filter||'all';meetingsOffset=0;selectedMeetingIds.clear();loadMeetings();}));
+$('advancedFilterBtn')?.addEventListener('click',()=>$('filterPanel').classList.toggle('hidden'));
+$('clearFiltersBtn')?.addEventListener('click',()=>{['dateFilter','sourceFilter','statusFilter','aiFilter'].forEach(id=>$(id).value='all');filterState={date:'all',source:'all',status:'all',ai:'all'};meetingsOffset=0;loadMeetings();});
+['dateFilter','sourceFilter','statusFilter','aiFilter'].forEach(id=>$(id)?.addEventListener('change',()=>{filterState={date:$('dateFilter').value,source:$('sourceFilter').value,status:$('statusFilter').value,ai:$('aiFilter').value};meetingsOffset=0;loadMeetings();}));
+$('clearSelectionBtn')?.addEventListener('click',()=>{selectedMeetingIds.clear();renderMeetings(applyClientFilters(meetings));});
+$('loadMoreBtn')?.addEventListener('click',()=>{meetingsOffset += meetingsPageSize;loadMeetings();});
+document.querySelectorAll('[data-bulk]').forEach(btn=>btn.addEventListener('click',()=>bulkAction(btn.dataset.bulk)));
+document.addEventListener('click',e=>{if(!e.target.closest('.meeting-card'))document.querySelectorAll('.meeting-menu').forEach(m=>m.classList.add('hidden'));});
 (async()=>{
   const auth=await getAuth();
   if(!authToken){

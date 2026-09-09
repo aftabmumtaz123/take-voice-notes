@@ -1,3 +1,22 @@
+// Global theme preference fallback — light by default; account page controls can override it.
+(() => {
+  try {
+    const key = "ai-note-appearance-v2";
+    const saved = localStorage.getItem(key) || "light";
+    const apply = value => {
+      const resolved = value === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : value;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.appearance = value;
+    };
+    apply(saved);
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener?.("change", () => { if ((localStorage.getItem(key) || "light") === "system") apply("system"); });
+  } catch (_) {
+    document.documentElement.dataset.theme = "light";
+    document.documentElement.dataset.appearance = "light";
+  }
+})();
+
 
 // Tabs
 document.querySelectorAll("[data-tabs]").forEach((tabs) => {

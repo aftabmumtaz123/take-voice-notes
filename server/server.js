@@ -16,6 +16,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
   rotateApiKey,
+  updateAccountSettings,
   postLoginRedirect,
   seedDefaults,
   User,
@@ -135,6 +136,7 @@ const meetingSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   isFavorite: { type: Boolean, default: false },
   isArchived: { type: Boolean, default: false },
+  viewCount: { type: Number, default: 0 },
   lastSyncError: { type: String, default: '' },
   syncedAt: Date
 }, { timestamps: true });
@@ -696,7 +698,10 @@ app.get('/', optionalAuth, async (req, res) => {
 
 
 async function loadUserPlanContext(user) {
-  const plan = await Plan.findOne({ slug: user.planSlug || 'free' }).lean().catch(() => null);
+  const [plan, account] = await Promise.all([
+    Plan.findOne({ slug: user.planSlug || 'free' }).lean().catch(() => null),
+    User.findById(user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null)
+  ]);
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
@@ -717,6 +722,8 @@ async function loadUserPlanContext(user) {
   const remainingPct = isUnlimited(maxMeetings)
     ? 100
     : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
+  const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`;
+  const askAiCount = account?.askAiUsageMonth === monthKey ? Number(account.askAiUsageCount || 0) : 0;
   return {
     plan,
     usage: {
@@ -724,6 +731,7 @@ async function loadUserPlanContext(user) {
       meetingsMax: maxMeetings,
       aiNotes: aiThisMonth,
       transcriptionMinutes: Math.round(durationSec / 60),
+      aiQuestions: askAiCount,
       remainingPct,
       isPaid: isPaidPlan(user.planSlug),
       badge: planBadgeLabel(user.planSlug)
@@ -742,8 +750,59 @@ app.get('/app/overview', requireAuth, async (req, res) => {
     const settings = await getSiteSettings().catch(() => null);
     const ctx = await loadUserPlanContext(req.user);
     const recent = await Meeting.find({ userId: req.user.id, isArchived: { $ne: true } })
-      .sort({ startedAt: -1 }).limit(5).lean();
-    const hour = new Date().getHours();
+      .sort({ startedAt: -1 }).limit(6).lean();
+
+    const now = new Date();
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [todayMeetings, todayAi, todayActionItems, todayMinutes, actionDocs, insightAgg] = await Promise.all([
+      Meeting.countDocuments({ userId: req.user.id, isArchived: { $ne: true }, startedAt: { $gte: dayStart, $lt: dayEnd } }).catch(() => 0),
+      Meeting.countDocuments({ userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: dayStart, $lt: dayEnd }, 'ai.summary': { $exists: true, $ne: '' } }).catch(() => 0),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: dayStart, $lt: dayEnd } } },
+        { $unwind: { path: '$ai.actionItems', preserveNullAndEmptyArrays: false } },
+        { $match: { 'ai.actionItems.completed': { $ne: true } } },
+        { $count: 'count' }
+      ]).then(r => r[0]?.count || 0).catch(() => 0),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, startedAt: { $gte: dayStart, $lt: dayEnd } } },
+        { $group: { _id: null, total: { $sum: '$duration' } } }
+      ]).then(r => Math.round((r[0]?.total || 0) / 60)).catch(() => 0),
+      Meeting.find({ userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart }, 'ai.actionItems.0': { $exists: true } })
+        .select('externalId title startedAt ai.actionItems').sort({ startedAt: -1 }).limit(12).lean().catch(() => []),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart } } },
+        { $group: { _id: null, decisions: { $sum: { $size: { $ifNull: ['$ai.decisions', []] } } }, topics: { $sum: { $size: { $ifNull: ['$ai.topics', []] } } }, followUps: { $sum: { $size: { $ifNull: ['$ai.followUps', []] } } } } }
+      ]).then(r => r[0] || { decisions: 0, topics: 0, followUps: 0 }).catch(() => ({ decisions: 0, topics: 0, followUps: 0 }))
+    ]);
+
+    const aiActionCount = await Meeting.aggregate([
+      { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart } } },
+      { $unwind: { path: '$ai.actionItems', preserveNullAndEmptyArrays: false } },
+      { $match: { 'ai.actionItems.task': { $nin: ['', null] } } },
+      { $count: 'count' }
+    ]).then(r => r[0]?.count || 0).catch(() => 0);
+
+    const actionItems = [];
+    for (const m of actionDocs) {
+      for (const item of (m.ai?.actionItems || [])) {
+        if (item.completed) continue;
+        actionItems.push({
+          meetingId: m.externalId,
+          meetingTitle: m.title || 'Untitled meeting',
+          task: item.task || 'Action item',
+          owner: item.owner || '',
+          deadline: item.deadline || ''
+        });
+      }
+    }
+    actionItems.splice(8);
+
+    const hour = now.getHours();
     const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
     res.render('overview', {
       user: req.user,
@@ -751,6 +810,10 @@ app.get('/app/overview', requireAuth, async (req, res) => {
       plan: ctx.plan,
       usage: ctx.usage,
       recent,
+      today: { meetings: todayMeetings, summaries: todayAi, actionItems: todayActionItems, minutes: todayMinutes },
+      actionItems,
+      insights: insightAgg,
+      aiActionCount,
       greet,
       error: null,
       success: null
@@ -759,7 +822,7 @@ app.get('/app/overview', requireAuth, async (req, res) => {
     res.status(500).render('overview', {
       user: req.user, settings: null, plan: null,
       usage: { meetingsUsed: 0, meetingsMax: 5, aiNotes: 0, remainingPct: 100, isPaid: false, badge: 'FREE' },
-      recent: [], greet: 'Hello', error: error.message, success: null
+      recent: [], today: { meetings: 0, summaries: 0, actionItems: 0, minutes: 0 }, actionItems: [], insights: { decisions: 0, topics: 0, followUps: 0 }, aiActionCount: 0, greet: 'Hello', error: error.message, success: null
     });
   }
 });
@@ -797,62 +860,184 @@ app.get('/app/meetings', requireAuth, async (req, res) => {
 app.get('/app/insights', requireAuth, async (req, res) => {
   const settings = await getSiteSettings().catch(() => null);
   const ctx = await loadUserPlanContext(req.user);
-  const weekStart = new Date();
-  weekStart.setDate(weekStart.getDate() - 7);
-  weekStart.setHours(0,0,0,0);
-  const meetings = await Meeting.find({
-    userId: req.user.id,
-    startedAt: { $gte: weekStart }
-  }).lean().catch(() => []);
-  const totalMin = Math.round(meetings.reduce((s, m) => s + (m.duration || 0), 0) / 60);
-  let actionItems = 0;
-  const topics = {};
-  for (const m of meetings) {
-    const items = m.ai?.actionItems || [];
-    actionItems += items.length;
-    const title = (m.title || 'Other').split(' ').slice(0, 3).join(' ');
-    topics[title] = (topics[title] || 0) + 1;
+  const range = ['today', '7d', '30d', '90d'].includes(String(req.query.range || '7d')) ? String(req.query.range || '7d') : '7d';
+  const days = range === 'today' ? 1 : range === '30d' ? 30 : range === '90d' ? 90 : 7;
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - days + (range === 'today' ? 0 : 1));
+  start.setHours(0, 0, 0, 0);
+  const previousStart = new Date(start);
+  previousStart.setDate(previousStart.getDate() - days);
+  const previousEnd = new Date(start);
+
+  const [meetings, previousMeetings] = await Promise.all([
+    Meeting.find({ userId: req.user.id, startedAt: { $gte: start } }).sort({ startedAt: -1 }).lean().catch(() => []),
+    Meeting.find({ userId: req.user.id, startedAt: { $gte: previousStart, $lt: previousEnd } }).sort({ startedAt: -1 }).lean().catch(() => [])
+  ]);
+
+  const aggregate = (docs) => {
+    const topics = new Map();
+    const decisions = [];
+    const actions = [];
+    const unresolved = [];
+    let actionCount = 0;
+    let decisionCount = 0;
+    let totalMin = 0;
+    let summaries = 0;
+    for (const m of docs) {
+      totalMin += Math.round((Number(m.duration || 0) / 60) * 10) / 10;
+      if (m.ai?.summary) summaries++;
+      const seenTopics = new Set();
+      for (const raw of (m.ai?.topics || [])) {
+        const topic = String(raw || '').trim();
+        if (!topic) continue;
+        const key = topic.toLowerCase();
+        if (seenTopics.has(key)) continue;
+        seenTopics.add(key);
+        const entry = topics.get(key) || { name: topic, meetings: 0, meetingIds: [] };
+        entry.meetings += 1;
+        if (m.externalId) entry.meetingIds.push(m.externalId);
+        topics.set(key, entry);
+      }
+      for (const d of (m.ai?.decisionDetails || [])) {
+        const text = String(d?.decision || '').trim();
+        if (text) { decisionCount++; decisions.push({ text, rationale: String(d?.rationale || ''), meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt }); }
+      }
+      if (!(m.ai?.decisionDetails || []).length) {
+        for (const d of (m.ai?.decisions || [])) {
+          const text = typeof d === 'object' ? String(d?.decision || d?.text || '').trim() : String(d || '').trim();
+          if (text) { decisionCount++; decisions.push({ text, rationale: '', meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt }); }
+        }
+      }
+      for (const a of (m.ai?.actionItems || [])) {
+        actionCount++;
+        if (!a.completed && a.task) actions.push({ ...a, meetingId: m.externalId, meetingTitle: m.title });
+      }
+      for (const q of (m.ai?.openQuestions || [])) {
+        const text = String(q || '').trim();
+        if (text) unresolved.push({ type: 'question', text, meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt });
+      }
+      for (const c of (m.ai?.conflicts || [])) {
+        const topic = String(c?.topic || '').trim();
+        const status = String(c?.status || '').trim();
+        if (topic && (!status || /open|pending|unresolved/i.test(status))) unresolved.push({ type: 'issue', text: topic, detail: String(c?.impact || c?.perspectives || ''), meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt });
+      }
+    }
+    return {
+      meetings: docs.length, totalMin, actionItems: actionCount, decisionCount: decisionCount, summaries,
+      topics: [...topics.values()].sort((a,b) => b.meetings - a.meetings || a.name.localeCompare(b.name)).slice(0, 12),
+      decisions: decisions.slice(0, 8), actions: actions.slice(0, 8), unresolved: unresolved.slice(0, 8)
+    };
+  };
+  const current = aggregate(meetings);
+  const previous = aggregate(previousMeetings);
+  const maxTopicMeetings = Math.max(1, ...current.topics.map(t => t.meetings));
+  const pct = (a, b) => b ? Math.round(((a - b) / b) * 100) : (a ? null : 0);
+
+  const fallbackOverview = current.meetings
+    ? `Your meetings in this period focused most on ${current.topics.slice(0, 2).map(t => t.name).join(' and ') || 'the topics captured in your notes'}. You have ${current.decisionCount} tracked decisions and ${current.actionItems} action items, with ${current.unresolved.length} unresolved items surfaced for follow-up.`
+    : 'Capture a few meetings to unlock cross-meeting patterns, decisions, action items, and unresolved topics.';
+
+  let aiOverview = fallbackOverview;
+  if (ctx.usage.isPaid && current.meetings >= 2 && req.query.ai === '1') {
+    try {
+      const source = meetings.slice(0, 20).map(m => ({
+        title: m.title, date: m.startedAt, summary: m.ai?.summary || '', topics: m.ai?.topics || [],
+        decisions: (m.ai?.decisionDetails || m.ai?.decisions || []).map(d => typeof d === 'object' ? (d.decision || d.text || '') : String(d || '')).filter(Boolean), actions: (m.ai?.actionItems || []).map(a => a.task), openQuestions: m.ai?.openQuestions || []
+      }));
+      const prompt = `You are an AI meeting intelligence analyst. Use ONLY the supplied meeting data. Do not invent facts. Write one concise executive overview of 2-3 paragraphs explaining the strongest cross-meeting themes, important decisions/actions, and unresolved issues. If evidence is weak, say so. Data:\n${JSON.stringify(source)}`;
+      aiOverview = String(await callGemini(prompt, { json: false, purpose: 'cross-meeting-insights' })).replace(/^```[a-z]*\s*/i,'').replace(/\s*```$/,'').trim();
+    } catch (e) {
+      console.warn('[gemini] cross-meeting insights failed:', e.message);
+    }
   }
-  const topicList = Object.entries(topics).sort((a,b) => b[1]-a[1]).slice(0, 6);
+
   res.render('insights', {
-    user: req.user, settings, plan: ctx.plan, usage: ctx.usage,
+    user: req.user, settings, plan: ctx.plan, usage: ctx.usage, meetings,
     insights: {
-      meetings: meetings.length,
-      totalMin,
-      actionItems,
-      decisions: Math.round(actionItems * 0.6),
-      topics: topicList,
+      ...current,
+      previous,
+      range, days,
+      topicMax: maxTopicMeetings,
+      topicTrends: current.topics.slice(0, 6).map(t => ({ ...t, change: pct(t.meetings, (previous.topics.find(x => x.name.toLowerCase() === t.name.toLowerCase()) || {}).meetings || 0) })),
+      comparison: { meetings: pct(current.meetings, previous.meetings), actionItems: pct(current.actionItems, previous.actionItems), decisions: pct(current.decisionCount, previous.decisionCount) },
+      aiOverview,
       isPaid: ctx.usage.isPaid
     },
     error: null, success: null
   });
 });
 
+app.post('/api/insights/ask', requireAuth, async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) return res.status(401).json({ ok: false, error: 'Authentication required' });
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ ok: false, error: 'Question is required' });
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.usage.isPaid) return res.status(403).json({ ok: false, error: 'AI Insights is a Pro feature.' });
+    const meetings = await Meeting.find({ userId: req.user.id }).sort({ startedAt: -1 }).limit(50).lean();
+    if (!meetings.length) return res.json({ ok: true, answer: 'You do not have enough meeting data yet. Capture a few meetings and ask again.' });
+    const source = meetings.map(m => ({ id: m.externalId, title: m.title, date: m.startedAt, platform: m.platform, participants: (m.participants || []).map(p => p.name).filter(Boolean), summary: m.ai?.summary || '', detailedSummary: m.ai?.detailedSummary || '', topics: m.ai?.topics || [], decisions: (m.ai?.decisionDetails || m.ai?.decisions || []).map(d => typeof d === 'object' ? (d.decision || d.text || '') : String(d || '')).filter(Boolean), actions: (m.ai?.actionItems || []).map(a => ({ task: a.task, owner: a.owner, deadline: a.deadline, completed: a.completed })), openQuestions: m.ai?.openQuestions || [], followUps: m.ai?.followUps || [] }));
+    const prompt = `Answer the user's question using ONLY these meeting records. Do not invent facts or names. Mention supporting meeting titles/dates when useful. If the records do not contain the answer, say that clearly. User question: ${question}\n\nMEETING RECORDS:\n${JSON.stringify(source)}`;
+    const answer = String(await callGemini(prompt, { json: false, purpose: 'cross-meeting-ask-ai' })).replace(/^```[a-z]*\s*/i,'').replace(/\s*```$/,'').trim();
+    res.json({ ok: true, answer });
+  } catch (error) {
+    console.error('[api] insights ask failed:', error.message);
+    res.status(500).json({ ok: false, error: error.message || 'Unable to answer question' });
+  }
+});
+
 app.get('/app/usage', requireAuth, async (req, res) => {
-  const settings = await getSiteSettings().catch(() => null);
-  const ctx = await loadUserPlanContext(req.user);
-  const now = new Date();
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const daysLeft = Math.max(1, Math.ceil((end - now) / 86400000));
-  const [recentUsage, plans] = await Promise.all([
-    Meeting.find({ userId: req.user.id, createdAt: { $gte: monthStart } })
-      .sort({ createdAt: -1 }).limit(10)
-      .select('title startedAt createdAt duration ai.summary ai.actionItems')
-      .lean().catch(() => []),
-    Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => [])
-  ]);
-  const usageHistory = recentUsage.map((m) => ({
-    title: m.title || 'Untitled meeting',
-    date: m.startedAt || m.createdAt,
-    minutes: Math.round((m.duration || 0) / 60),
-    summary: Boolean(m.ai?.summary),
-    actionItems: Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0
-  }));
-  res.render('usage', {
-    user: req.user, settings, plan: ctx.plan, usage: ctx.usage, daysLeft,
-    usageHistory, plans, error: null, success: null
-  });
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const range = ['today', '7d', 'month', 'last-month'].includes(String(req.query.range || 'month')) ? String(req.query.range || 'month') : 'month';
+    let historyStart = monthStart;
+    let historyEnd = monthEnd;
+    if (range === 'today') {
+      historyStart = new Date(now); historyStart.setHours(0, 0, 0, 0);
+      historyEnd = new Date(historyStart); historyEnd.setDate(historyEnd.getDate() + 1);
+    } else if (range === '7d') {
+      historyStart = new Date(now); historyStart.setDate(historyStart.getDate() - 6); historyStart.setHours(0, 0, 0, 0);
+      historyEnd = new Date(now); historyEnd.setDate(historyEnd.getDate() + 1); historyEnd.setHours(0, 0, 0, 0);
+    } else if (range === 'last-month') {
+      historyStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      historyEnd = monthStart;
+    }
+    const [historyMeetings, plans, aiActivityMeetings] = await Promise.all([
+      Meeting.find({ userId: req.user.id, createdAt: { $gte: historyStart, $lt: historyEnd } })
+        .sort({ createdAt: -1 }).limit(50)
+        .select('externalId title platform startedAt createdAt duration ai.summary ai.actionItems ai.decisions')
+        .lean().catch(() => []),
+      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => []),
+      Meeting.find({ userId: req.user.id, createdAt: { $gte: monthStart, $lt: monthEnd } })
+        .select('ai.summary ai.actionItems ai.decisions')
+        .lean().catch(() => [])
+    ]);
+    const usageHistory = historyMeetings.map((m) => ({
+      id: m.externalId, title: m.title || 'Untitled meeting', platform: m.platform || 'Manual',
+      date: m.startedAt || m.createdAt, minutes: Math.max(0, Math.round((m.duration || 0) / 60)),
+      summary: Boolean(m.ai?.summary), actionItems: Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0
+    }));
+    const aiSummaryCount = aiActivityMeetings.filter((m) => Boolean(m.ai?.summary)).length;
+    const actionItemsTotal = aiActivityMeetings.reduce((sum, m) => sum + (Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0), 0);
+    const decisionsTotal = aiActivityMeetings.reduce((sum, m) => sum + (Array.isArray(m.ai?.decisions) ? m.ai.decisions.length : 0), 0);
+    const aiActivity = { meetingsAnalyzed: aiSummaryCount, summaries: aiSummaryCount, actionItems: actionItemsTotal, decisions: decisionsTotal };
+    const periodEnd = monthEnd;
+    const daysLeft = Math.max(1, Math.ceil((periodEnd - now) / 86400000));
+    const periodLabel = range === 'today' ? 'Today' : range === '7d' ? 'Last 7 days' : range === 'last-month' ? 'Last month' : 'This month';
+    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug) || pl.slug === ctx.plan?.slug);
+    res.render('usage', {
+      user: req.user, settings, plan: ctx.plan, usage: ctx.usage, daysLeft, monthStart, monthEnd,
+      usageHistory, plans: comparisonPlans, aiActivity, range, periodLabel, error: null, success: null
+    });
+  } catch (error) {
+    console.error('[usage] render failed:', error.message);
+    res.status(500).render('usage', { user: req.user, settings: null, plan: null, usage: {}, daysLeft: 1, monthStart: new Date(), monthEnd: new Date(), usageHistory: [], plans: [], aiActivity: {}, range: 'month', periodLabel: 'This month', error: error.message, success: null });
+  }
 });
 
 
@@ -2201,23 +2386,104 @@ app.post('/admin/settings', requireAdmin, async (req, res) => {
 
 
 app.get('/account', requireAuth, async (req, res) => {
-  const success = req.query.welcome ? 'Account ready. Copy your API key into the Chrome extension.' : null;
+  const success = req.query.welcome ? 'Account ready. Your extension key is protected and masked by default.' : null;
   const settings = await getSiteSettings().catch(() => null);
   const ctx = await loadUserPlanContext(req.user);
-  res.render('account', { user: req.user, error: null, success, settings, plan: ctx.plan, usage: ctx.usage });
+  const freshUser = await User.findById(req.user.id).lean().catch(() => null);
+  res.render('account', {
+    user: freshUser ? publicUser(freshUser) : req.user,
+    accountUser: freshUser || req.user,
+    error: null, success, settings, plan: ctx.plan, usage: ctx.usage
+  });
+});
+
+async function renderAccount(res, userId, { error = null, success = null } = {}, status = 200) {
+  const raw = await User.findById(userId).lean().catch(() => null);
+  const user = raw ? publicUser(raw) : null;
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(user || { id: userId, planSlug: 'free' }).catch(() => ({ plan: null, usage: {} }));
+  return res.status(status).render('account', { user, accountUser: raw || user, error, success, settings, plan: ctx.plan, usage: ctx.usage });
+}
+
+app.post('/account/profile', requireAuth, async (req, res) => {
+  try {
+    await updateAccountSettings(req.user.id, { displayName: req.body.displayName, username: req.body.username, email: req.body.email });
+    return renderAccount(res, req.user.id, { success: 'Profile updated.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+app.post('/account/preferences', requireAuth, async (req, res) => {
+  try {
+    const b = req.body;
+    const bool = (name) => b[name] === 'on' || b[name] === 'true';
+    const section = String(b.section || 'preferences');
+    const current = (await User.findById(req.user.id).lean())?.preferences || {};
+    const prefs = { ...current };
+    const set = (key, value) => { prefs[key] = value; };
+    if (section === 'preferences') {
+      set('appearance', b.appearance || current.appearance || 'system'); set('language', b.language || current.language || 'English'); set('dateFormat', b.dateFormat || current.dateFormat || 'DD MMM YYYY'); set('timezone', b.timezone || current.timezone || 'Asia/Karachi'); set('defaultMeetingView', b.defaultMeetingView || current.defaultMeetingView || 'timeline');
+    } else if (section === 'meetings') {
+      set('defaultTitleMode', b.defaultTitleMode || 'platform'); ['autoSummary','autoActionItems','autoDecisions','saveTranscript'].forEach(k => set(k, bool(k))); set('visibility', b.visibility || 'private');
+    } else if (section === 'ai') {
+      ['summaryStyle','aiLanguage','transcriptOutput','defaultExportFormat','filenameFormat'].forEach(k => { if (b[k] !== undefined) set(k, b[k]); });
+      ['detectResponsible','detectDueDates','detectPriority','includeTimestamps','identifySpeakers','showSpeakerLabels','autoScrollTranscript','saveRawTranscript','exportSummary','exportTranscript','exportActionItems','exportDecisions'].forEach(k => set(k, bool(k)));
+    } else if (section === 'notifications') {
+      ['notifySummaryReady','notifyProcessingFailure','notifyActionItems','notifyWeeklyInsights','notifyProductUpdates','notifyInApp','notifyEmail'].forEach(k => set(k, bool(k)));
+    } else if (section === 'privacy') {
+      ['storeRecordings','storeTranscripts'].forEach(k => set(k, bool(k)));
+    }
+    await updateAccountSettings(req.user.id, { preferences: prefs });
+    return renderAccount(res, req.user.id, { success: 'Settings saved.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+
+app.post('/account/change-passkey', requireAuth, async (req, res) => {
+  try { await changePasskey(req.user.id, req.body.currentPasskey, req.body.newPasskey); return renderAccount(res, req.user.id, { success: 'Passkey changed successfully.' }); }
+  catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+app.get('/account/export-data', requireAuth, async (req, res) => {
+  try {
+    const rawUser = await User.findById(req.user.id).lean();
+    const meetings = await Meeting.find({ userId: req.user.id }).lean();
+    const safeUser = rawUser ? { id: rawUser._id.toString(), username: rawUser.username, displayName: rawUser.displayName, email: rawUser.email, planSlug: rawUser.planSlug, preferences: rawUser.preferences || {}, createdAt: rawUser.createdAt } : null;
+    const payload = { exportedAt: new Date().toISOString(), user: safeUser, meetings };
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ai-note-taker-data.json"');
+    res.send(JSON.stringify(payload, null, 2));
+  } catch (error) { res.status(500).send(error.message); }
+});
+
+app.post('/account/delete-meeting-data', requireAuth, async (req, res) => {
+  try { await deleteAllMeetings(req.user.id, Meeting); return res.redirect('/account?success=' + encodeURIComponent('All meeting data was deleted.')); }
+  catch (error) { return renderAccount(res, req.user.id, { error: error.message }, 400); }
+});
+
+app.post('/account/delete', requireAuth, async (req, res) => {
+  try {
+    await verifyPasskey(req.user.id, req.body.confirmPasskey);
+    await deleteAccount(req.user.id, Meeting);
+    clearSessionCookie(res);
+    return res.redirect('/');
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, 400); }
+});
+
+app.get('/api/account/api-key', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || !user.apiKey) return res.status(404).json({ ok: false, error: 'No API key configured.' });
+    user.apiKeyLastUsedAt = new Date();
+    await user.save();
+    res.json({ ok: true, apiKey: user.apiKey });
+  } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
 });
 
 app.post('/account/rotate-key', requireAuth, async (req, res) => {
   try {
     const user = await rotateApiKey(req.user.id);
-    const settings = await getSiteSettings().catch(() => null);
-    const ctx = await loadUserPlanContext(user);
-    res.render('account', { user, error: null, success: 'API key rotated. Update the extension.', settings, plan: ctx.plan, usage: ctx.usage });
-  } catch (error) {
-    const settings = await getSiteSettings().catch(() => null);
-    const ctx = await loadUserPlanContext(req.user).catch(() => ({ plan: null, usage: null }));
-    res.status(500).render('account', { user: req.user, error: error.message, success: null, settings, plan: ctx.plan, usage: ctx.usage });
-  }
+    return renderAccount(res, req.user.id, { success: 'API key rotated. Configure the extension with the new key.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 500); }
 });
 
 
@@ -2474,21 +2740,37 @@ app.get('/api/meetings', requireAuth, async (req, res) => {
     const userId = req.user.id;
     const q = String(req.query.q || '').trim();
     const view = String(req.query.view || 'all').toLowerCase();
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 100)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
     const filter = { userId };
     if (view === 'favorites') {
       filter.isFavorite = true;
       filter.isArchived = { $ne: true };
     } else if (view === 'archived') {
       filter.isArchived = true;
-    } else if (view !== 'all') {
-      filter.isArchived = { $ne: true };
     } else {
-      // default list hides archived unless explicitly requested
       filter.isArchived = { $ne: true };
     }
-    if (q) filter.$text = { $search: q };
-    const meetings = await Meeting.find(filter).sort({ startedAt: -1 }).limit(100).lean();
-    res.json({ ok: true, meetings, user: req.user });
+
+    // Search across the actual meeting workspace, not just title text.
+    // This supports titles, participants, transcript, AI summary, topics,
+    // decisions, action items and follow-ups from the My Meetings search box.
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp(safe, 'i');
+      filter.$or = [
+        { title: rx }, { platform: rx }, { meetingUrl: rx }, { fullTranscript: rx },
+        { 'participants.name': rx }, { 'participants.email': rx },
+        { 'ai.summary': rx }, { 'ai.detailedSummary': rx }, { 'ai.keyPoints': rx },
+        { 'ai.decisions': rx }, { 'ai.topics': rx }, { 'ai.followUps': rx },
+        { 'ai.actionItems.task': rx }, { 'ai.actionItems.owner': rx }
+      ];
+    }
+    const [meetings, total] = await Promise.all([
+      Meeting.find(filter).sort({ startedAt: -1 }).skip(offset).limit(limit).lean(),
+      Meeting.countDocuments(filter)
+    ]);
+    res.json({ ok: true, meetings, total, offset, limit, hasMore: offset + meetings.length < total, user: req.user });
   } catch (error) {
     console.error('[api] list meetings:', error.message);
     res.status(500).json({ ok: false, error: error.message });
@@ -2519,10 +2801,11 @@ app.get('/api/meetings/:id/status', requireAuth, async (req, res) => {
 
 app.get('/api/meetings/:id', requireAuth, async (req, res) => {
   try {
-    const meeting = await Meeting.findOne({
-      externalId: req.params.id,
-      userId: req.user.id
-    }).lean();
+    const meeting = await Meeting.findOneAndUpdate(
+      { externalId: req.params.id, userId: req.user.id },
+      { $inc: { viewCount: 1 } },
+      { returnDocument: 'after' }
+    ).lean();
     if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
     res.json({ ok: true, meeting });
   } catch (error) {
@@ -2739,6 +3022,14 @@ app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Unknown prompt template.' });
     }
     const answer = await answerMeetingQuestion(meeting, question || MEETING_PROMPT_TEMPLATES[promptId]?.label, promptId);
+    const chatNow = new Date();
+    const monthKey = `${chatNow.getFullYear()}-${String(chatNow.getMonth() + 1).padStart(2, '0')}`;
+    const chatUser = await User.findById(req.user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null);
+    if (chatUser?.askAiUsageMonth === monthKey) {
+      await User.updateOne({ _id: req.user.id }, { $inc: { askAiUsageCount: 1 } }).catch(() => {});
+    } else {
+      await User.updateOne({ _id: req.user.id }, { $set: { askAiUsageMonth: monthKey, askAiUsageCount: 1 } }).catch(() => {});
+    }
     console.log(`[api] chat OK meeting=${req.params.id} prompt=${promptId || 'free'}`);
     res.json({
       ok: true,
@@ -2790,6 +3081,10 @@ app.delete('/api/meetings/:id', requireAuth, async (req, res) => {
 mongoose.connect(mongoUri)
   .then(async () => {
     await seedDefaults();
+    await Plan.updateOne(
+      { slug: 'pro' },
+      { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
+    ).catch(() => {});
     app.listen(port, () => {
       console.log(`AI Note Taker API listening on http://localhost:${port}`);
       console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);

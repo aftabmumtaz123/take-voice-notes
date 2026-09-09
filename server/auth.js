@@ -142,6 +142,8 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ["user", "admin"], default: "user", index: true },
   planId: { type: mongoose.Schema.Types.ObjectId, ref: "Plan", default: null },
   planSlug: { type: String, default: "free" },
+  askAiUsageMonth: { type: String, default: "" },
+  askAiUsageCount: { type: Number, default: 0 },
   apiKey: { type: String, unique: true, sparse: true, index: true },
   isActive: { type: Boolean, default: true },
   onboardingCompleted: { type: Boolean, default: false },
@@ -150,6 +152,47 @@ const userSchema = new mongoose.Schema({
     heardFrom: { type: String, default: "" },
     completedAt: Date
   },
+  preferences: {
+    appearance: { type: String, enum: ["system", "light", "dark"], default: "light" },
+    language: { type: String, default: "English" },
+    dateFormat: { type: String, default: "DD MMM YYYY" },
+    timezone: { type: String, default: "Asia/Karachi" },
+    defaultMeetingView: { type: String, default: "timeline" },
+    defaultTitleMode: { type: String, default: "platform" },
+    autoSummary: { type: Boolean, default: true },
+    autoActionItems: { type: Boolean, default: true },
+    autoDecisions: { type: Boolean, default: true },
+    saveTranscript: { type: Boolean, default: true },
+    visibility: { type: String, default: "private" },
+    summaryStyle: { type: String, default: "detailed" },
+    detectResponsible: { type: Boolean, default: true },
+    detectDueDates: { type: Boolean, default: true },
+    detectPriority: { type: Boolean, default: true },
+    aiLanguage: { type: String, default: "English" },
+    transcriptOutput: { type: String, default: "Roman / Latin" },
+    includeTimestamps: { type: Boolean, default: true },
+    identifySpeakers: { type: Boolean, default: true },
+    showSpeakerLabels: { type: Boolean, default: true },
+    autoScrollTranscript: { type: Boolean, default: true },
+    saveRawTranscript: { type: Boolean, default: true },
+    notifySummaryReady: { type: Boolean, default: true },
+    notifyProcessingFailure: { type: Boolean, default: true },
+    notifyActionItems: { type: Boolean, default: true },
+    notifyWeeklyInsights: { type: Boolean, default: true },
+    notifyProductUpdates: { type: Boolean, default: false },
+    notifyInApp: { type: Boolean, default: true },
+    notifyEmail: { type: Boolean, default: true },
+    storeRecordings: { type: Boolean, default: true },
+    storeTranscripts: { type: Boolean, default: true },
+    defaultExportFormat: { type: String, default: "PDF" },
+    exportSummary: { type: Boolean, default: true },
+    exportTranscript: { type: Boolean, default: true },
+    exportActionItems: { type: Boolean, default: true },
+    exportDecisions: { type: Boolean, default: true },
+    filenameFormat: { type: String, default: "Meeting Title - Date" }
+  },
+  apiKeyCreatedAt: { type: Date, default: Date.now },
+  apiKeyLastUsedAt: { type: Date, default: null },
   sessions: [{
     tokenHash: String,
     createdAt: { type: Date, default: Date.now },
@@ -188,6 +231,8 @@ export function validateCredentials(username, passkey) {
 function ensureApiKey(user) {
   if (user.apiKey) return user.apiKey;
   user.apiKey = `ntk_${crypto.randomBytes(24).toString("base64url")}`;
+  user.apiKeyCreatedAt = new Date();
+  user.apiKeyLastUsedAt = null;
   return user.apiKey;
 }
 
@@ -202,7 +247,8 @@ export function publicUser(user) {
     role: user.role || "user",
     planSlug: user.planSlug || "free",
     planId: user.planId ? user.planId.toString() : null,
-    apiKey: user.apiKey || null,
+    apiKeyConfigured: Boolean(user.apiKey),
+    apiKeyLastUsedAt: user.apiKeyLastUsedAt || null,
     isActive: user.isActive !== false,
     onboardingCompleted: Boolean(user.onboardingCompleted),
     onboarding: user.onboarding || null,
@@ -389,10 +435,67 @@ export async function logoutUser(token) {
   await User.updateOne({ "sessions.tokenHash": th }, { $pull: { sessions: { tokenHash: th } } });
 }
 
+export async function updateAccountSettings(userId, updates = {}) {
+  const user = await User.findById(userId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  const allowedProfile = ["displayName", "username", "email"];
+  for (const key of allowedProfile) {
+    if (updates[key] !== undefined) user[key] = String(updates[key] || "").trim().slice(0, key === "email" ? 200 : 80);
+  }
+  if (updates.username !== undefined) {
+    const username = normalizeUsername(updates.username);
+    if (!/^[a-z0-9_]{3,32}$/.test(username)) throw Object.assign(new Error("Username may only use 3–32 letters, numbers, and underscore."), { status: 400 });
+    user.username = username;
+  }
+  const prefs = updates.preferences || {};
+  for (const [key, value] of Object.entries(prefs)) {
+    if (Object.prototype.hasOwnProperty.call(user.preferences || {}, key)) user.preferences[key] = value;
+  }
+  await user.save();
+  return publicUser(user);
+}
+
+export async function verifyPasskey(userId, passkey) {
+  const user = await User.findById(userId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  if (!user.passkeyHash || !user.passkeySalt) throw Object.assign(new Error("This account does not use a passkey."), { status: 400 });
+  const current = hashPasskey(String(passkey || ""), Buffer.from(user.passkeySalt, "hex"));
+  if (!crypto.timingSafeEqual(Buffer.from(current, "hex"), Buffer.from(user.passkeyHash, "hex"))) throw Object.assign(new Error("Passkey is incorrect."), { status: 400 });
+  return true;
+}
+
+export async function changePasskey(userId, currentPasskey, newPasskey) {
+  const user = await User.findById(userId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  if (!user.passkeyHash || !user.passkeySalt) throw Object.assign(new Error("This account does not use a passkey."), { status: 400 });
+  const current = hashPasskey(String(currentPasskey || ""), Buffer.from(user.passkeySalt, "hex"));
+  if (!crypto.timingSafeEqual(Buffer.from(current, "hex"), Buffer.from(user.passkeyHash, "hex"))) {
+    throw Object.assign(new Error("Current passkey is incorrect."), { status: 400 });
+  }
+  const err = validateCredentials(user.username, newPasskey);
+  if (err) throw Object.assign(new Error(err), { status: 400 });
+  const salt = crypto.randomBytes(16);
+  user.passkeySalt = salt.toString("hex");
+  user.passkeyHash = hashPasskey(String(newPasskey), salt);
+  await user.save();
+  return publicUser(user);
+}
+
+export async function deleteAllMeetings(userId, MeetingModel) {
+  return MeetingModel.deleteMany({ userId });
+}
+
+export async function deleteAccount(userId, MeetingModel) {
+  if (MeetingModel) await MeetingModel.deleteMany({ userId });
+  await User.deleteOne({ _id: userId });
+}
+
 export async function rotateApiKey(userId) {
   const user = await User.findById(userId);
   if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
   user.apiKey = `ntk_${crypto.randomBytes(24).toString("base64url")}`;
+  user.apiKeyCreatedAt = new Date();
+  user.apiKeyLastUsedAt = null;
   await user.save();
   return publicUser(user);
 }
@@ -418,6 +521,7 @@ export async function resolveUser(req) {
     const key = apiKeyHeader || token;
     const user = await User.findOne({ apiKey: key });
     if (!user || user.isActive === false) return null;
+    User.updateOne({ _id: user._id }, { $set: { apiKeyLastUsedAt: new Date() } }).catch(() => {});
     return publicUser(user);
   }
 

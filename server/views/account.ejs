@@ -1,74 +1,201 @@
 <%- include("partials/header", { title: "Account & Settings", bodyClass: "app-shell" }) %>
 <% const u = typeof usage !== 'undefined' && usage ? usage : {}; %>
+<% const au = typeof accountUser !== 'undefined' && accountUser ? accountUser : user; %>
+<% const p = (au && au.preferences) || {}; %>
+<% const isPaid = Boolean(u.isPaid || (au && au.planSlug && au.planSlug !== 'free')); %>
+<% const planName = (plan && plan.name) || (au && au.planSlug ? String(au.planSlug).toUpperCase() : 'FREE'); %>
+<% const extensionConnected = Boolean(au.apiKeyLastUsedAt && (Date.now() - new Date(au.apiKeyLastUsedAt).getTime()) < 10 * 60 * 1000); %>
 <div class="shell">
   <%- include("partials/sidebar", { user, activeNav: "account", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
-  <div class="main">
-    <header class="main-top">
-      <h1>Account &amp; Settings</h1>
+  <div class="main settings-main">
+    <header class="main-top settings-header">
+      <div>
+        <div class="kicker">ACCOUNT</div>
+        <h1>Account &amp; Settings</h1>
+        <p class="meta">Manage your account, meetings, AI preferences and integrations.</p>
+      </div>
+      <a class="btn-ghost" href="/app/usage">View Usage &amp; Plan</a>
     </header>
-    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
-    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><span class="material-symbols-outlined">error</span><%= error %></div><% } %>
+    <% if (success) { %><div class="flash ok"><span class="material-symbols-outlined">check_circle</span><%= success %></div><% } %>
 
-    <section class="card section-card">
-      <h2>Profile</h2>
-      <div class="profile-grid">
-        <div class="avatar lg"><%= (user.displayName || user.username || '?').charAt(0).toUpperCase() %></div>
-        <div>
-          <p><strong><%= user.displayName || user.username %></strong>
-            <span class="user-plan-badge <%= u.isPaid ? 'paid' : 'free' %>"><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></span>
-          </p>
-          <p class="muted">@<%= user.username %></p>
-        </div>
+    <div class="settings-layout">
+      <aside class="settings-nav card">
+        <a href="#profile" class="active"><span class="material-symbols-outlined">person</span> Profile</a>
+        <a href="#preferences"><span class="material-symbols-outlined">tune</span> Preferences</a>
+        <a href="#meetings"><span class="material-symbols-outlined">video_camera_front</span> Meetings</a>
+        <a href="#ai"><span class="material-symbols-outlined">auto_awesome</span> AI &amp; Transcription</a>
+        <a href="#integrations"><span class="material-symbols-outlined">extension</span> Integrations</a>
+        <a href="#developer"><span class="material-symbols-outlined">key</span> Developer</a>
+        <a href="#notifications"><span class="material-symbols-outlined">notifications</span> Notifications</a>
+        <a href="#security"><span class="material-symbols-outlined">shield</span> Security</a>
+        <a href="#privacy"><span class="material-symbols-outlined">privacy_tip</span> Data &amp; Privacy</a>
+        <a href="#billing"><span class="material-symbols-outlined">credit_card</span> Subscription</a>
+      </aside>
+
+      <div class="settings-content">
+        <section class="card settings-card" id="profile">
+          <div class="settings-title"><div><h2>Profile</h2><p>Personal information used for your account and meeting workspace.</p></div></div>
+          <form method="POST" action="/account/profile">
+            <div class="profile-head">
+              <% if (au.avatarUrl) { %><img class="profile-photo" src="<%= au.avatarUrl %>" alt="Profile photo" /><% } else { %><div class="profile-photo avatar-fallback"><%= (au.displayName || au.username || '?').charAt(0).toUpperCase() %></div><% } %>
+              <div><strong><%= au.displayName || au.username %></strong><div class="muted">@<%= au.username %></div><span class="user-plan-badge <%= isPaid ? 'paid' : 'free' %>"><%= planName %></span></div>
+            </div>
+            <div class="form-grid-2">
+              <label>Full name<input name="displayName" value="<%= au.displayName || '' %>" maxlength="80" required /></label>
+              <label>Username<input name="username" value="<%= au.username || '' %>" maxlength="32" pattern="[a-z0-9_]{3,32}" required /></label>
+              <label>Email address<input name="email" type="email" value="<%= au.email || '' %>" maxlength="200" /><small class="field-help"><% if (au.googleId) { %>Verified <span class="material-symbols-outlined">verified</span><% } else { %>Add or verify this email through your account provider.<% } %></small></label>
+              <div class="field-readonly"><span>Plan</span><strong><%= planName %></strong><small><%= isPaid ? 'Active subscription' : 'Free plan' %></small></div>
+            </div>
+            <button class="btn-primary" type="submit">Save profile</button>
+          </form>
+        </section>
+
+        <section class="card settings-card" id="preferences">
+          <div class="settings-title"><div><h2>Preferences</h2><p>Set the defaults used throughout the application.</p></div></div>
+          <form method="POST" action="/account/preferences">
+            <input type="hidden" name="section" value="preferences" />
+            <div class="form-grid-2">
+              <label>Appearance<select name="appearance"><option value="system" <%= p.appearance === 'system' ? '' : '' %>>System</option><option value="light" <%= (!p.appearance || p.appearance === 'light' || p.appearance === 'system') ? 'selected' : '' %>>Light</option><option value="dark" <%= p.appearance === 'dark' ? 'selected' : '' %>>Dark</option></select></label>
+              <label>Language<select name="language"><option>English</option></select></label>
+              <label>Date format<select name="dateFormat"><option value="DD MMM YYYY" <%= p.dateFormat === 'DD MMM YYYY' ? 'selected' : '' %>>09 Sep 2026</option><option value="MM/DD/YYYY" <%= p.dateFormat === 'MM/DD/YYYY' ? 'selected' : '' %>>09/09/2026</option><option value="YYYY-MM-DD" <%= p.dateFormat === 'YYYY-MM-DD' ? 'selected' : '' %>>2026-09-09</option></select></label>
+              <label>Time zone<select name="timezone"><option value="Asia/Karachi" <%= p.timezone === 'Asia/Karachi' ? 'selected' : '' %>>Pakistan Standard Time</option><option value="UTC" <%= p.timezone === 'UTC' ? 'selected' : '' %>>UTC</option><option value="America/New_York" <%= p.timezone === 'America/New_York' ? 'selected' : '' %>>Eastern Time</option><option value="Europe/London" <%= p.timezone === 'Europe/London' ? 'selected' : '' %>>London</option></select></label>
+              <label>Default meeting view<select name="defaultMeetingView"><option value="timeline" <%= p.defaultMeetingView === 'timeline' ? 'selected' : '' %>>Timeline</option><option value="summary" <%= p.defaultMeetingView === 'summary' ? 'selected' : '' %>>Summary</option></select></label>
+            </div>
+            <button class="btn-primary" type="submit">Save preferences</button>
+          </form>
+        </section>
+
+        <section class="card settings-card" id="meetings">
+          <div class="settings-title"><div><h2>Meeting settings</h2><p>Control what happens automatically when a meeting ends.</p></div></div>
+          <form method="POST" action="/account/preferences">
+            <input type="hidden" name="section" value="meetings" />
+            <div class="settings-options">
+              <label class="radio-line"><input type="radio" name="defaultTitleMode" value="platform" <%= p.defaultTitleMode !== 'ai' ? 'checked' : '' %> /> <span><strong>Use meeting title from platform</strong><small>Keep the title from Google Meet, Zoom or Teams.</small></span></label>
+              <label class="radio-line"><input type="radio" name="defaultTitleMode" value="ai" <%= p.defaultTitleMode === 'ai' ? 'checked' : '' %> /> <span><strong>Generate title with AI</strong><small>Let AI create a concise title from the transcript.</small></span></label>
+            </div>
+            <div class="toggle-grid">
+              <% [['autoSummary','Auto-generate AI summary','After every meeting'],['autoActionItems','Extract action items','Automatically'],['autoDecisions','Detect decisions','Automatically'],['saveTranscript','Save transcript','Save automatically']].forEach(function(x){ %>
+                <label class="toggle-card"><span><strong><%= x[1] %></strong><small><%= x[2] %></small></span><input type="checkbox" name="<%= x[0] %>" <%= p[x[0]] !== false ? 'checked' : '' %> /><i></i></label>
+              <% }) %>
+            </div>
+            <div class="form-grid-2"><label>Default meeting visibility<select name="visibility"><option value="private" <%= p.visibility !== 'shared' ? 'selected' : '' %>>Private</option><option value="shared" <%= p.visibility === 'shared' ? 'selected' : '' %>>Shared</option></select></label></div>
+            <button class="btn-primary" type="submit">Save meeting settings</button>
+          </form>
+        </section>
+
+        <section class="card settings-card" id="ai">
+          <div class="settings-title"><div><h2>AI &amp; Transcription</h2><p>Set persistent AI and transcript defaults. The recording popup can inherit these preferences.</p></div></div>
+          <form method="POST" action="/account/preferences">
+            <input type="hidden" name="section" value="ai" />
+            <div class="form-grid-2">
+              <label>Summary style<select name="summaryStyle"><option value="concise" <%= p.summaryStyle === 'concise' ? 'selected' : '' %>>Concise</option><option value="detailed" <%= p.summaryStyle === 'detailed' || !p.summaryStyle ? 'selected' : '' %>>Detailed</option><option value="executive" <%= p.summaryStyle === 'executive' ? 'selected' : '' %>>Executive</option></select></label>
+              <label>AI language<select name="aiLanguage"><option>English</option></select></label>
+              <label>Transcript output<select name="transcriptOutput"><option value="Roman / Latin" <%= p.transcriptOutput !== 'Native script' ? 'selected' : '' %>>Roman / Latin</option><option value="Native script" <%= p.transcriptOutput === 'Native script' ? 'selected' : '' %>>Native script</option></select></label>
+              <label>Default export format<select name="defaultExportFormat"><option>PDF</option><option <%= p.defaultExportFormat === 'Markdown' ? 'selected' : '' %>>Markdown</option><option <%= p.defaultExportFormat === 'TXT' ? 'selected' : '' %>>TXT</option></select></label>
+            </div>
+            <div class="toggle-grid">
+              <% [['detectResponsible','Detect responsible person','Action items'],['detectDueDates','Detect due dates','Action items'],['detectPriority','Detect priority','Action items'],['includeTimestamps','Include timestamps','Transcript'],['identifySpeakers','Identify speakers','Transcript'],['showSpeakerLabels','Show speaker labels','Transcript'],['autoScrollTranscript','Auto-scroll live transcript','Transcript'],['saveRawTranscript','Save raw transcript','Transcript']].forEach(function(x){ %>
+                <label class="toggle-card"><span><strong><%= x[1] %></strong><small><%= x[2] %></small></span><input type="checkbox" name="<%= x[0] %>" <%= p[x[0]] !== false ? 'checked' : '' %> /><i></i></label>
+              <% }) %>
+            </div>
+            <div class="toggle-grid export-grid">
+              <% [['exportSummary','Summary'],['exportTranscript','Transcript'],['exportActionItems','Action items'],['exportDecisions','Decisions']].forEach(function(x){ %><label class="toggle-card"><span><strong>Include <%= x[1] %></strong></span><input type="checkbox" name="<%= x[0] %>" <%= p[x[0]] !== false ? 'checked' : '' %> /><i></i></label><% }) %>
+            </div>
+            <button class="btn-primary" type="submit">Save AI &amp; transcription settings</button>
+          </form>
+        </section>
+
+        <section class="card settings-card" id="integrations">
+          <div class="settings-title"><div><h2>Integrations</h2><p>One browser extension powers meeting capture across supported platforms.</p></div><span class="status-pill <%= extensionConnected ? 'success' : 'offline' %>"><span></span> <%= extensionConnected ? 'Connected' : 'Disconnected' %></span></div>
+          <div class="integration-main"><div class="integration-icon material-symbols-outlined">extension</div><div><strong>Chrome extension</strong><p>Installed/connected status is based on recent authenticated extension activity. Last sync: <strong><%= au.apiKeyLastUsedAt ? new Date(au.apiKeyLastUsedAt).toLocaleString() : 'Not yet connected' %></strong>.</p><div class="support-chips"><span>✓ Google Meet</span><span>✓ Zoom</span><span>✓ Microsoft Teams</span></div></div></div>
+          <div class="integration-actions"><a class="btn-primary" href="/install">Installation guide</a><a class="btn-ghost" href="/install">Open extension setup</a></div>
+        </section>
+
+        <section class="card settings-card" id="developer">
+          <div class="settings-title"><div><h2>Developer</h2><p>Connect the Chrome extension without exposing your credential in the page by default.</p></div></div>
+          <div class="secure-key-box">
+            <div><span class="label">Extension API key</span><code id="maskedKey"><%= au.apiKey ? 'ntk_••••••••••••••••••••••••' : 'No key configured' %></code></div>
+            <div class="key-actions"><button type="button" class="btn-ghost" id="showKey"><span class="material-symbols-outlined">visibility</span> Show</button><button type="button" class="btn-ghost" id="copyKey"><span class="material-symbols-outlined">content_copy</span> Copy</button></div>
+          </div>
+          <div class="security-meta"><span>Created: <strong><%= au.apiKeyCreatedAt ? new Date(au.apiKeyCreatedAt).toLocaleDateString() : 'Unknown' %></strong></span><span>Last used: <strong id="keyLastUsed"><%= au.apiKeyLastUsedAt ? new Date(au.apiKeyLastUsedAt).toLocaleString() : 'Not yet used' %></strong></span><span>Status: <strong class="status-text">● Active</strong></span></div>
+          <form method="POST" action="/account/rotate-key" class="rotate-form" onsubmit="return confirm('Rotate API key? Any extension using the old key will stop working until the new key is configured. Continue?');"><button type="submit" class="btn-danger"><span class="material-symbols-outlined">key</span> Rotate key</button></form>
+          <div class="advanced-setup"><details><summary>Advanced setup</summary><ol><li>Server URL: <code><%= process.env.PUBLIC_APP_URL || 'http://localhost:4000' %></code></li><li>Use <strong>Show</strong> or <strong>Copy</strong> above only when connecting the extension.</li><li>Open the extension popup and choose <strong>Connect account</strong>.</li></ol></details></div>
+        </section>
+
+        <section class="card settings-card" id="notifications">
+          <div class="settings-title"><div><h2>Notifications</h2><p>Choose which meeting and product events should reach you.</p></div></div>
+          <form method="POST" action="/account/preferences">
+            <input type="hidden" name="section" value="notifications" />
+            <div class="toggle-grid">
+              <% [['notifySummaryReady','AI summary is ready','Meeting processing'],['notifyProcessingFailure','Processing fails','Meeting processing'],['notifyActionItems','Upcoming action items','Action items'],['notifyWeeklyInsights','Weekly AI insights','Insights'],['notifyProductUpdates','New features and updates','Product'],['notifyInApp','In-app notifications','Delivery'],['notifyEmail','Email notifications','Delivery']].forEach(function(x){ %><label class="toggle-card"><span><strong><%= x[1] %></strong><small><%= x[2] %></small></span><input type="checkbox" name="<%= x[0] %>" <%= p[x[0]] ? 'checked' : '' %> /><i></i></label><% }) %>
+            </div>
+            <button class="btn-primary" type="submit">Save notification settings</button>
+          </form>
+        </section>
+
+        <section class="card settings-card" id="security">
+          <div class="settings-title"><div><h2>Security</h2><p>Manage your passkey and active web sessions.</p></div></div>
+          <div class="security-summary"><div><strong>Password / passkey</strong><span>Use a new passkey to protect this account.</span></div><button type="button" class="btn-ghost" data-open-dialog="passwordDialog">Change passkey</button></div>
+          <div class="security-summary"><div><strong>Active sessions</strong><span><%= Array.isArray(au.sessions) ? au.sessions.length : 1 %> session(s) associated with your account.</span></div><span class="status-pill success"><span></span> Current session</span></div>
+          <div class="security-summary"><div><strong>Two-factor authentication</strong><span>Not enabled in this build.</span></div><button type="button" class="btn-ghost" disabled>Enable 2FA</button></div>
+        </section>
+
+        <section class="card settings-card" id="privacy">
+          <div class="settings-title"><div><h2>Data &amp; Privacy</h2><p>Control how meeting data is retained and export your account information.</p></div></div>
+          <form method="POST" action="/account/preferences">
+            <input type="hidden" name="section" value="privacy" />
+            <div class="toggle-grid">
+              <label class="toggle-card"><span><strong>Store meeting recordings</strong><small>Keep recordings after processing</small></span><input type="checkbox" name="storeRecordings" <%= p.storeRecordings !== false ? 'checked' : '' %> /><i></i></label>
+              <label class="toggle-card"><span><strong>Store transcripts</strong><small>Keep transcripts for later search and Ask AI</small></span><input type="checkbox" name="storeTranscripts" <%= p.storeTranscripts !== false ? 'checked' : '' %> /><i></i></label>
+            </div>
+            <div class="privacy-note"><span class="material-symbols-outlined">info</span><p><strong>AI training:</strong> This application does not use your saved meeting data for model training in this build.</p></div>
+            <button class="btn-primary" type="submit">Save privacy settings</button>
+          </form>
+          <div class="privacy-actions"><a class="btn-ghost" href="/account/export-data">Export my data</a><form method="POST" action="/account/delete-meeting-data" onsubmit="return confirm('Delete ALL saved meeting data? This cannot be undone.');"><button class="btn-danger" type="submit">Delete all meeting data</button></form></div>
+        </section>
+
+        <section class="card settings-card" id="billing">
+          <div class="settings-title"><div><h2>Subscription</h2><p>Billing and full plan management live in Usage &amp; Plan.</p></div></div>
+          <div class="subscription-box"><div><span class="label">Current plan</span><strong><%= planName %> · <%= plan && plan.priceMonthly ? '$' + plan.priceMonthly + '/month' : '$0/month' %></strong><span><%= isPaid ? 'Active subscription' : 'Free plan' %></span></div><div><strong><%= isPaid ? 'Unlimited meetings' : ((u.meetingsMax || 5) + ' meetings / month') %></strong><span><%= u.meetingsUsed || 0 %> meetings this month</span></div><a class="btn-primary" href="/app/usage">View Usage &amp; Plan</a></div>
+        </section>
+
+        <section class="card settings-card danger-zone" id="danger">
+          <div class="settings-title"><div><h2>Danger zone</h2><p>Permanently delete your account and associated meeting data.</p></div></div>
+          <form method="POST" action="/account/delete" onsubmit="return confirm('Delete your account and all associated meeting data permanently? This cannot be undone.');">
+            <label>Confirm your passkey<input name="confirmPasskey" type="password" required autocomplete="current-password" placeholder="Enter your current passkey" /></label>
+            <button class="btn-danger" type="submit"><span class="material-symbols-outlined">delete_forever</span> Delete account</button>
+          </form>
+        </section>
       </div>
-    </section>
-
-    <section class="card section-card">
-      <h2>Subscription</h2>
-      <p>Current plan: <strong><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></strong></p>
-      <p class="muted"><%= u.meetingsUsed || 0 %> / <%= (u.meetingsMax >= 9999) ? '∞' : (u.meetingsMax || 5) %> meetings this month</p>
-      <p style="margin-top:12px">
-        <a class="btn-primary" href="/app/usage">Usage &amp; plan details</a>
-        <a class="btn-ghost" href="/#pricing">View pricing</a>
-      </p>
-    </section>
-
-    <section class="card section-card">
-      <h2>Extension API key</h2>
-      <p class="muted">Paste this into the Chrome extension. The extension only needs this key and the server URL.</p>
-      <div class="key-row">
-        <code id="apiKey"><%= user.apiKey || "(none)" %></code>
-        <button type="button" id="copyKey" class="btn-ghost">Copy</button>
-      </div>
-      <form method="POST" action="/account/rotate-key" onsubmit="return confirm('Rotate API key? Update the extension afterward.');">
-        <button type="submit" class="btn-danger">Rotate key</button>
-      </form>
-    </section>
-
-    <section class="card section-card">
-      <h2>Integrations</h2>
-      <ul class="feature-check">
-        <li>✓ Google Meet — via Chrome extension</li>
-        <li>✓ Zoom — via Chrome extension</li>
-        <li>✓ Microsoft Teams — via Chrome extension</li>
-      </ul>
-      <p style="margin-top:12px"><a class="btn-ghost" href="/install">Install guide →</a></p>
-    </section>
-
-    <section class="card section-card">
-      <h2>Extension setup</h2>
-      <ol class="steps">
-        <li>Server URL: <code>http://localhost:4000</code></li>
-        <li>Copy the API key above</li>
-        <li>Open the extension popup → Connect → paste key</li>
-        <li>Meetings save under <strong>@<%= user.username %></strong></li>
-      </ol>
-    </section>
+    </div>
   </div>
 </div>
+
+<dialog id="passwordDialog" class="settings-dialog"><form method="POST" action="/account/change-passkey"><button type="button" class="dialog-close" data-close-dialog>×</button><h2>Change passkey</h2><p class="muted">Your new passkey must be at least 6 characters.</p><label>Current passkey<input type="password" name="currentPasskey" required autocomplete="current-password" /></label><label>New passkey<input type="password" name="newPasskey" required minlength="6" autocomplete="new-password" /></label><button class="btn-primary" type="submit">Change passkey</button></form></dialog>
+
 <script>
-  document.getElementById('copyKey')?.addEventListener('click', async () => {
-    const t = document.getElementById('apiKey')?.textContent || '';
-    try { await navigator.clipboard.writeText(t); } catch (_) {}
-  });
+(() => {
+  const api = async () => { const r = await fetch('/api/account/api-key', { headers: { Accept: 'application/json' } }); const d = await r.json(); if (!r.ok || !d.ok) throw new Error(d.error || 'Unable to retrieve API key.'); return d.apiKey; };
+  const show = document.getElementById('showKey'), copy = document.getElementById('copyKey'), masked = document.getElementById('maskedKey'); let cached = '';
+  show?.addEventListener('click', async () => { try { cached = cached || await api(); masked.textContent = cached; show.innerHTML = '<span class="material-symbols-outlined">visibility_off</span> Hide'; show.dataset.shown = '1'; } catch (e) { alert(e.message); } });
+  show?.addEventListener('dblclick', () => { if (show.dataset.shown === '1') { masked.textContent = 'ntk_••••••••••••••••••••••••'; show.innerHTML = '<span class="material-symbols-outlined">visibility</span> Show'; show.dataset.shown = '0'; } });
+  copy?.addEventListener('click', async () => { try { cached = cached || await api(); await navigator.clipboard.writeText(cached); copy.innerHTML = '<span class="material-symbols-outlined">check</span> Copied'; setTimeout(() => copy.innerHTML = '<span class="material-symbols-outlined">content_copy</span> Copy', 1400); } catch (e) { alert(e.message); } });
+  document.querySelectorAll('[data-open-dialog]').forEach(b => b.addEventListener('click', () => document.getElementById(b.dataset.openDialog)?.showModal()));
+  document.querySelectorAll('[data-close-dialog]').forEach(b => b.addEventListener('click', () => b.closest('dialog')?.close()));
+  document.querySelectorAll('.settings-nav a').forEach(a => a.addEventListener('click', () => document.querySelectorAll('.settings-nav a').forEach(x => x.classList.remove('active')) || a.classList.add('active')));
+  const appearance = '<%= p.appearance === "dark" ? "dark" : (p.appearance === "system" ? "light" : "light") %>';
+  const applyTheme = (value) => {
+    const resolved = value === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : value;
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.appearance = value;
+    localStorage.setItem('ai-note-appearance-v2', value);
+  };
+  applyTheme(appearance);
+  const appearanceSelect = document.querySelector('select[name="appearance"]');
+  appearanceSelect?.addEventListener('change', () => applyTheme(appearanceSelect.value));
+  const media = matchMedia('(prefers-color-scheme: dark)');
+  media.addEventListener?.('change', () => { if ((appearanceSelect?.value || appearance) === 'system') applyTheme('system'); });
+})();
 </script>
 <%- include("partials/footer") %>

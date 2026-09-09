@@ -1,51 +1,170 @@
 <%- include("partials/header", { title: "AI Insights", bodyClass: "app-shell" }) %>
-<% const i = insights || {}; const maxT = Math.max(1, ...(i.topics || []).map(t => t[1])); %>
+<% const i = insights || {}; const topics = i.topics || []; %>
 <div class="shell">
   <%- include("partials/sidebar", { user, activeNav: "insights", settings, usage, q: "" }) %>
-  <div class="main tactiq-main">
-    <header class="main-top page-head">
+  <div class="main tactiq-main insights-page">
+    <header class="main-top page-head insights-head">
       <div>
-        <h1>✦ AI Insights</h1>
-        <p class="admin-sub">Cross-meeting patterns from the last 7 days.</p>
+        <p class="eyebrow">INTELLIGENCE</p>
+        <h1><span class="material-symbols-outlined">auto_awesome</span> AI Insights</h1>
+        <p class="admin-sub">Understand patterns, decisions, and topics across your meetings.</p>
       </div>
+      <% if (i.isPaid) { %>
+      <div class="insights-controls">
+        <form method="GET" action="/app/insights" class="range-form">
+          <span class="material-symbols-outlined">calendar_month</span>
+          <select name="range" onchange="this.form.submit()" aria-label="Insight time range">
+            <option value="today" <%= i.range === 'today' ? 'selected' : '' %>>Today</option>
+            <option value="7d" <%= i.range === '7d' ? 'selected' : '' %>>Last 7 days</option>
+            <option value="30d" <%= i.range === '30d' ? 'selected' : '' %>>Last 30 days</option>
+            <option value="90d" <%= i.range === '90d' ? 'selected' : '' %>>Last 90 days</option>
+          </select>
+        </form>
+      </div>
+      <% } %>
     </header>
 
     <% if (!i.isPaid) { %>
-      <div class="card section-card pro-gate" style="margin: 0 28px;">
-        <h2>✦ PRO feature</h2>
-        <p>AI Insights analyzes all your meetings for topics, decisions, and time trends.</p>
-        <a class="btn-primary" href="/#pricing">Upgrade to unlock</a>
-        <a class="btn-ghost" href="/app/usage" style="margin-left:8px">View plan</a>
+      <div class="card section-card pro-gate insights-gate">
+        <div class="gate-icon"><span class="material-symbols-outlined">auto_awesome</span></div>
+        <div><h2>AI Insights is a Pro feature</h2><p>Analyze patterns across your meetings, track decisions, identify recurring topics, and discover unresolved issues.</p></div>
+        <div class="gate-actions"><a class="btn-primary" href="/#pricing">Upgrade to Pro</a><a class="btn-ghost" href="/app/usage">View plan</a></div>
       </div>
     <% } else { %>
-      <div class="admin-stats stats-4" style="padding: 0 28px;">
-        <div class="stat-card rich"><span class="stat-label">This week</span><strong><%= i.meetings %></strong><span class="stat-delta">Meetings</span></div>
-        <div class="stat-card rich"><span class="stat-label">Meeting time</span><strong><%= i.totalMin %>m</strong><span class="stat-delta">Total</span></div>
-        <div class="stat-card rich"><span class="stat-label">Action items</span><strong><%= i.actionItems %></strong><span class="stat-delta">Extracted</span></div>
-        <div class="stat-card rich"><span class="stat-label">Decisions</span><strong><%= i.decisions %></strong><span class="stat-delta">Tracked</span></div>
-      </div>
+      <div class="insights-content">
+        <section class="insight-stats">
+          <div class="stat-card rich"><span class="stat-label">Meetings analyzed</span><strong><%= i.meetings %></strong><span class="stat-delta">in this period</span></div>
+          <div class="stat-card rich"><span class="stat-label">Key topics</span><strong><%= topics.length %></strong><span class="stat-delta">recurring themes</span></div>
+          <div class="stat-card rich"><span class="stat-label">Decisions</span><strong><%= i.decisionCount || 0 %></strong><span class="stat-delta">tracked</span></div>
+          <div class="stat-card rich"><span class="stat-label">Action items</span><strong><%= i.actionItems %></strong><span class="stat-delta">identified</span></div>
+        </section>
 
-      <section class="card section-card" style="margin: 16px 28px;">
-        <h2>Most discussed topics</h2>
-        <% if (!i.topics || !i.topics.length) { %>
-          <p class="muted">Not enough meetings yet this week.</p>
-        <% } else { %>
-          <div class="plan-dist">
-            <% i.topics.forEach(function(t) { %>
-              <div class="plan-dist-row">
-                <div class="plan-dist-meta"><strong><%= t[0] %></strong><span><%= t[1] %></span></div>
-                <div class="plan-dist-bar"><div style="width:<%= Math.round((t[1]/maxT)*100) %>%"></div></div>
+        <section class="card section-card ai-overview-card">
+          <div class="section-heading-row"><div><p class="eyebrow">AI OVERVIEW</p><h2>What changed across your meetings?</h2></div><a class="btn-ghost small" href="/app/insights?range=<%= i.range %>&ai=1">Refresh with AI</a></div>
+          <p class="ai-overview-text"><%= i.aiOverview %></p>
+          <% if (i.meetings >= 2) { %><a class="evidence-link" href="#supporting-meetings">View supporting meetings <span class="material-symbols-outlined">arrow_forward</span></a><% } %>
+        </section>
+
+        <div class="insights-grid-2">
+          <section class="card section-card">
+            <div class="section-heading-row"><div><p class="eyebrow">CROSS-MEETING</p><h2>Recurring topics</h2></div></div>
+            <% if (!topics.length) { %><div class="insight-empty"><span class="material-symbols-outlined">forum</span><strong>Not enough topic data yet</strong><p>Capture more analyzed meetings to identify recurring themes.</p></div><% } else { %>
+              <div class="topic-table">
+                <% (i.topicTrends || topics).slice(0,8).forEach(function(t) { %>
+                  <a class="topic-row" href="/app/meetings?q=<%= encodeURIComponent(t.name) %>">
+                    <div class="topic-main"><strong><%= t.name %></strong><span><%= t.meetings %> meeting<%= t.meetings === 1 ? '' : 's' %></span></div>
+                    <div class="topic-bar"><span style="width:<%= Math.round((t.meetings / Math.max(1, i.topicMax || 1))*100) %>%"></span></div>
+                    <span class="topic-trend <%= t.change === null ? 'up' : t.change > 0 ? 'up' : t.change < 0 ? 'down' : 'flat' %>"><%= t.change === null ? 'New' : t.change > 0 ? '↑ ' : t.change < 0 ? '↓ ' : '→ ' %><%= t.change === null ? '' : Math.abs(t.change || 0) + '%' %></span>
+                  </a>
+                <% }) %>
               </div>
-            <% }) %>
-          </div>
-        <% } %>
-      </section>
+            <% } %>
+          </section>
 
-      <section class="card section-card" style="margin: 0 28px 24px;">
-        <h2>AI observation</h2>
-        <p>You had <strong><%= i.meetings %></strong> meetings totaling <strong><%= i.totalMin %> minutes</strong> this week<% if (i.actionItems) { %>, with <strong><%= i.actionItems %></strong> action items captured<% } %>.</p>
-      </section>
+          <section class="card section-card">
+            <div class="section-heading-row"><div><p class="eyebrow">DECISIONS</p><h2>Key decisions</h2></div><a href="/app/meetings" class="text-link">View all</a></div>
+            <% if (!i.decisions?.length) { %><div class="insight-empty"><span class="material-symbols-outlined">task_alt</span><strong>No decisions detected</strong><p>Decisions will appear here when they are captured in analyzed meetings.</p></div><% } else { %>
+              <div class="decision-list">
+                <% i.decisions.slice(0,5).forEach(function(d) { %>
+                  <a href="/meetings/<%= encodeURIComponent(d.meetingId) %>" class="decision-row"><span class="decision-check material-symbols-outlined">check_circle</span><div><strong><%= d.text %></strong><small><%= d.meetingTitle %><% if (d.date) { %> · <%= new Date(d.date).toLocaleDateString('en-US',{month:'short',day:'numeric'}) %><% } %></small></div></a>
+                <% }) %>
+              </div>
+            <% } %>
+          </section>
+        </div>
+
+        <div class="insights-grid-2">
+          <section class="card section-card">
+            <div class="section-heading-row"><div><p class="eyebrow">FOLLOW-UP</p><h2>Action items requiring attention</h2></div><a href="/app/meetings" class="text-link">View all</a></div>
+            <% if (!i.actions?.length) { %><div class="insight-empty"><span class="material-symbols-outlined">checklist</span><strong>Nothing needs attention</strong><p>Open action items from your meetings will appear here.</p></div><% } else { %>
+              <div class="action-insight-list">
+                <% i.actions.slice(0,5).forEach(function(a) { %>
+                  <a href="/meetings/<%= encodeURIComponent(a.meetingId) %>" class="action-insight-row"><span class="priority-dot"></span><div><strong><%= a.task %></strong><small><%= a.meetingTitle %></small></div><span class="action-due"><%= a.deadline || 'No deadline' %></span></a>
+                <% }) %>
+              </div>
+            <% } %>
+          </section>
+
+          <section class="card section-card">
+            <div class="section-heading-row"><div><p class="eyebrow">ATTENTION</p><h2>Unresolved topics</h2></div></div>
+            <% if (!i.unresolved?.length) { %><div class="insight-empty"><span class="material-symbols-outlined">check_circle</span><strong>No unresolved issues surfaced</strong><p>No open questions or unresolved conflicts were detected in this period.</p></div><% } else { %>
+              <div class="unresolved-list">
+                <% i.unresolved.slice(0,5).forEach(function(u) { %>
+                  <a href="/meetings/<%= encodeURIComponent(u.meetingId) %>" class="unresolved-row"><span class="material-symbols-outlined">warning</span><div><strong><%= u.text %></strong><small><%= u.meetingTitle %> · <%= u.type === 'issue' ? 'Open issue' : 'Open question' %></small></div></a>
+                <% }) %>
+              </div>
+            <% } %>
+          </section>
+        </div>
+
+        <section class="card section-card patterns-card">
+          <div class="section-heading-row"><div><p class="eyebrow">PATTERNS</p><h2>Emerging patterns</h2></div><span class="subtle-period">Compared with previous period</span></div>
+          <div class="pattern-grid">
+            <% (i.topicTrends || []).slice(0,3).forEach(function(t) { %>
+              <div class="pattern-item"><span class="pattern-arrow <%= t.change === null ? 'up' : t.change > 0 ? 'up' : t.change < 0 ? 'down' : 'flat' %>"><%= t.change === null ? '↑' : t.change > 0 ? '↑' : t.change < 0 ? '↓' : '→' %></span><div><strong><%= t.name %></strong><p><%= t.meetings %> meeting<%= t.meetings === 1 ? '' : 's' %> in this period · <%= t.change === null ? 'New this period' : Math.abs(t.change || 0) + '% change' %></p></div></div>
+            <% }) %>
+            <% if (!(i.topicTrends || []).length) { %><div class="insight-empty"><span class="material-symbols-outlined">insights</span><strong>Patterns will appear with more meeting data</strong></div><% } %>
+          </div>
+        </section>
+
+        <section class="card section-card comparison-card">
+          <div><p class="eyebrow">PERIOD COMPARISON</p><h2>Compared with the previous period</h2></div>
+          <div class="comparison-grid">
+            <div><strong><%= i.meetings %></strong><span>Meetings</span><em class="<%= i.comparison.meetings === null || i.comparison.meetings >= 0 ? 'up' : 'down' %>"><%= i.comparison.meetings === null ? 'New' : (i.comparison.meetings >= 0 ? '↑' : '↓') + ' ' + Math.abs(i.comparison.meetings) + '%' %></em></div>
+            <div><strong><%= i.actionItems %></strong><span>Action items</span><em class="<%= i.comparison.actionItems === null || i.comparison.actionItems >= 0 ? 'up' : 'down' %>"><%= i.comparison.actionItems === null ? 'New' : (i.comparison.actionItems >= 0 ? '↑' : '↓') + ' ' + Math.abs(i.comparison.actionItems) + '%' %></em></div>
+            <div><strong><%= i.decisionCount || 0 %></strong><span>Decisions</span><em class="<%= i.comparison.decisions === null || i.comparison.decisions >= 0 ? 'up' : 'down' %>"><%= i.comparison.decisions === null ? 'New' : (i.comparison.decisions >= 0 ? '↑' : '↓') + ' ' + Math.abs(i.comparison.decisions) + '%' %></em></div>
+          </div>
+        </section>
+
+        <section class="card section-card ask-insights-card">
+          <div class="ask-icon"><span class="material-symbols-outlined">auto_awesome</span></div>
+          <div class="ask-copy"><p class="eyebrow">ASK AI</p><h2>Ask about your meetings</h2><p>Ask a question across your meeting history. Answers are grounded only in your saved meeting data.</p></div>
+          <div class="ask-form-wrap">
+            <form id="insightsAskForm" class="insights-ask-form">
+              <input id="insightsQuestion" type="text" placeholder="What changed across my meetings this week?" autocomplete="off" />
+              <button class="btn-primary" type="submit"><span class="material-symbols-outlined">arrow_forward</span> Ask AI</button>
+            </form>
+            <div class="suggested-questions">
+              <button type="button" data-question="What decisions did we make in this period?">What decisions did we make?</button>
+              <button type="button" data-question="What issues are still unresolved?">What is unresolved?</button>
+              <button type="button" data-question="What topics came up most often?">What topics came up most?</button>
+              <button type="button" data-question="What action items are still open?">What actions are open?</button>
+            </div>
+            <div id="insightsAskResult" class="ask-result" hidden></div>
+          </div>
+        </section>
+
+        <section id="supporting-meetings" class="card section-card supporting-meetings">
+          <div class="section-heading-row"><div><p class="eyebrow">EVIDENCE</p><h2>Supporting meetings</h2></div></div>
+          <% if (!i.meetings) { %><p class="muted">No meetings in this period.</p><% } else { %>
+            <div class="supporting-list">
+              <% meetings?.slice(0,6).forEach(function(m) { %>
+                <a href="/meetings/<%= encodeURIComponent(m.externalId) %>"><strong><%= m.title || 'Untitled meeting' %></strong><span><%= m.platform || 'Manual' %> · <%= m.startedAt ? new Date(m.startedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—' %></span></a>
+              <% }) %>
+            </div>
+          <% } %>
+        </section>
+      </div>
     <% } %>
   </div>
 </div>
+<script>
+(() => {
+  const form = document.getElementById('insightsAskForm');
+  const input = document.getElementById('insightsQuestion');
+  const result = document.getElementById('insightsAskResult');
+  document.querySelectorAll('[data-question]').forEach(btn => btn.addEventListener('click', () => { input.value = btn.dataset.question; input.focus(); }));
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = input.value.trim(); if (!q) return;
+    result.hidden = false; result.className = 'ask-result loading'; result.textContent = '✦ Analyzing your meetings…';
+    try {
+      const r = await fetch('/api/insights/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question:q}) });
+      const data = await r.json(); if (!r.ok || !data.ok) throw new Error(data.error || 'Unable to answer');
+      result.className = 'ask-result'; result.textContent = data.answer;
+    } catch (err) { result.className = 'ask-result error'; result.textContent = err.message || 'Unable to answer right now.'; }
+  });
+})();
+</script>
 <%- include("partials/footer") %>
