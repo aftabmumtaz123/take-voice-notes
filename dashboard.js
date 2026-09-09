@@ -234,14 +234,14 @@ function renderMarkdownDash(md) {
   return out.join('\n');
 }
 
-function buildAiCardDash(markdown, { question = '', isError = false } = {}) {
+function buildAiCardDash(markdown, { question = '', promptId = null, isError = false } = {}) {
   const body = isError ? `<p class="ai-error-text">${esc(markdown)}</p>` : renderMarkdownDash(markdown);
   return `<article class="ai-card ${isError ? 'ai-card-error' : ''}" data-raw="${esc(markdown)}">
     <header class="ai-card-header">
       <div class="ai-card-title"><span class="ai-card-icon">✦</span><span>AI Answer</span><span class="ai-context-badge">Transcript · AI Summary</span></div>
       <div class="ai-card-actions">
         <button type="button" class="ai-action-btn ai-copy">Copy</button>
-        <button type="button" class="ai-action-btn ai-regen" data-q="${esc(question)}">Regenerate</button>
+        <button type="button" class="ai-action-btn ai-regen" data-q="${esc(question)}" data-prompt-id="${esc(promptId || '')}">Regenerate</button>
       </div>
     </header>
     <div class="ai-card-body md-content">${body}</div>
@@ -250,22 +250,32 @@ function buildAiCardDash(markdown, { question = '', isError = false } = {}) {
 
 function renderChat() {
   $('detailContent').innerHTML = `<div class="chat">
-    <p class="chat-intro muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
-    <div class="ask-suggestions">
-      <button type="button" class="chip ask-sugg" data-q="Give me a 5-bullet summary of this meeting">5-bullet summary</button>
-      <button type="button" class="chip ask-sugg" data-q="What were the key decisions?">Key decisions?</button>
-      <button type="button" class="chip ask-sugg" data-q="What action items were assigned? List them as tasks with owners if mentioned.">Action items?</button>
-      <button type="button" class="chip ask-sugg" data-q="What are the next steps?">Next steps?</button>
+    <div class="prompt-gallery">
+      <h3 class="prompt-gallery-title">✦ What will you create today?</h3>
+      <p class="chat-intro muted">Answers use only this meeting’s transcript and summary.</p>
+      <div class="prompt-grid">
+        <button type="button" class="prompt-card" data-prompt-id="short_summary"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Short summary</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="detailed_summary"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Detailed summary</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="detailed_with_citations"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Detailed summary with citation</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="summary_and_actions"><span class="prompt-card-icon">📋</span><span class="prompt-card-label">Summary and Action items</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="team_sync"><span class="prompt-card-icon">👥</span><span class="prompt-card-label">Team Sync – Project Updates</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="smart_advice"><span class="prompt-card-icon">💡</span><span class="prompt-card-label">Smart AI Advice</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="generate_tasks"><span class="prompt-card-icon">☑</span><span class="prompt-card-label">Generate tasks</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="prepare_slides"><span class="prompt-card-icon">▶</span><span class="prompt-card-label">Prepare slides</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="key_decisions"><span class="prompt-card-icon">🔵</span><span class="prompt-card-label">Key decisions</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="next_steps"><span class="prompt-card-icon">→</span><span class="prompt-card-label">Next steps</span></button>
+      </div>
     </div>
     <div id="chatHistory" class="chat-history"></div>
-    <div class="chat-form"><input id="chatInput" placeholder="Ask anything about this meeting…"><button id="chatSend" class="primary-btn">Ask AI</button></div>
+    <div class="chat-form"><input id="chatInput" placeholder="Ask about this meeting…"><button id="chatSend" class="primary-btn">Ask AI</button></div>
   </div>`;
-  $('chatSend').addEventListener('click', sendChat);
+  $('chatSend').addEventListener('click', () => sendChat());
   $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
-  document.querySelectorAll('.ask-sugg').forEach(btn => {
+  document.querySelectorAll('.prompt-card').forEach(btn => {
     btn.addEventListener('click', () => {
-      const input = $('chatInput');
-      if (input) { input.value = btn.getAttribute('data-q') || btn.textContent; input.focus(); }
+      const promptId = btn.getAttribute('data-prompt-id');
+      const label = btn.querySelector('.prompt-card-label')?.textContent?.trim() || promptId;
+      sendChat({ promptId, label });
     });
   });
   const history = $('chatHistory');
@@ -280,29 +290,34 @@ function renderChat() {
     const regenBtn = e.target.closest('.ai-regen');
     if (regenBtn) {
       const q = regenBtn.getAttribute('data-q');
-      if (q) { $('chatInput').value = q; sendChat(); }
+      const pid = regenBtn.getAttribute('data-prompt-id');
+      if (pid) sendChat({ promptId: pid, label: q });
+      else if (q) { $('chatInput').value = q; sendChat(); }
     }
   });
 }
 
-async function sendChat() {
+async function sendChat(opts = {}) {
   const input = $('chatInput');
-  const q = input.value.trim();
-  if (!q) return;
+  const promptId = opts.promptId || null;
+  const label = opts.label || '';
+  const q = promptId ? (label || promptId) : (input?.value || '').trim();
+  if (!promptId && !q) return;
   const history = $('chatHistory');
   history.insertAdjacentHTML('beforeend', `<div class="bubble user">${esc(q)}</div>`);
   history.insertAdjacentHTML('beforeend', `<article class="ai-card ai-thinking"><header class="ai-card-header"><div class="ai-card-title"><span class="ai-card-icon">✦</span><span>AI Answer</span></div></header><div class="ai-card-body"><div class="ai-thinking-row"><span class="ai-dots"><i></i><i></i><i></i></span><span>Thinking…</span></div></div></article>`);
   const pending = history.lastElementChild;
-  input.value = '';
+  if (input) input.value = '';
   history.scrollTop = history.scrollHeight;
   try {
+    const body = promptId ? { userId, promptId, question: q } : { userId, question: q };
     const data = await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}/chat`, {
       method: 'POST',
-      body: JSON.stringify({ userId, question: q })
+      body: JSON.stringify(body)
     });
-    pending.outerHTML = buildAiCardDash(data.answer || 'No answer.', { question: q });
+    pending.outerHTML = buildAiCardDash(data.answer || 'No answer.', { question: q, promptId: data.promptId || promptId });
   } catch (error) {
-    pending.outerHTML = buildAiCardDash(error.message, { question: q, isError: true });
+    pending.outerHTML = buildAiCardDash(error.message, { question: q, promptId, isError: true });
   }
   history.scrollTop = history.scrollHeight;
 }

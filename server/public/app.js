@@ -191,7 +191,7 @@ function renderMarkdown(md) {
 }
 
 // ─── AI Answer card ──────────────────────────────────────────────────────────
-function buildAiCard(markdown, { question = "", isError = false } = {}) {
+function buildAiCard(markdown, { question = "", promptId = null, isError = false } = {}) {
   const id = "ai-" + Math.random().toString(36).slice(2, 9);
   const bodyHtml = isError
     ? `<p class="ai-error-text">${escapeHtml(markdown)}</p>`
@@ -207,7 +207,7 @@ function buildAiCard(markdown, { question = "", isError = false } = {}) {
         </div>
         <div class="ai-card-actions">
           <button type="button" class="ai-action-btn ai-copy" title="Copy answer">Copy</button>
-          <button type="button" class="ai-action-btn ai-regen" title="Regenerate" data-q="${escapeHtml(question)}">Regenerate</button>
+          <button type="button" class="ai-action-btn ai-regen" title="Regenerate" data-q="${escapeHtml(question)}" data-prompt-id="${escapeHtml(promptId || "")}">Regenerate</button>
         </div>
       </header>
       <div class="ai-card-body md-content">
@@ -238,58 +238,75 @@ function buildThinkingCard() {
     </article>`;
 }
 
-// ─── AI Chat ─────────────────────────────────────────────────────────────────
+// ─── AI Chat + prompt gallery ────────────────────────────────────────────────
 const chatForm = document.getElementById("chatForm");
 if (chatForm) {
   const history = document.getElementById("chatHistory");
   const input = document.getElementById("chatInput");
   let lastQuestion = "";
+  let lastPromptId = null;
 
-  async function ask(question) {
-    const q = (question || "").trim();
-    if (!q) return;
+  async function ask({ question = "", promptId = null, label = "" } = {}) {
+    const q = (question || label || "").trim();
+    if (!promptId && !q) return;
     lastQuestion = q;
+    lastPromptId = promptId;
     if (input) input.value = "";
 
-    history.insertAdjacentHTML("beforeend", buildUserBubble(q));
+    const displayLabel = label || q;
+    history.insertAdjacentHTML("beforeend", buildUserBubble(displayLabel));
     history.insertAdjacentHTML("beforeend", buildThinkingCard());
     const pending = history.lastElementChild;
-    history.scrollTop = history.scrollHeight;
+    requestAnimationFrame(() => { history.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" }); });
 
     try {
+      const body = promptId ? { promptId, question: q || undefined } : { question: q };
       const res = await fetch(`/api/meetings/${encodeURIComponent(chatForm.dataset.meetingId)}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q })
+        body: JSON.stringify(body)
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || "Chat failed");
-      pending.outerHTML = buildAiCard(data.answer || "No answer.", { question: q });
+      pending.outerHTML = buildAiCard(data.answer || "No answer.", {
+        question: displayLabel,
+        promptId: data.promptId || promptId
+      });
     } catch (err) {
-      pending.outerHTML = buildAiCard(err.message || String(err), { question: q, isError: true });
+      pending.outerHTML = buildAiCard(err.message || String(err), {
+        question: displayLabel,
+        promptId,
+        isError: true
+      });
     }
-    history.scrollTop = history.scrollHeight;
+    requestAnimationFrame(() => { history.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" }); });
   }
 
   chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    ask(input?.value);
+    ask({ question: input?.value });
   });
 
-  // Suggestion chips
-  document.querySelectorAll(".ask-sugg").forEach((btn) => {
+
+
+  // Prompt gallery cards — click runs the template immediately
+  document.querySelectorAll(".prompt-card").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const q = btn.getAttribute("data-q") || btn.textContent;
-      if (input) {
-        input.value = q;
-        input.focus();
-      }
-      // Optionally auto-send:
-      // ask(q);
+      const promptId = btn.getAttribute("data-prompt-id");
+      const label = btn.querySelector(".prompt-card-label")?.textContent?.trim() || promptId;
+      ask({ promptId, label });
     });
   });
 
-  // Copy + Regenerate (event delegation)
+  // Legacy suggestion chips (if any remain)
+  document.querySelectorAll(".ask-sugg").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const q = btn.getAttribute("data-q") || btn.textContent;
+      ask({ question: q });
+    });
+  });
+
+  // Copy + Regenerate
   history.addEventListener("click", async (e) => {
     const copyBtn = e.target.closest(".ai-copy");
     if (copyBtn) {
@@ -305,7 +322,44 @@ if (chatForm) {
     const regenBtn = e.target.closest(".ai-regen");
     if (regenBtn) {
       const q = regenBtn.getAttribute("data-q") || lastQuestion;
-      if (q) ask(q);
+      const pid = regenBtn.getAttribute("data-prompt-id") || lastPromptId;
+      if (pid) ask({ promptId: pid, label: q });
+      else if (q) ask({ question: q });
     }
   });
 }
+
+// Sidebar expand/compact state — initialized on every app page, not only meeting pages.
+const sidebar = document.querySelector("[data-sidebar]");
+const sidebarToggle = document.querySelector("[data-sidebar-toggle]");
+if (sidebar && sidebarToggle) {
+  const storageKey = "ai-note-taker-sidebar-collapsed";
+  const setSidebarState = (collapsed, persist = true) => {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    sidebar.classList.toggle("is-collapsed", collapsed);
+    sidebarToggle.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+    sidebarToggle.setAttribute("title", collapsed ? "Expand sidebar" : "Collapse sidebar");
+    const icon = sidebarToggle.querySelector(".material-symbols-outlined");
+    if (icon) icon.textContent = collapsed ? "left_panel_open" : "left_panel_close";
+    if (persist) localStorage.setItem(storageKey, collapsed ? "1" : "0");
+  };
+
+  const storedState = localStorage.getItem(storageKey);
+  const initialCollapsed = storedState === "1" || (storedState === null && window.innerWidth <= 900);
+  setSidebarState(initialCollapsed, false);
+
+  sidebarToggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSidebarState(!sidebar.classList.contains("is-collapsed"));
+  });
+
+  // Clicking the logo expands a compact sidebar.
+  const brand = sidebar.querySelector(".sidebar-brand");
+  brand?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-sidebar-toggle]")) return;
+    if (sidebar.classList.contains("is-collapsed")) setSidebarState(false);
+  });
+}
+
+

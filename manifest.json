@@ -45,5 +45,21 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "minimum_chrome_version": "127"
+  "minimum_chrome_version": "127",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*",
+        "https://zoom.us/*",
+        "https://*.zoom.us/*",
+        "https://teams.microsoft.com/*",
+        "https://*.teams.microsoft.com/*",
+        "https://teams.live.com/*"
+      ],
+      "js": [
+        "meeting-end-detector.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

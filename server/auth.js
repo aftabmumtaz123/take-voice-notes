@@ -126,9 +126,19 @@ const userSchema = new mongoose.Schema({
     minlength: 3,
     maxlength: 32
   },
-  passkeyHash: { type: String, required: true },
-  passkeySalt: { type: String, required: true },
+  // Optional for Google-only accounts
+  passkeyHash: { type: String, default: "" },
+  passkeySalt: { type: String, default: "" },
   displayName: { type: String, default: "" },
+  email: { type: String, default: "", index: true },
+  avatarUrl: { type: String, default: "" },
+  googleId: { type: String, default: "", index: true, sparse: true },
+  googleTokens: {
+    accessToken: { type: String, default: "" },
+    refreshToken: { type: String, default: "" },
+    expiryDate: { type: Number, default: 0 },
+    scope: { type: String, default: "" }
+  },
   role: { type: String, enum: ["user", "admin"], default: "user", index: true },
   planId: { type: mongoose.Schema.Types.ObjectId, ref: "Plan", default: null },
   planSlug: { type: String, default: "free" },
@@ -186,6 +196,9 @@ export function publicUser(user) {
     id: user._id.toString(),
     username: user.username,
     displayName: user.displayName || user.username,
+    email: user.email || "",
+    avatarUrl: user.avatarUrl || "",
+    googleId: user.googleId || "",
     role: user.role || "user",
     planSlug: user.planSlug || "free",
     planId: user.planId ? user.planId.toString() : null,
@@ -259,13 +272,97 @@ export async function loginUser({ username, passkey, label = "web" }) {
   const user = await User.findOne({ username: normalizeUsername(username) });
   if (!user) throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
   if (user.isActive === false) throw Object.assign(new Error("Account is disabled."), { status: 403 });
+  if (!user.passkeyHash || !user.passkeySalt) {
+    throw Object.assign(new Error("This account uses Google sign-in. Continue with Google."), { status: 401 });
+  }
   const salt = Buffer.from(user.passkeySalt, "hex");
   const attempt = hashPasskey(passkey, salt);
-  const ok = crypto.timingSafeEqual(Buffer.from(attempt, "hex"), Buffer.from(user.passkeyHash, "hex"));
-  if (!ok) throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
+  const a = Buffer.from(attempt, "hex");
+  const b = Buffer.from(user.passkeyHash, "hex");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
+  }
   ensureApiKey(user);
   await user.save();
   const session = await createSession(user, label);
+  return { user: publicUser(user), ...session };
+}
+
+function usernameFromEmail(email) {
+  const base = String(email || "user")
+    .split("@")[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 24) || "user";
+  return base;
+}
+
+export async function findOrCreateGoogleUser({
+  googleId,
+  email,
+  displayName,
+  avatarUrl,
+  tokens = {}
+}) {
+  if (!googleId) throw Object.assign(new Error("Missing Google user id."), { status: 400 });
+
+  let user = await User.findOne({ googleId: String(googleId) });
+  if (!user && email) {
+    user = await User.findOne({ email: String(email).toLowerCase() });
+  }
+
+  const freePlan = await Plan.findOne({ slug: "free", isActive: true }).lean();
+
+  if (!user) {
+    let uname = usernameFromEmail(email);
+    let n = 0;
+    while (await User.findOne({ username: uname })) {
+      n += 1;
+      uname = `${usernameFromEmail(email)}${n}`.slice(0, 32);
+    }
+    user = await User.create({
+      username: uname,
+      passkeyHash: "",
+      passkeySalt: "",
+      displayName: String(displayName || uname).slice(0, 80),
+      email: String(email || "").toLowerCase().slice(0, 200),
+      avatarUrl: String(avatarUrl || "").slice(0, 500),
+      googleId: String(googleId),
+      googleTokens: {
+        accessToken: tokens.accessToken || "",
+        refreshToken: tokens.refreshToken || "",
+        expiryDate: tokens.expiryDate || 0,
+        scope: tokens.scope || ""
+      },
+      role: "user",
+      planId: freePlan?._id || null,
+      planSlug: freePlan?.slug || "free",
+      apiKey: `ntk_${crypto.randomBytes(24).toString("base64url")}`,
+      onboardingCompleted: false
+    });
+  } else {
+    user.googleId = String(googleId);
+    if (email) user.email = String(email).toLowerCase().slice(0, 200);
+    if (displayName) user.displayName = String(displayName).slice(0, 80);
+    if (avatarUrl) user.avatarUrl = String(avatarUrl).slice(0, 500);
+    if (tokens.accessToken) {
+      user.googleTokens = {
+        accessToken: tokens.accessToken || user.googleTokens?.accessToken || "",
+        refreshToken: tokens.refreshToken || user.googleTokens?.refreshToken || "",
+        expiryDate: tokens.expiryDate || user.googleTokens?.expiryDate || 0,
+        scope: tokens.scope || user.googleTokens?.scope || ""
+      };
+    }
+    if (user.isActive === false) {
+      throw Object.assign(new Error("Account is disabled."), { status: 403 });
+    }
+    ensureApiKey(user);
+    await user.save();
+  }
+
+  const session = await createSession(user, "google");
   return { user: publicUser(user), ...session };
 }
 

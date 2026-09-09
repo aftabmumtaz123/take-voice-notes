@@ -54,3 +54,12 @@
 .md-quote{margin:.6em 0 1em;padding:10px 14px;border-left:3px solid #7c5cfc;background:#f9f7ff;border-radius:0 8px 8px 0;color:#4a4560;font-size:13px}
 .md-code{margin:.6em 0 1em;padding:12px 14px;background:#1e1b2e;color:#e8e4f5;border-radius:10px;overflow-x:auto;font-size:12px;line-height:1.5}
 .md-inline{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:.9em;background:#f3f0f9;color:#5b4df0;padding:1px 5px;border-radius:4px}
+
+.prompt-gallery{margin-bottom:8px}
+.prompt-gallery-title{margin:0 0 4px;font-size:16px;font-weight:700;text-align:center;color:var(--ink)}
+.prompt-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:10px 0 12px}
+.prompt-card{display:flex;align-items:center;gap:9px;text-align:left;padding:11px 12px;border:1px solid var(--border);border-radius:11px;background:#faf9fc;cursor:pointer;font-size:12.5px;font-weight:600;color:#3b3550}
+.prompt-card:hover{background:#f3efff;border-color:#d4c9f5}
+.prompt-card-icon{flex-shrink:0;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;background:#efeaff;color:var(--purple);font-size:13px}
+.prompt-card-label{line-height:1.35}
+@media(max-width:560px){.prompt-grid{grid-template-columns:1fr}}

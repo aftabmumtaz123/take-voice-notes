@@ -165,3 +165,32 @@ body.auth-body {
   font-size: 13px;
   margin-bottom: 12px;
 }
+
+.auth-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #111;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  margin-bottom: 4px;
+  transition: background 0.15s, transform 0.1s;
+}
+.auth-google:hover {
+  background: #222;
+  transform: translateY(-1px);
+}
+.auth-google .g-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  background: #fff;
+  border-radius: 6px;
+}

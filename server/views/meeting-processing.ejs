@@ -1,0 +1,37 @@
+<%- include("partials/header", { title: "Processing meeting", bodyClass: "app-shell" }) %>
+<link rel="stylesheet" href="/public/meeting-processing.css" />
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "meetings", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
+  <main class="main processing-main">
+    <div class="processing-shell">
+      <div class="processing-card">
+        <div class="processing-icon" aria-hidden="true"><span class="material-symbols-outlined">auto_awesome</span></div>
+        <div class="processing-kicker">MEETING ENDED</div>
+        <h1>Processing your meeting</h1>
+        <p class="processing-subtitle" id="meetingTitle"><%= title || 'Your meeting' %></p>
+        <p class="processing-copy" id="processingMessage">We're saving the final transcript and preparing your meeting intelligence. This page will open the finished meeting automatically.</p>
+
+        <div class="processing-steps" role="status" aria-live="polite">
+          <div class="processing-step done" data-step="recording">
+            <span class="step-icon material-symbols-outlined">mic_off</span><span>Recording stopped</span><span class="step-state">✓</span>
+          </div>
+          <div class="processing-step active" data-step="transcript">
+            <span class="step-icon material-symbols-outlined">description</span><span>Saving transcript</span><span class="step-state">In progress</span>
+          </div>
+          <div class="processing-step" data-step="analysis">
+            <span class="step-icon material-symbols-outlined">auto_awesome</span><span>Generating AI summary</span><span class="step-state">Waiting</span>
+          </div>
+          <div class="processing-step" data-step="ready">
+            <span class="step-icon material-symbols-outlined">check_circle</span><span>Meeting details</span><span class="step-state">Waiting</span>
+          </div>
+        </div>
+
+        <div class="processing-loader" id="processingLoader"><span></span><span></span><span></span></div>
+        <p class="processing-error" id="processingError" hidden></p>
+        <button class="btn-primary processing-retry" id="retryBtn" type="button" hidden>Check again</button>
+      </div>
+    </div>
+  </main>
+</div>
+<script>window.__PROCESSING_MEETING_ID__ = <%- JSON.stringify(meetingId) %>;</script>
+<script src="/public/meeting-processing.js"></script>

@@ -56,7 +56,7 @@ fs.mkdirSync(dist, { recursive: true });
 const files = [
   'manifest.json','background.js','script-processor.js','offscreen.html','offscreen.js','audio-processor.js',
   'popup.html','popup.css','popup.js','dashboard.html','dashboard.css','dashboard.js','transcribing.html','transcribing.css','transcribing.js',
-  'meeting-detected.html','meeting-detected.css','meeting-detected.js',
+  'meeting-detected.html','meeting-detected.css','meeting-detected.js','meeting-end-detector.js',
   'options.html','options.css','options.js','storage.js','onboarding.html','onboarding.css','onboarding.js',
   'request-mic.html','request-mic.js'
 ];

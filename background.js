@@ -149,7 +149,8 @@ const DEFAULT_STATE = {
   startTime: null,
   pauseTime: null,
   totalPausedMs: 0,
-  provider: null
+  provider: null,
+  captureMeetingAudio: false
 };
 
 const PROVIDERS = {
@@ -489,7 +490,7 @@ async function saveCompletedMeeting() {
     startedAt: new Date(startedAt).toISOString(),
     endedAt: new Date(endedAt).toISOString(),
     duration,
-    participants: [],
+    participants: Array.isArray(activeMeeting?.participants) ? activeMeeting.participants : [],
     fullTranscript: transcript,
     transcript: transcript
       ? [{ speaker: 'Speaker', text: transcript, startTime: 0, endTime: duration, confidence: null }]
@@ -522,6 +523,138 @@ async function saveAndAnalyzeFromText({ transcript, title, platform = 'Manual' }
   await setTranscript(text);
   await chrome.storage.local.set({ noteTitle: payload.title, lastUpdated: Date.now() });
   return saveMeetingPayload(payload, { clearActiveMeeting: false });
+}
+
+async function stopActiveRecordingOnly(reason = 'manual-stop') {
+  const recording = await getRecordingState();
+  const { activeMeeting } = await getMeetingState();
+  if (!recording?.isRecording) return { ok: true, alreadyStopped: true, reason };
+  if (!activeMeeting?.id) {
+    await setRecordingState({ isRecording: false, isPaused: false, startTime: null, pauseTime: null, totalPausedMs: 0, provider: null, captureMeetingAudio: false });
+    try { await sendToOffscreen('OFFSCREEN_STOP'); } catch (_) {}
+    await closeOffscreenDocument();
+    return { ok: true, alreadyStopped: true, reason, error: 'No active meeting session.' };
+  }
+  try { await sendToOffscreen('OFFSCREEN_STOP'); } catch (err) {
+    console.warn('[background] manual stop offscreen:', err?.message || err);
+  }
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await setRecordingState({ isRecording: false, isPaused: false, startTime: null, pauseTime: null, totalPausedMs: recording.totalPausedMs || 0, provider: null, captureMeetingAudio: false });
+  await setInterim('');
+  await closeOffscreenDocument();
+  return { ok: true, stoppedOnly: true, reason, meetingId: activeMeeting.id };
+}
+
+async function saveStoppedMeeting() {
+  if (activeStopPromise) return activeStopPromise;
+  activeStopPromise = (async () => {
+    const { activeMeeting } = await getMeetingState();
+    if (!activeMeeting?.id) return { ok: false, error: 'There is no stopped meeting waiting to be saved.' };
+    const processingId = activeMeeting.id;
+    await chrome.storage.session.set({ meetingFinalizing: { id: processingId, startedAt: Date.now(), reason: 'manual-save' } });
+    await openProcessingPage(processingId, activeMeeting.title || 'Meeting');
+    const completed = await saveCompletedMeeting();
+    await chrome.storage.session.remove('meetingFinalizing').catch(() => {});
+    return {
+      ok: true,
+      meetingId: completed.sync.meetingId,
+      synced: completed.sync.ok,
+      syncError: completed.sync.error || '',
+      analysisReady: completed.sync.analysisReady,
+      analysisError: completed.sync.analysisError || ''
+    };
+  })().finally(async () => {
+    await chrome.storage.session.remove('meetingFinalizing').catch(() => {});
+    activeStopPromise = null;
+  });
+  return activeStopPromise;
+}
+
+let activeStopPromise = null;
+let activeStartPromise = null;
+
+/**
+ * Finish the active meeting from any trigger (manual Stop, meeting UI End/Leave,
+ * tab close, or navigation away). The promise guard prevents two end signals
+ * from creating duplicate meetings/dashboards.
+ */
+async function finishActiveMeeting(reason = 'manual-stop') {
+  if (activeStopPromise) return activeStopPromise;
+
+  activeStopPromise = (async () => {
+    const recording = await getRecordingState();
+    if (!recording?.isRecording) {
+      return { ok: true, alreadyStopped: true, reason };
+    }
+    const { activeMeeting } = await getMeetingState();
+    if (!activeMeeting?.id) {
+      await setRecordingState({ isRecording: false, isPaused: false, startTime: null, pauseTime: null, totalPausedMs: 0, provider: null });
+      return { ok: true, alreadyStopped: true, reason, error: 'No active meeting session.' };
+    }
+
+    console.log(`[background] finishing meeting: ${reason}`);
+    const processingId = activeMeeting.id;
+    await chrome.storage.session.set({ meetingFinalizing: { id: processingId, startedAt: Date.now(), reason } });
+    // Open a Tactiq-style processing page immediately. It polls the backend
+    // until the finalized meeting (including AI analysis) is available.
+    await openProcessingPage(processingId, activeMeeting.title || 'Meeting');
+    try { await sendToOffscreen('OFFSCREEN_STOP'); } catch (err) {
+      console.warn('[background] offscreen stop:', err?.message || err);
+    }
+
+    // Give the provider a short window to deliver final transcript events.
+    await new Promise(resolve => setTimeout(resolve, 900));
+
+    const completed = await saveCompletedMeeting();
+    await setRecordingState({
+      isRecording: false,
+      isPaused: false,
+      startTime: null,
+      pauseTime: null,
+      totalPausedMs: 0,
+      provider: null
+    });
+    await setInterim('');
+    await closeOffscreenDocument();
+
+    try {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (tab.id) await chrome.action.setBadgeText({ tabId: tab.id, text: '' }).catch(() => {});
+      }
+    } catch {}
+
+    const result = {
+      ok: true,
+      reason,
+      meetingId: completed.sync.meetingId,
+      synced: completed.sync.ok,
+      syncError: completed.sync.error || '',
+      analysisReady: completed.sync.analysisReady,
+      analysisError: completed.sync.analysisError || ''
+    };
+
+    // The processing page opened above will redirect itself to the finished
+    // meeting once /api/meetings/complete has saved and analyzed it.
+    await chrome.storage.session.remove('meetingFinalizing');
+    return result;
+  })().finally(async () => {
+    await chrome.storage.session.remove('meetingFinalizing').catch(() => {});
+    activeStopPromise = null;
+  });
+
+  return activeStopPromise;
+}
+
+async function openProcessingPage(meetingId, title = 'Meeting') {
+  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  const params = new URLSearchParams({ title: String(title || 'Meeting').slice(0, 160) });
+  const url = `${base}/meetings/processing/${encodeURIComponent(meetingId)}?${params.toString()}`;
+  try {
+    await chrome.tabs.create({ url, active: true });
+  } catch (error) {
+    console.warn('[background] processing page open failed:', error);
+  }
 }
 
 async function openDashboard(meetingId = '') {
@@ -575,6 +708,13 @@ async function wasMeetingRecentlyDetected(tabId, url) {
 }
 
 async function startRecordingInternal({ automatic = false, tabCaptureStreamId = null, captureMeetingAudio = false } = {}) {
+  if (activeStartPromise) return activeStartPromise;
+  activeStartPromise = (async () => {
+  const { meetingFinalizing } = await chrome.storage.session.get({ meetingFinalizing: null });
+  if (meetingFinalizing?.id && Date.now() - Number(meetingFinalizing.startedAt || 0) < 10 * 60 * 1000) {
+    throw new Error('A previous meeting is still being finalized.');
+  }
+  if (meetingFinalizing?.id) await chrome.storage.session.remove('meetingFinalizing');
   const providers = await configuredProviders();
   if (!providers.length) {
     throw new Error('No transcription provider is configured. Add developer API keys to .env and run npm run build.');
@@ -594,7 +734,8 @@ async function startRecordingInternal({ automatic = false, tabCaptureStreamId = 
       url: pending?.url || activeTab?.url || '',
       title: pending?.title || activeTab?.title || 'Untitled meeting',
       tabId: pending?.tabId || activeTab?.id || null,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      participants: []
     };
     await chrome.storage.session.set({ activeMeeting });
   }
@@ -604,7 +745,7 @@ async function startRecordingInternal({ automatic = false, tabCaptureStreamId = 
   await chrome.storage.local.set({ noteTitle: activeMeeting.title || 'Untitled meeting' });
   await setRecordingState({
     isRecording: true, isPaused: false, startTime: Date.now(),
-    pauseTime: null, totalPausedMs: 0, provider: null
+    pauseTime: null, totalPausedMs: 0, provider: null, captureMeetingAudio: Boolean(captureMeetingAudio)
   });
 
   const result = await sendToOffscreen('OFFSCREEN_START', {
@@ -620,6 +761,8 @@ async function startRecordingInternal({ automatic = false, tabCaptureStreamId = 
   const finalState = await setRecordingState({ provider: result.provider || null });
   if (automatic) console.log('[background] Automatic meeting transcription started:', finalState.provider);
   return finalState;
+  })().finally(() => { activeStartPromise = null; });
+  return activeStartPromise;
 }
 
 async function showTranscribingPopup(meeting, { permissionRequired = false, error = '' } = {}) {
@@ -742,9 +885,27 @@ async function scanTabs() {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    getMeetingState().then(async ({ activeMeeting }) => {
+      const recording = await getRecordingState();
+      if (recording?.isRecording && activeMeeting?.tabId === tabId && !detectMeeting(changeInfo.url)) {
+        await finishActiveMeeting('meeting-tab-navigated-away');
+      }
+    }).catch(err => console.warn('[background] meeting navigation check:', err));
+  }
+
   if (changeInfo.status === 'complete' && detectMeeting(tab.url)) {
     openExtensionPopup(tab).catch(err => console.warn('[background] detect:', err));
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  getMeetingState().then(async ({ activeMeeting }) => {
+    const recording = await getRecordingState();
+    if (recording?.isRecording && activeMeeting?.tabId === tabId) {
+      await finishActiveMeeting('meeting-tab-closed');
+    }
+  }).catch(err => console.warn('[background] meeting tab close check:', err));
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
@@ -879,29 +1040,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case 'STOP_RECORDING': {
-          try { await sendToOffscreen('OFFSCREEN_STOP'); } catch {}
-          // Give the final provider event a moment to reach the service worker
-          // before taking the transcript snapshot.
-          await new Promise(resolve => setTimeout(resolve, 500));
-          const completed = await saveCompletedMeeting();
-          await setRecordingState({ isRecording: false, isPaused: false, startTime: null, pauseTime: null, totalPausedMs: 0, provider: null });
-          await setInterim('');
-          await closeOffscreenDocument();
+          const result = await stopActiveRecordingOnly('manual-stop');
+          sendResponse(result);
+          break;
+        }
+
+        case 'SAVE_STOPPED_MEETING': {
           try {
-            const tabs = await chrome.tabs.query({});
-            for (const tab of tabs) { if (tab.id) await chrome.action.setBadgeText({ tabId: tab.id, text: '' }).catch(() => {}); }
-          } catch {}
-          sendResponse({
-            ok: true,
-            meetingId: completed.sync.meetingId,
-            synced: completed.sync.ok,
-            syncError: completed.sync.error || '',
-            analysisReady: completed.sync.analysisReady,
-            analysisError: completed.sync.analysisError || ''
-          });
-          // Always show the saved local/server result immediately. If MongoDB is
-          // unavailable, the dashboard explains the recovery state instead.
-          await openDashboard(completed.sync.meetingId || completed.payload.externalId);
+            const result = await saveStoppedMeeting();
+            sendResponse(result);
+          } catch (err) {
+            sendResponse({ ok: false, error: err.message || String(err) });
+          }
+          break;
+        }
+
+        case 'MEETING_PARTICIPANTS_UPDATE': {
+          const meetingState = await getMeetingState();
+          const activeMeeting = meetingState.activeMeeting;
+          if (!activeMeeting) {
+            sendResponse({ ok: true, ignored: true });
+            break;
+          }
+          if (Number.isInteger(sender?.tab?.id) && Number.isInteger(activeMeeting.tabId) && sender.tab.id !== activeMeeting.tabId) {
+            sendResponse({ ok: true, ignored: true });
+            break;
+          }
+          const incoming = Array.isArray(message.participants) ? message.participants : [];
+          const existing = Array.isArray(activeMeeting.participants) ? activeMeeting.participants : [];
+          const merged = new Map();
+          for (const p of [...existing, ...incoming]) {
+            const name = String(p?.name || p?.displayName || '').replace(/\s+/g, ' ').trim();
+            if (!name || name.length > 100) continue;
+            const key = name.toLowerCase();
+            if (!merged.has(key)) merged.set(key, { name, email: String(p?.email || '') });
+          }
+          activeMeeting.participants = Array.from(merged.values()).slice(0, 50);
+          await chrome.storage.session.set({ activeMeeting });
+          sendResponse({ ok: true, participants: activeMeeting.participants });
+          break;
+        }
+
+        case 'MEETING_ENDED_BY_USER': {
+          const meetingState = await getMeetingState();
+          const activeMeeting = meetingState.activeMeeting;
+          const recording = await getRecordingState();
+          if (!recording?.isRecording || !activeMeeting) {
+            sendResponse({ ok: true, ignored: true });
+            break;
+          }
+          if (Number.isInteger(sender?.tab?.id) && Number.isInteger(activeMeeting.tabId) && sender.tab.id !== activeMeeting.tabId) {
+            sendResponse({ ok: true, ignored: true });
+            break;
+          }
+          const result = await finishActiveMeeting(message.reason || 'meeting-end-control');
+          sendResponse(result);
           break;
         }
 

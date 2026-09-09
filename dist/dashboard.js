@@ -167,11 +167,160 @@ function renderTranscript() {
   $('detailContent').innerHTML=`<div class="transcript"><div class="transcript-search"><input id="transcriptSearch" placeholder="Search in transcript…"></div><div id="transcriptLines">${lines.length?lines.map((line,i)=>`<div class="line"><time>${String(Math.floor(i/60)).padStart(2,'0')}:${String(i%60).padStart(2,'0')}</time><span class="speaker">Speaker</span><span class="text">${esc(line)}</span></div>`).join(''):'<div class="state-card">No transcript captured.</div>'}</div></div>`;
   $('transcriptSearch')?.addEventListener('input',e=>{const q=e.target.value.toLowerCase();document.querySelectorAll('.line').forEach(l=>l.classList.toggle('hidden',q&&!l.textContent.toLowerCase().includes(q)));});
 }
-function renderChat() {
-  $('detailContent').innerHTML=`<div class="chat"><div id="chatHistory" class="chat-history"><div class="bubble ai">Ask anything about this meeting. I will answer using the saved transcript and meeting summary.</div></div><div class="chat-form"><input id="chatInput" placeholder="What were the main decisions?"><button id="chatSend" class="primary-btn">Ask AI</button></div></div>`;
-  $('chatSend').addEventListener('click',sendChat); $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter')sendChat();});
+function renderMarkdownDash(md) {
+  if (!md) return '';
+  let text = String(md).replace(/\r\n/g, '\n');
+  const codeBlocks = [];
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, __, code) => {
+    const i = codeBlocks.length;
+    codeBlocks.push(`<pre class="md-code"><code>${esc(code.trimEnd())}</code></pre>`);
+    return `\n%%CODEBLOCK${i}%%\n`;
+  });
+  text = text.replace(/`([^`\n]+)`/g, (_, c) => `<code class="md-inline">${esc(c)}</code>`);
+  text = text.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  const lines = text.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+    const cb = trimmed.match(/^%%CODEBLOCK(\d+)%%$/);
+    if (cb) { out.push(codeBlocks[Number(cb[1])]); i++; continue; }
+    const h = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (h) { out.push(`<h${h[1].length} class="md-h${h[1].length}">${h[2]}</h${h[1].length}>`); i++; continue; }
+    if (/^[-*]\s+\[[ xX]\]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s+\[[ xX]\]\s+/.test(lines[i].trim())) {
+        const m = lines[i].trim().match(/^[-*]\s+\[([ xX])\]\s+(.+)$/);
+        if (m) items.push(`<li class="md-task ${m[1].toLowerCase()==='x'?'done':''}"><span class="md-check">${m[1].toLowerCase()==='x'?'☑':'☐'}</span><span class="md-task-text">${m[2]}</span></li>`);
+        i++;
+      }
+      out.push(`<ul class="md-task-list">${items.join('')}</ul>`); continue;
+    }
+    if (/^[-*•]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^[-*•]\s+/.test(lines[i].trim())) { items.push(`<li>${lines[i].trim().replace(/^[-*•]\s+/, '')}</li>`); i++; }
+      out.push(`<ul class="md-ul">${items.join('')}</ul>`); continue;
+    }
+    if (/^\d+[.)]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i].trim())) { items.push(`<li>${lines[i].trim().replace(/^\d+[.)]\s+/, '')}</li>`); i++; }
+      out.push(`<ol class="md-ol">${items.join('')}</ol>`); continue;
+    }
+    if (/^>\s?/.test(trimmed)) {
+      const parts = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) { parts.push(lines[i].trim().replace(/^>\s?/, '')); i++; }
+      out.push(`<blockquote class="md-quote">${parts.join(' ')}</blockquote>`); continue;
+    }
+    if (/^[🔵🟢🔴🟡]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^[🔵🟢🔴🟡]\s+/.test(lines[i].trim())) {
+        const m = lines[i].trim().match(/^([🔵🟢🔴🟡])\s+(.+)$/);
+        if (m) items.push(`<div class="md-decision"><span class="md-dec-icon">${m[1]}</span><div class="md-dec-body">${m[2]}</div></div>`);
+        i++;
+      }
+      out.push(`<div class="md-decisions">${items.join('')}</div>`); continue;
+    }
+    if (!trimmed) { i++; continue; }
+    const buf = [];
+    while (i < lines.length) {
+      const t = lines[i].trim();
+      if (!t || /^(#{1,3})\s+/.test(t) || /^[-*•]\s+/.test(t) || /^\d+[.)]\s+/.test(t) || /^>\s?/.test(t) || /^%%CODEBLOCK/.test(t) || /^[🔵🟢🔴🟡]\s+/.test(t)) break;
+      buf.push(t); i++;
+    }
+    if (buf.length) out.push(`<p>${buf.join(' ')}</p>`);
+  }
+  return out.join('\n');
 }
-async function sendChat(){const input=$('chatInput');const q=input.value.trim();if(!q)return;const history=$('chatHistory');history.insertAdjacentHTML('beforeend',`<div class="bubble user">${esc(q)}</div><div class="bubble ai">Thinking…</div>`);input.value='';const pending=history.lastElementChild;try{const data=await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}/chat`,{method:'POST',body:JSON.stringify({userId,question:q})});pending.textContent=data.answer;}catch(error){pending.textContent=error.message;}}
+
+function buildAiCardDash(markdown, { question = '', promptId = null, isError = false } = {}) {
+  const body = isError ? `<p class="ai-error-text">${esc(markdown)}</p>` : renderMarkdownDash(markdown);
+  return `<article class="ai-card ${isError ? 'ai-card-error' : ''}" data-raw="${esc(markdown)}">
+    <header class="ai-card-header">
+      <div class="ai-card-title"><span class="ai-card-icon">✦</span><span>AI Answer</span><span class="ai-context-badge">Transcript · AI Summary</span></div>
+      <div class="ai-card-actions">
+        <button type="button" class="ai-action-btn ai-copy">Copy</button>
+        <button type="button" class="ai-action-btn ai-regen" data-q="${esc(question)}" data-prompt-id="${esc(promptId || '')}">Regenerate</button>
+      </div>
+    </header>
+    <div class="ai-card-body md-content">${body}</div>
+  </article>`;
+}
+
+function renderChat() {
+  $('detailContent').innerHTML = `<div class="chat">
+    <div class="prompt-gallery">
+      <h3 class="prompt-gallery-title">✦ What will you create today?</h3>
+      <p class="chat-intro muted">Answers use only this meeting’s transcript and summary.</p>
+      <div class="prompt-grid">
+        <button type="button" class="prompt-card" data-prompt-id="short_summary"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Short summary</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="detailed_summary"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Detailed summary</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="detailed_with_citations"><span class="prompt-card-icon">✦</span><span class="prompt-card-label">Detailed summary with citation</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="summary_and_actions"><span class="prompt-card-icon">📋</span><span class="prompt-card-label">Summary and Action items</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="team_sync"><span class="prompt-card-icon">👥</span><span class="prompt-card-label">Team Sync – Project Updates</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="smart_advice"><span class="prompt-card-icon">💡</span><span class="prompt-card-label">Smart AI Advice</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="generate_tasks"><span class="prompt-card-icon">☑</span><span class="prompt-card-label">Generate tasks</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="prepare_slides"><span class="prompt-card-icon">▶</span><span class="prompt-card-label">Prepare slides</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="key_decisions"><span class="prompt-card-icon">🔵</span><span class="prompt-card-label">Key decisions</span></button>
+        <button type="button" class="prompt-card" data-prompt-id="next_steps"><span class="prompt-card-icon">→</span><span class="prompt-card-label">Next steps</span></button>
+      </div>
+    </div>
+    <div id="chatHistory" class="chat-history"></div>
+    <div class="chat-form"><input id="chatInput" placeholder="Ask about this meeting…"><button id="chatSend" class="primary-btn">Ask AI</button></div>
+  </div>`;
+  $('chatSend').addEventListener('click', () => sendChat());
+  $('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+  document.querySelectorAll('.prompt-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const promptId = btn.getAttribute('data-prompt-id');
+      const label = btn.querySelector('.prompt-card-label')?.textContent?.trim() || promptId;
+      sendChat({ promptId, label });
+    });
+  });
+  const history = $('chatHistory');
+  history.addEventListener('click', async e => {
+    const copyBtn = e.target.closest('.ai-copy');
+    if (copyBtn) {
+      const card = copyBtn.closest('.ai-card');
+      const raw = card?.getAttribute('data-raw') || card?.querySelector('.ai-card-body')?.innerText || '';
+      try { await navigator.clipboard.writeText(raw); copyBtn.textContent = 'Copied'; setTimeout(() => copyBtn.textContent = 'Copy', 1200); } catch {}
+      return;
+    }
+    const regenBtn = e.target.closest('.ai-regen');
+    if (regenBtn) {
+      const q = regenBtn.getAttribute('data-q');
+      const pid = regenBtn.getAttribute('data-prompt-id');
+      if (pid) sendChat({ promptId: pid, label: q });
+      else if (q) { $('chatInput').value = q; sendChat(); }
+    }
+  });
+}
+
+async function sendChat(opts = {}) {
+  const input = $('chatInput');
+  const promptId = opts.promptId || null;
+  const label = opts.label || '';
+  const q = promptId ? (label || promptId) : (input?.value || '').trim();
+  if (!promptId && !q) return;
+  const history = $('chatHistory');
+  history.insertAdjacentHTML('beforeend', `<div class="bubble user">${esc(q)}</div>`);
+  history.insertAdjacentHTML('beforeend', `<article class="ai-card ai-thinking"><header class="ai-card-header"><div class="ai-card-title"><span class="ai-card-icon">✦</span><span>AI Answer</span></div></header><div class="ai-card-body"><div class="ai-thinking-row"><span class="ai-dots"><i></i><i></i><i></i></span><span>Thinking…</span></div></div></article>`);
+  const pending = history.lastElementChild;
+  if (input) input.value = '';
+  history.scrollTop = history.scrollHeight;
+  try {
+    const body = promptId ? { userId, promptId, question: q } : { userId, question: q };
+    const data = await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}/chat`, {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    pending.outerHTML = buildAiCardDash(data.answer || 'No answer.', { question: q, promptId: data.promptId || promptId });
+  } catch (error) {
+    pending.outerHTML = buildAiCardDash(error.message, { question: q, promptId, isError: true });
+  }
+  history.scrollTop = history.scrollHeight;
+}
 function renderNotes(){ $('detailContent').innerHTML=`<div class="section-card"><h3>Private notes</h3><textarea id="notes" class="notes" placeholder="Add your notes…">${esc(activeMeeting.notes||'')}</textarea><div style="margin-top:10px"><button id="saveNotes" class="primary-btn">Save notes</button></div></div>`; $('saveNotes').addEventListener('click',async()=>{try{const data=await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}`,{method:'PATCH',body:JSON.stringify({userId,notes:$('notes').value})});activeMeeting=data.meeting;toast('Notes saved.');}catch(error){toast(error.message);}}); }
 async function retryAnalysis(){try{const data=await api(`/api/meetings/${encodeURIComponent(activeMeeting.externalId)}/analyze`,{method:'POST',body:JSON.stringify({userId})});activeMeeting=data.meeting;renderTab();toast('AI summary updated.');}catch(error){toast(error.message);}}
 function pdfSafe(value='') {

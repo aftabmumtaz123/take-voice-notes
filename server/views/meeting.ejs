@@ -25,20 +25,73 @@
       </div>
     </header>
 
-    <div class="hero-card card">
-      <div class="kicker"><%= meeting.platform || "Manual" %> · MEETING NOTES</div>
-      <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
-      <p class="meta">
-        <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
-        · <%= mins %> minutes
-        · <%= ai.summary ? '✦ AI summary ready' : 'Transcript saved' %>
-      </p>
-      <div class="feature-pills">
-        <span class="fpill">✓ Transcript</span>
-        <span class="fpill">✓ AI Summary</span>
-        <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Action Items</span>
-        <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Ask AI</span>
+    <%
+      const parts = Array.isArray(meeting.participants) ? meeting.participants.filter(function(p){ return p && p.name; }) : [];
+      let talkTotal = parts.reduce(function(s, p){ return s + (Number(p.talkSeconds) || 0); }, 0);
+      if (!talkTotal && mins) talkTotal = mins * 60;
+      const partColors = ['#e07a3d', '#6bbf8a', '#e8a0a0', '#5b8def', '#c084fc', '#fbbf24'];
+      function conicStops(list) {
+        if (!list.length) return '#e5e7eb 0 100%';
+        let acc = 0;
+        const total = list.reduce(function(s, p){ return s + (Number(p.talkPercent) || Number(p.talkSeconds) || 1); }, 0) || 1;
+        return list.map(function(p, i) {
+          const share = ((Number(p.talkPercent) || ((Number(p.talkSeconds) || 1) / total * 100)));
+          const start = acc;
+          acc += share;
+          const c = p.color || partColors[i % partColors.length];
+          return c + ' ' + start + '% ' + acc + '%';
+        }).join(', ');
+      }
+    %>
+
+    <div class="meeting-top-grid">
+      <div class="hero-card card">
+        <div class="kicker"><%= meeting.platform || "Manual" %> · MEETING NOTES</div>
+        <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
+        <p class="meta">
+          <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
+          · <%= mins %> minutes
+          · <%= ai.summary ? '✦ AI summary ready' : 'Transcript saved' %>
+        </p>
+        <div class="feature-pills">
+          <span class="fpill">✓ Transcript</span>
+          <span class="fpill">✓ AI Summary</span>
+          <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Action Items</span>
+          <span class="fpill <%= u.isPaid ? '' : 'pro' %>"><%= u.isPaid ? '✓' : '✦ PRO' %> Ask AI</span>
+        </div>
       </div>
+
+      <aside class="card participants-card">
+        <div class="participants-head">
+          <strong>Participants</strong>
+          <span class="part-count"><%= parts.length || 0 %></span>
+        </div>
+        <div class="participants-donut-wrap">
+          <div class="participants-donut" style="background: conic-gradient(<%= conicStops(parts) %>);">
+            <div class="participants-donut-hole">
+              <strong><%= mins || 0 %></strong>
+              <span>min</span>
+            </div>
+          </div>
+        </div>
+        <% if (parts.length) { %>
+          <ul class="participants-list">
+            <% parts.forEach(function(p, i) {
+              const pct = p.talkPercent || (talkTotal ? Math.round((p.talkSeconds / talkTotal) * 100) : 0);
+              const c = p.color || partColors[i % partColors.length];
+            %>
+              <li>
+                <span class="part-dot" style="background:<%= c %>"></span>
+                <span class="part-name" title="<%= p.name %>"><%= p.name %></span>
+                <span class="part-bar"><span style="width:<%= Math.min(100, pct) %>%;background:<%= c %>"></span></span>
+                <span class="part-pct"><%= pct %><%= p.talkSeconds ? '' : '%' %><% if (p.talkSeconds) { %><% } %>%</span>
+              </li>
+            <% }) %>
+          </ul>
+        <% } else { %>
+          <p class="muted" style="font-size:13px;margin:8px 0 0">Participant talk-time appears when speaker labels are in the transcript or sent from the extension / Google Meet.</p>
+        <% } %>
+      </aside>
     </div>
 
     <div class="tabs" data-tabs>
@@ -257,16 +310,55 @@
             <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
           </div>
         <% } else { %>
-          <p class="muted">Ask anything about this meeting. Answers use only the saved transcript and summary.</p>
-          <div class="ask-suggestions">
-            <button type="button" class="chip ask-sugg" data-q="Give me a 5-bullet summary of this meeting">5-bullet summary</button>
-            <button type="button" class="chip ask-sugg" data-q="What were the key decisions?">Key decisions?</button>
-            <button type="button" class="chip ask-sugg" data-q="What action items were assigned? List them as tasks with owners if mentioned.">Action items?</button>
-            <button type="button" class="chip ask-sugg" data-q="What are the next steps?">Next steps?</button>
+          <div class="prompt-gallery" id="promptGallery">
+            <h2 class="prompt-gallery-title">✦ What will you create today?</h2>
+            <p class="muted prompt-gallery-sub">Answers use only this meeting’s transcript and summary.</p>
+            <div class="prompt-grid">
+              <button type="button" class="prompt-card" data-prompt-id="short_summary">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Short summary</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="detailed_summary">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Detailed summary</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="detailed_with_citations">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Detailed summary with citation</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="summary_and_actions">
+                <span class="prompt-card-icon">📋</span>
+                <span class="prompt-card-label">Summary and Action items</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="team_sync">
+                <span class="prompt-card-icon">👥</span>
+                <span class="prompt-card-label">Team Sync – Project Updates</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="smart_advice">
+                <span class="prompt-card-icon">💡</span>
+                <span class="prompt-card-label">Smart AI Advice</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="generate_tasks">
+                <span class="prompt-card-icon">☑</span>
+                <span class="prompt-card-label">Generate tasks</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="prepare_slides">
+                <span class="prompt-card-icon">▶</span>
+                <span class="prompt-card-label">Prepare slides</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="key_decisions">
+                <span class="prompt-card-icon">🔵</span>
+                <span class="prompt-card-label">Key decisions</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="next_steps">
+                <span class="prompt-card-icon">→</span>
+                <span class="prompt-card-label">Next steps</span>
+              </button>
+            </div>
           </div>
           <div id="chatHistory" class="chat-history"></div>
           <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">
-            <input id="chatInput" type="text" placeholder="Ask anything about this meeting…" autocomplete="off" />
+            <input id="chatInput" type="text" placeholder="Ask about this meeting…" autocomplete="off" />
             <button type="submit" class="btn-primary">Ask AI</button>
           </form>
         <% } %>

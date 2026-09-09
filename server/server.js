@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   registerUser,
@@ -26,7 +27,8 @@ import {
   isPaidPlan,
   planBadgeLabel,
   isUnlimited,
-  formatLimit
+  formatLimit,
+  findOrCreateGoogleUser
 } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +37,15 @@ const app = express();
 const port = Number(process.env.PORT || 4000);
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ai_note_taker';
 const geminiKey = process.env.GEMINI_API_KEY || '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${port}/api/google/callback`;
+const GOOGLE_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/calendar.readonly'
+].join(' ');
 const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 // Try these in order when the preferred model is overloaded / unavailable
 const GEMINI_FALLBACKS = [
@@ -95,7 +106,13 @@ const meetingSchema = new mongoose.Schema({
   startedAt: Date,
   endedAt: Date,
   duration: { type: Number, default: 0 },
-  participants: [{ name: String, email: String }],
+  participants: [{
+    name: { type: String, default: '' },
+    email: { type: String, default: '' },
+    talkSeconds: { type: Number, default: 0 },
+    talkPercent: { type: Number, default: 0 },
+    color: { type: String, default: '' }
+  }],
   fullTranscript: { type: String, default: '' },
   transcript: [{ speaker: String, text: String, startTime: Number, endTime: Number, confidence: Number }],
   ai: {
@@ -141,7 +158,15 @@ function normalizeMeetingBody(body = {}) {
     startedAt: body.startedAt ? new Date(body.startedAt) : new Date(),
     endedAt: body.endedAt ? new Date(body.endedAt) : new Date(),
     duration: Math.max(0, Number(body.duration || 0)),
-    participants: Array.isArray(body.participants) ? body.participants.slice(0, 100) : [],
+    participants: Array.isArray(body.participants)
+      ? body.participants.slice(0, 100).map((p) => ({
+          name: String(p?.name || p?.displayName || '').slice(0, 120),
+          email: String(p?.email || '').slice(0, 200),
+          talkSeconds: Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0)),
+          talkPercent: Math.max(0, Math.min(100, Number(p?.talkPercent || 0))),
+          color: String(p?.color || '').slice(0, 20)
+        }))
+      : [],
     fullTranscript: String(body.fullTranscript || ''),
     transcript: Array.isArray(body.transcript) ? body.transcript : [],
     notes: String(body.notes || '')
@@ -422,31 +447,139 @@ ${transcript}`;
   throw lastErr || new Error('Gemini analysis failed');
 }
 
-async function answerMeetingQuestion(meeting, question) {
-  const prompt = `You are a meeting assistant. Answer the user's question using ONLY the meeting context below.
-If the answer is not present in the transcript or summary, say clearly that it is not available. Do not invent facts, names, deadlines, or owners.
+const MEETING_PROMPT_TEMPLATES = {
+  short_summary: {
+    id: 'short_summary',
+    label: 'Short summary',
+    icon: '✦',
+    instruction: `Write a SHORT executive summary of this meeting in 1–2 tight paragraphs (or 5–7 bullets if clearer).
+Focus only on: purpose, main outcomes, and the most important next step.
+Do not include long discussion detail.`
+  },
+  detailed_summary: {
+    id: 'detailed_summary',
+    label: 'Detailed summary',
+    icon: '✦',
+    instruction: `Write a DETAILED meeting summary in Markdown.
+Use sections:
+## Overview
+## Discussion
+## Decisions
+## Action items
+## Open questions / next steps
+Walk through the conversation in order. Preserve concrete numbers, names (only if spoken), deadlines, and requirements. Aim for 6–12 substantial paragraphs or equivalent structured sections.`
+  },
+  detailed_with_citations: {
+    id: 'detailed_with_citations',
+    label: 'Detailed summary with citation',
+    icon: '✦',
+    instruction: `Write a detailed summary with light citations back to the transcript.
+For important claims, add a short quote or paraphrase in italics after the point, e.g. _(“…quote…”)_ .
+Structure with ## headings. Include Overview, Key discussion points, Decisions, and Next steps.`
+  },
+  summary_and_actions: {
+    id: 'summary_and_actions',
+    label: 'Summary and Action items',
+    icon: '📋',
+    instruction: `Produce:
+## Summary
+2–4 paragraphs covering purpose and outcomes.
+## Action items
+A checkbox list: - [ ] Task (Owner: Name if known; Deadline: if known)
+Only include real action items from the transcript. If none, say so under the heading.`
+  },
+  team_sync: {
+    id: 'team_sync',
+    label: 'Team Sync – Project Updates',
+    icon: '👥',
+    instruction: `Format as a team sync update in Markdown:
+## Project status
+## What was discussed
+## Blockers / risks
+## Decisions
+## Action items
+- [ ] Task (Owner)
+Keep it scannable for someone who missed the meeting.`
+  },
+  smart_advice: {
+    id: 'smart_advice',
+    label: 'Smart AI Advice',
+    icon: '💡',
+    instruction: `Based only on this meeting, give practical advice:
+## What went well
+## Risks or gaps
+## Recommended next moves
+## Questions the team should resolve
+Be concrete and grounded in the transcript. Do not invent external facts.`
+  },
+  generate_tasks: {
+    id: 'generate_tasks',
+    label: 'Generate tasks',
+    icon: '☑',
+    instruction: `Extract a clean task list from the meeting.
+Use only checkbox items:
+- [ ] Task description — Owner: … — Deadline: … (omit owner/deadline if unknown)
+Group under ## Tasks if helpful. No fluff — tasks only, or a short note if none exist.`
+  },
+  prepare_slides: {
+    id: 'prepare_slides',
+    label: 'Prepare slides',
+    icon: '▶',
+    instruction: `Turn this meeting into a slide outline in Markdown.
+Use ## Slide 1: Title, ## Slide 2: … etc.
+Each slide: 3–6 short bullets max. Cover: title/context, key points, decisions, action items, next steps.
+Suitable for a 5–8 slide recap deck.`
+  },
+  key_decisions: {
+    id: 'key_decisions',
+    label: 'Key decisions',
+    icon: '🔵',
+    instruction: `List only the decisions made in this meeting.
+Format each as:
+🔵 **Decision** — brief rationale if stated
+If none, say no explicit decisions were recorded.`
+  },
+  next_steps: {
+    id: 'next_steps',
+    label: 'Next steps',
+    icon: '→',
+    instruction: `List concrete next steps and follow-ups from the meeting as:
+- [ ] Step (Owner if known)
+Include open questions that block progress under ## Open questions.`
+  }
+};
 
-Format your answer as clean Markdown so it renders well in a product UI:
-- Use ## or ### headings for sections when helpful.
-- Use **bold** for emphasis on key terms.
-- Use bullet lists (- item) for key points.
-- For action items / tasks, use checkbox style: - [ ] Task description (Owner: Name) when applicable.
-- For decisions, prefer short headed bullets or lines like: 🔵 **Topic** — decision text
-- For short factual answers, keep it concise (one short section is fine). Do not over-format simple questions.
-- For longer answers, start with a brief "Key Takeaways" bullet list (3–5 bullets), then a "Detailed Answer" section.
+async function answerMeetingQuestion(meeting, question, promptId = null) {
+  const template = promptId ? MEETING_PROMPT_TEMPLATES[promptId] : null;
+  const taskBlock = template
+    ? `PROMPT TEMPLATE: ${template.label}\n\nYOUR TASK:\n${template.instruction}`
+    : `QUESTION:\n${question}`;
+
+  const prompt = `You are a meeting assistant. Use ONLY the meeting context below.
+If information is not present in the transcript or summary, say so clearly. Do not invent facts, names, deadlines, or owners.
+
+Format your answer as clean Markdown for a product UI:
+- Use ## / ### headings when helpful.
+- Use **bold** for key terms.
+- Use bullet lists for key points.
+- For tasks/action items use: - [ ] Task (Owner: Name) when applicable.
+- For decisions you may use: 🔵 **Topic** — decision text
 - Never wrap the entire answer in a code fence.
+- Do not invent content beyond the meeting context.
 
 MEETING: ${meeting.title}
 SUMMARY: ${meeting.ai?.summary || ''}
+DETAILED SUMMARY: ${meeting.ai?.detailedSummary || ''}
 KEY POINTS: ${(meeting.ai?.keyPoints || []).join(' | ')}
 DECISIONS: ${(meeting.ai?.decisions || []).join(' | ')}
 ACTION ITEMS: ${JSON.stringify(meeting.ai?.actionItems || [])}
 TRANSCRIPT:
 ${meeting.fullTranscript || ''}
 
-QUESTION:
-${question}`;
-  console.log(`[chat] question="${String(question).slice(0, 120)}" meeting=${meeting.externalId || meeting._id}`);
+${taskBlock}`;
+
+  const label = template ? template.id : String(question).slice(0, 120);
+  console.log(`[chat] prompt="${label}" meeting=${meeting.externalId || meeting._id}`);
   return (await callGemini(prompt, { purpose: 'meeting-chat' })).trim() || 'No answer generated.';
 }
 
@@ -676,10 +809,25 @@ app.get('/app/usage', requireAuth, async (req, res) => {
   const ctx = await loadUserPlanContext(req.user);
   const now = new Date();
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const daysLeft = Math.max(1, Math.ceil((end - now) / 86400000));
+  const [recentUsage, plans] = await Promise.all([
+    Meeting.find({ userId: req.user.id, createdAt: { $gte: monthStart } })
+      .sort({ createdAt: -1 }).limit(10)
+      .select('title startedAt createdAt duration ai.summary ai.actionItems')
+      .lean().catch(() => []),
+    Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => [])
+  ]);
+  const usageHistory = recentUsage.map((m) => ({
+    title: m.title || 'Untitled meeting',
+    date: m.startedAt || m.createdAt,
+    minutes: Math.round((m.duration || 0) / 60),
+    summary: Boolean(m.ai?.summary),
+    actionItems: Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0
+  }));
   res.render('usage', {
     user: req.user, settings, plan: ctx.plan, usage: ctx.usage, daysLeft,
-    error: null, success: null
+    usageHistory, plans, error: null, success: null
   });
 });
 
@@ -687,7 +835,14 @@ app.get('/app/usage', requireAuth, async (req, res) => {
 app.get('/login', optionalAuth, async (req, res) => {
   if (req.user) return res.redirect(postLoginRedirect(req.user));
   const settings = await getSiteSettings().catch(() => null);
-  res.render('login', { user: null, error: null, success: null, formUsername: '', settings });
+  res.render('login', {
+    user: null,
+    error: req.query.error || null,
+    success: null,
+    formUsername: '',
+    settings,
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET)
+  });
 });
 
 app.post('/login', async (req, res) => {
@@ -706,8 +861,107 @@ app.post('/login', async (req, res) => {
       error: error.message,
       success: null,
       formUsername: req.body.username || '',
-      settings
+      settings,
+      googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET)
     });
+  }
+});
+
+// ─── Google OAuth ────────────────────────────────────────────────────────────
+app.get('/api/google/start', (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.redirect('/login?error=' + encodeURIComponent('Google sign-in is not configured.'));
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  res.setHeader(
+    'Set-Cookie',
+    `google_oauth_state=${encodeURIComponent(state)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`
+  );
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope: GOOGLE_SCOPES,
+    access_type: 'offline',
+    prompt: 'consent',
+    state
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+function parseCookieHeader(header = '') {
+  const out = {};
+  String(header || '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const i = part.indexOf('=');
+      if (i === -1) return;
+      out[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1));
+    });
+  return out;
+}
+
+app.get('/api/google/callback', async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return res.redirect('/login?error=' + encodeURIComponent('Google sign-in is not configured.'));
+    }
+    const { code, state, error } = req.query;
+    if (error) {
+      return res.redirect('/login?error=' + encodeURIComponent(String(error)));
+    }
+    const cookies = parseCookieHeader(req.headers.cookie);
+    const expected = cookies.google_oauth_state;
+    if (!code || !state || !expected || state !== expected) {
+      return res.redirect('/login?error=' + encodeURIComponent('Invalid OAuth state. Try again.'));
+    }
+    res.setHeader('Set-Cookie', 'google_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_REDIRECT_URI,
+        grant_type: 'authorization_code'
+      })
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.access_token) {
+      console.error('[google] token exchange failed', tokenData);
+      return res.redirect('/login?error=' + encodeURIComponent(tokenData.error_description || 'Google token exchange failed.'));
+    }
+
+    const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const profile = await profileRes.json().catch(() => ({}));
+    if (!profileRes.ok || !profile.sub) {
+      return res.redirect('/login?error=' + encodeURIComponent('Could not load Google profile.'));
+    }
+
+    const result = await findOrCreateGoogleUser({
+      googleId: profile.sub,
+      email: profile.email,
+      displayName: profile.name || profile.email,
+      avatarUrl: profile.picture,
+      tokens: {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token || '',
+        expiryDate: Date.now() + (Number(tokenData.expires_in) || 3600) * 1000,
+        scope: tokenData.scope || GOOGLE_SCOPES
+      }
+    });
+    setSessionCookie(res, result.token);
+    console.log(`[auth] google login @${result.user.username}`);
+    res.redirect(postLoginRedirect(result.user));
+  } catch (err) {
+    console.error('[google] callback error', err.message);
+    res.redirect('/login?error=' + encodeURIComponent(err.message || 'Google sign-in failed.'));
   }
 });
 
@@ -1943,6 +2197,24 @@ app.post('/account/rotate-key', requireAuth, async (req, res) => {
 });
 
 
+app.get('/meetings/processing/:id', requireAuth, async (req, res) => {
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const title = String(req.query.title || 'Your meeting').slice(0, 160);
+    res.render('meeting-processing', {
+      user: req.user,
+      meetingId: req.params.id,
+      title,
+      settings,
+      plan: ctx.plan,
+      usage: ctx.usage
+    });
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
 app.get('/meetings/:id/export.txt', requireAuth, async (req, res) => {
   try {
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
@@ -2212,9 +2484,94 @@ app.get('/api/meetings/:id', requireAuth, async (req, res) => {
   }
 });
 
+const PARTICIPANT_COLORS = ['#e07a3d', '#6bbf8a', '#e8a0a0', '#5b8def', '#c084fc', '#fbbf24', '#34d399'];
+
+function deriveParticipantsFromTranscript(transcript = [], fullText = '', durationSec = 0) {
+  const times = {};
+  if (Array.isArray(transcript) && transcript.length) {
+    for (const row of transcript) {
+      const name = String(row.speaker || row.name || 'Speaker').trim() || 'Speaker';
+      const start = Number(row.startTime || 0);
+      const end = Number(row.endTime || start);
+      const sec = Math.max(0, end - start) || Math.max(1, String(row.text || '').split(/\s+/).length * 0.4);
+      times[name] = (times[name] || 0) + sec;
+    }
+  } else if (fullText) {
+    // Heuristic: "Name: text" lines
+    const lines = String(fullText).split(/\n+/);
+    for (const line of lines) {
+      const m = line.match(/^([A-Z][A-Za-z0-9 ._-]{1,40})\s*:\s+(.+)$/);
+      if (!m) continue;
+      const name = m[1].trim();
+      const sec = Math.max(1, m[2].split(/\s+/).length * 0.4);
+      times[name] = (times[name] || 0) + sec;
+    }
+  }
+  const entries = Object.entries(times);
+  if (!entries.length) return [];
+  const total = entries.reduce((s, [, v]) => s + v, 0) || 1;
+  const scale = durationSec > 0 ? durationSec / total : 1;
+  return entries
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([name, sec], i) => {
+      const talkSeconds = Math.round(sec * scale);
+      return {
+        name,
+        email: '',
+        talkSeconds,
+        talkPercent: Math.round((sec / total) * 1000) / 10,
+        color: PARTICIPANT_COLORS[i % PARTICIPANT_COLORS.length]
+      };
+    });
+}
+
 app.post('/api/meetings/complete', requireAuth, async (req, res) => {
   try {
     const data = normalizeMeetingBody({ ...req.body, userId: req.user.id });
+    if (!data.participants?.length) {
+      data.participants = deriveParticipantsFromTranscript(
+        data.transcript,
+        data.fullTranscript,
+        data.duration
+      );
+    } else {
+      const total = data.participants.reduce((s, p) => s + (p.talkSeconds || 0), 0);
+      data.participants = data.participants.map((p, i) => ({
+        ...p,
+        talkPercent: p.talkPercent || (total ? Math.round((p.talkSeconds / total) * 1000) / 10 : 0),
+        color: p.color || PARTICIPANT_COLORS[i % PARTICIPANT_COLORS.length]
+      }));
+    }
+    // Idempotency guard for duplicate extension stop/start signals. A single
+    // real meeting can sometimes produce two different client session IDs
+    // when the meeting UI fires both a Leave event and a tab lifecycle event.
+    // If the same user/platform/URL started within a short window, fold the
+    // later payload into the existing session instead of creating a second row.
+    let canonicalExternalId = data.externalId;
+    const startedMs = new Date(data.startedAt).getTime();
+    const recentWindowMs = 2 * 60 * 1000;
+    const recentFilter = {
+      userId: data.userId,
+      platform: data.platform,
+      startedAt: {
+        $gte: new Date(startedMs - recentWindowMs),
+        $lte: new Date(startedMs + recentWindowMs)
+      },
+      ...(data.meetingUrl
+        ? { meetingUrl: data.meetingUrl }
+        : { title: data.title })
+    };
+    const duplicateCandidate = await Meeting.findOne({
+      ...recentFilter,
+      externalId: { $ne: data.externalId }
+    }).sort({ startedAt: -1 });
+    if (duplicateCandidate) {
+      canonicalExternalId = duplicateCandidate.externalId;
+      console.warn(`[api] duplicate session folded: ${data.externalId} -> ${canonicalExternalId}`);
+    }
+    data.externalId = canonicalExternalId;
+
     console.log(`[api] complete user=@${req.user.username} externalId=${data.externalId} transcriptChars=${data.fullTranscript.length}`);
 
     const meeting = await Meeting.findOneAndUpdate(
@@ -2288,11 +2645,22 @@ app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
       userId: req.user.id
     }).lean();
     if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
+    const promptId = req.body.promptId ? String(req.body.promptId).trim() : null;
     const question = String(req.body.question || '').trim();
-    if (!question) return res.status(400).json({ ok: false, error: 'Question is required.' });
-    const answer = await answerMeetingQuestion(meeting, question);
-    console.log(`[api] chat OK meeting=${req.params.id}`);
-    res.json({ ok: true, answer });
+    if (!promptId && !question) {
+      return res.status(400).json({ ok: false, error: 'Question or promptId is required.' });
+    }
+    if (promptId && !MEETING_PROMPT_TEMPLATES[promptId]) {
+      return res.status(400).json({ ok: false, error: 'Unknown prompt template.' });
+    }
+    const answer = await answerMeetingQuestion(meeting, question || MEETING_PROMPT_TEMPLATES[promptId]?.label, promptId);
+    console.log(`[api] chat OK meeting=${req.params.id} prompt=${promptId || 'free'}`);
+    res.json({
+      ok: true,
+      answer,
+      promptId: promptId || null,
+      promptLabel: promptId ? MEETING_PROMPT_TEMPLATES[promptId].label : null
+    });
   } catch (error) {
     console.error(`[api] chat FAIL meeting=${req.params.id}:`, error.message);
     res.status(500).json({ ok: false, error: error.message });

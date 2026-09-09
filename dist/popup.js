@@ -10,6 +10,24 @@ const emptyState = $('emptyState');
 const timerEl = $('timer');
 const wordCountEl = $('wordCount');
 const charCountEl = $('charCount');
+const timerLabel = $('timerLabel');
+const sourceLabel = $('sourceLabel');
+const micStatus = $('micStatus');
+const audioStatus = $('audioStatus');
+const transcriptLiveLabel = $('transcriptLiveLabel');
+const recordingPanel = $('recordingState');
+const readyPanel = $('readyState');
+const completedPanel = $('completedState');
+const processingPanel = $('processingState');
+const savedPanel = $('savedState');
+const participantCard = $('participantCard');
+const participantCount = $('participantCount');
+const participantList = $('participantList');
+const recordingPlatformText = $('recordingPlatformText');
+const processingTitle = $('processingTitle');
+const processingMessage = $('processingMessage');
+const savedMessage = $('savedMessage');
+const btnOpenMeeting = $('btnOpenMeeting');
 const scriptModeEl = $('scriptMode');
 const btnStart = $('btnStart');
 const btnStop = $('btnStop');
@@ -42,6 +60,9 @@ let pendingMeeting = null;
 let userIsEditing = false;
 let saveTimer = null;
 let timerInterval = null;
+let activeMeetingId = null;
+let lastCompletedMeetingId = null;
+let completedState = false;
 
 const send = (type, data = {}) => new Promise((resolve) => {
   chrome.runtime.sendMessage({ target:'background', type, ...data }, resolve);
@@ -115,15 +136,50 @@ function updateCounts() {
   emptyState.classList.toggle('hidden', Boolean(full));
 }
 
+function renderParticipants(participants = []) {
+  const list = Array.isArray(participants) ? participants.filter(p => String(p?.name || '').trim()) : [];
+  participantCard.classList.toggle('hidden', !list.length);
+  participantCount.textContent = `${list.length} participant${list.length === 1 ? '' : 's'}`;
+  participantList.innerHTML = list.map(p => {
+    const name = String(p.name).trim();
+    const initials = name.split(/\s+/).slice(0,2).map(x => x[0]).join('').toUpperCase();
+    return `<div class="participant-chip"><span class="participant-avatar">${initials || '?'}</span>${name}</div>`;
+  }).join('');
+}
+
+function showPanel(panel) {
+  [readyPanel, recordingPanel, completedPanel, processingPanel, savedPanel].forEach(p => p?.classList.add('hidden'));
+  panel?.classList.remove('hidden');
+}
+
 function updateUI() {
   const {isRecording,isPaused} = currentState;
+  if (completedState && !isRecording) {
+    statusBadge.textContent = 'Ready to save';
+    statusDot.className = 'status-dot ready';
+    transcriptLiveLabel.textContent = '● COMPLETE';
+    transcriptLiveLabel.className = 'live-label ready-label';
+    timerLabel.textContent = 'Recording stopped';
+    showPanel(completedPanel);
+    return;
+  }
   statusBadge.textContent = isRecording ? (isPaused ? 'Paused' : 'Recording') : 'Ready';
-  statusDot.className = `status-dot ${isRecording ? (isPaused?'paused':'recording') : 'ready'}`;
+  statusDot.className = `status-dot ${isRecording ? (isPaused ? 'paused' : 'recording') : 'ready'}`;
+  transcriptLiveLabel.textContent = isRecording ? (isPaused ? '● PAUSED' : '● LIVE') : '● READY';
+  transcriptLiveLabel.className = `live-label ${isRecording && !isPaused ? 'recording-label' : 'ready-label'}`;
   btnStart.disabled = isRecording;
   btnStop.disabled = !isRecording;
-  btnPause.disabled = !isRecording || isPaused;
-  btnResume.disabled = !isRecording || !isPaused;
+  btnPause.classList.toggle('hidden', !isRecording || isPaused);
+  btnResume.classList.toggle('hidden', !isRecording || !isPaused);
   providerLabel.textContent = currentState.provider || 'Auto';
+  if (isRecording) {
+    showPanel(recordingPanel);
+    recordingPlatformText.textContent = `${sourceLabel.textContent || 'Meeting'} · capturing live transcript`;
+    timerLabel.textContent = isPaused ? 'Recording paused' : 'Recording in progress';
+  } else {
+    showPanel(readyPanel);
+    timerLabel.textContent = 'Ready to capture';
+  }
 }
 
 function manageTimer() {
@@ -181,6 +237,20 @@ function renderMeetingDetected(meeting) {
   meetingDetected.classList.remove('hidden');
 }
 
+async function refreshCaptureStatus(snapshot = {}) {
+  try {
+    const permission = navigator.permissions?.query ? await navigator.permissions.query({ name: 'microphone' }) : null;
+    micStatus.textContent = permission?.state === 'granted' ? 'Connected' : (permission?.state === 'denied' ? 'Blocked' : 'Permission needed');
+    micStatus.className = permission?.state === 'granted' ? 'ok' : '';
+  } catch (_) {
+    micStatus.textContent = 'Available';
+  }
+  const meeting = snapshot.activeMeeting || snapshot.pendingMeeting;
+  sourceLabel.textContent = meeting?.platform || 'Manual';
+  audioStatus.textContent = currentState.isRecording ? (currentState.captureMeetingAudio ? 'Captured' : 'Mic only') : (meeting ? 'Ready' : 'Ready');
+  if (meeting?.participants) renderParticipants(meeting.participants);
+}
+
 function applyAuthUI(snapshot) {
   const loggedIn = Boolean(snapshot?.isLoggedIn && snapshot?.authUser);
   if (authGate) authGate.classList.toggle('hidden', loggedIn);
@@ -208,7 +278,10 @@ function applySnapshot(snapshot) {
   }
   setInterim(snapshot.interim || '');
   currentState = snapshot.recordingState || currentState;
+  activeMeetingId = snapshot.activeMeeting?.id || null;
+  completedState = Boolean(snapshot.activeMeeting && !currentState.isRecording && (snapshot.transcript || '').trim());
   renderMeetingDetected(snapshot.pendingMeeting || null);
+  refreshCaptureStatus(snapshot);
   updateUI(); manageTimer();
 }
 
@@ -315,7 +388,8 @@ btnStart.addEventListener('click', async () => {
     });
     return;
   }
-  currentState = result.state;
+  currentState = { ...result.state, captureMeetingAudio: Boolean(captureMeetingAudio) };
+  completedState = false;
   meetingDetected.classList.add('hidden');
   if (pendingMeeting && captureMeetingAudio) {
     console.log('[popup] Meeting audio capture enabled');
@@ -332,26 +406,12 @@ btnStop.addEventListener('click', async () => {
   try {
     const result = await send('STOP_RECORDING');
     if (result?.ok) {
-      currentState = { isRecording: false, isPaused: false, startTime: null, totalPausedMs: 0, provider: null };
+      currentState = { ...currentState, isRecording: false, isPaused: false, startTime: currentState.startTime, provider: null };
+      completedState = true;
       setInterim('');
       updateUI();
       manageTimer();
-      if (result.synced) {
-        showToast(
-          result.analysisReady
-            ? 'Meeting saved and AI summary is ready.'
-            : (result.analysisError
-              ? `Saved. AI analysis issue: ${result.analysisError}`
-              : 'Meeting saved to MongoDB.'),
-          { title: 'Recording stopped', type: result.analysisReady ? 'success' : 'info', duration: 4200 }
-        );
-      } else if (result.syncError) {
-        showToast(`Saved locally. Sync later: ${result.syncError}`, {
-          title: 'Backend offline',
-          type: 'warn',
-          duration: 5000
-        });
-      }
+      showToast('Recording stopped. Review the transcript, then save and analyze.', { title: 'Meeting captured', type: 'success', duration: 3500 });
     } else {
       showToast(result?.error || 'Stop failed.', { title: 'Error', type: 'error' });
     }
@@ -393,6 +453,9 @@ btnNewNote.addEventListener('click', async () => {
     sessionTitle.value = 'Untitled meeting';
     await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title: 'Untitled meeting' });
     currentState = {isRecording:false,isPaused:false,startTime:null,totalPausedMs:0,provider:null};
+    completedState = false;
+    activeMeetingId = null;
+    showPanel(readyPanel);
     updateUI(); manageTimer();
     showToast('New note started.', { type: 'success', duration: 2200 });
   }
@@ -410,6 +473,9 @@ btnClear.addEventListener('click', async () => {
   const result = await send('CLEAR_NOTE');
   if (result?.ok) {
     setTranscript(''); setInterim('');
+    completedState = false;
+    activeMeetingId = null;
+    updateUI();
     showToast('Transcript cleared.', { type: 'success', duration: 2500 });
   }
 });
@@ -452,71 +518,47 @@ btnSaveAnalyze.addEventListener('click', async () => {
   const text = transcriptArea.value.trim();
   const title = sessionTitle.value.trim() || 'Untitled meeting';
   if (!text) {
-    showToast('Type or paste notes in the transcript box first.', {
-      title: 'Nothing to save',
-      type: 'info',
-      duration: 3200
-    });
+    showToast('Add some transcript text before saving.', { title: 'Nothing to save', type: 'info', duration: 3200 });
     return;
   }
-
+  showPanel(processingPanel);
+  statusBadge.textContent = 'Analyzing';
+  statusDot.className = 'status-dot recording';
+  processingTitle.textContent = 'Analyzing meeting…';
+  processingMessage.textContent = 'Saving your transcript and generating meeting intelligence.';
   btnSaveAnalyze.disabled = true;
-  const originalLabel = btnSaveAnalyze.innerHTML;
-  btnSaveAnalyze.innerHTML = '<span class="btn-icon">…</span> Saving…';
-
   try {
-    // Persist any in-progress edits before save
-    await chrome.storage.local.set({
-      currentTranscript: text,
-      noteTitle: title,
-      lastUpdated: Date.now()
-    });
-
-    const result = await send('SAVE_AND_ANALYZE', {
-      transcript: text,
-      title,
-      platform: pendingMeeting?.platform || 'Manual'
-    });
-
-    if (!result?.ok) {
-      showToast(result?.error || 'Could not save to the backend.', {
-        title: 'Save failed',
-        type: 'error',
-        duration: 5500
-      });
-      return;
-    }
-
-    if (result.synced) {
-      const aiNote = result.analysisReady
-        ? 'AI summary is ready.'
-        : (result.analysisError
-          ? `Saved, but AI analysis failed: ${result.analysisError}`
-          : 'Saved. AI analysis may still be processing.');
-      showToast(aiNote, {
-        title: 'Saved to MongoDB',
-        type: result.analysisReady ? 'success' : 'warn',
-        duration: 4500
-      });
-    } else {
-      showToast(
-        result.syncError
-          ? `Queued offline. Will retry when the server is back. (${result.syncError})`
-          : 'Queued offline. Start the server to sync.',
-        { title: 'Saved locally', type: 'warn', duration: 5500 }
-      );
-    }
+    await chrome.storage.local.set({ currentTranscript: text, noteTitle: title, lastUpdated: Date.now() });
+    const result = completedState && activeMeetingId
+      ? await send('SAVE_STOPPED_MEETING')
+      : await send('SAVE_AND_ANALYZE', { transcript: text, title, platform: pendingMeeting?.platform || 'Manual' });
+    if (!result?.ok) throw new Error(result?.error || 'Could not save the meeting.');
+    lastCompletedMeetingId = result.meetingId || activeMeetingId;
+    if (btnOpenMeeting) btnOpenMeeting.classList.toggle('hidden', !lastCompletedMeetingId);
+    completedState = false;
+    currentState = { isRecording:false, isPaused:false, startTime:null, totalPausedMs:0, provider:null, captureMeetingAudio:false };
+    showPanel(savedPanel);
+    statusBadge.textContent = 'Saved';
+    statusDot.className = 'status-dot ready';
+    savedMessage.textContent = result.analysisReady ? 'AI summary is ready.' : (result.analysisError ? `Saved, but AI analysis needs attention: ${result.analysisError}` : 'Meeting saved. AI analysis may still be processing.');
+    showToast(result.analysisReady ? 'Meeting saved and AI summary is ready.' : 'Meeting saved.', { title: 'Success', type: 'success', duration: 3200 });
   } catch (err) {
+    showPanel(completedPanel);
+    completedState = true;
     showToast(err.message || String(err), { title: 'Save failed', type: 'error', duration: 5000 });
   } finally {
     btnSaveAnalyze.disabled = false;
-    btnSaveAnalyze.innerHTML = originalLabel;
   }
 });
 
 transcriptArea.addEventListener('focus', () => userIsEditing = true);
 transcriptArea.addEventListener('blur', () => { userIsEditing = false; saveEditedTranscript(); });
 transcriptArea.addEventListener('input', () => { updateCounts(); saveEditedTranscript(); });
+
+btnOpenMeeting?.addEventListener('click', async () => {
+  if (!lastCompletedMeetingId) return;
+  await chrome.tabs.create({ url: `http://localhost:4000/meetings/${encodeURIComponent(lastCompletedMeetingId)}` });
+});
 
 meetingDismiss.addEventListener('click', async () => {
   await send('DISMISS_MEETING_PROMPT');
@@ -535,8 +577,14 @@ dashboardLink.addEventListener('click', async (e) => {
 optionsLink.addEventListener('click', (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'session' && changes.pendingMeeting) {
-    renderMeetingDetected(changes.pendingMeeting.newValue || null);
+  if (area === 'session') {
+    if (changes.pendingMeeting) renderMeetingDetected(changes.pendingMeeting.newValue || null);
+    if (changes.activeMeeting) {
+      const meeting = changes.activeMeeting.newValue || null;
+      activeMeetingId = meeting?.id || null;
+      if (meeting?.participants) renderParticipants(meeting.participants);
+      sourceLabel.textContent = meeting?.platform || 'Manual';
+    }
     return;
   }
   if (area !== 'local') return;

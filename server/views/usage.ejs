@@ -1,67 +1,145 @@
 <%- include("partials/header", { title: "Usage & Plan", bodyClass: "app-shell" }) %>
 <%
   const u = usage || {};
-  const maxM = u.meetingsMax || 5;
-  const pctM = maxM >= 9999 ? 5 : Math.min(100, Math.round(((u.meetingsUsed||0)/maxM)*100));
+  const p = plan || {};
+  const ff = p.featureFlags || {};
+  const limit = (value, fallback) => (value === null || value === undefined || value < 0 ? fallback : value);
+  const meetingLimit = limit(p.maxMeetingsPerMonth, 'Unlimited');
+  const transcriptionLimit = limit(p.maxTranscriptionMinutes, 'Unlimited');
+  const aiLimit = limit(p.maxAiQuestions, 'Unlimited');
+  const meetingPct = meetingLimit === 'Unlimited' ? 0 : Math.min(100, Math.round(((u.meetingsUsed || 0) / Math.max(1, meetingLimit)) * 100));
+  const transcriptionPct = transcriptionLimit === 'Unlimited' ? 0 : Math.min(100, Math.round(((u.transcriptionMinutes || 0) / Math.max(1, transcriptionLimit)) * 100));
+  const aiQuestionsUsed = Number(u.aiQuestions || 0);
+  const aiPct = aiLimit === 'Unlimited' ? 0 : Math.min(100, Math.round((aiQuestionsUsed / Math.max(1, aiLimit)) * 100));
+  const resetDate = new Date(); resetDate.setMonth(resetDate.getMonth() + 1, 1);
+  const money = typeof p.priceMonthly === 'number' ? `$${p.priceMonthly}/month` : '';
+  const featureRows = [
+    ['Live transcription', ff.liveTranscription],
+    ['AI Summary', ff.aiSummaries],
+    ['Action Items', ff.actionItems],
+    ['Ask AI', ff.askAi],
+    ['AI Insights', ff.aiInsights],
+    ['PDF export', ff.pdfExport],
+    ['Markdown export', ff.markdownExport],
+    ['TXT export', ff.txtExport]
+  ];
 %>
 <div class="shell">
   <%- include("partials/sidebar", { user, activeNav: "usage", settings, usage, q: "" }) %>
-  <div class="main tactiq-main">
-    <header class="main-top page-head">
+  <div class="main tactiq-main usage-page">
+    <header class="main-top page-head usage-hero">
       <div>
+        <p class="eyebrow">SUBSCRIPTION CONTROL CENTER</p>
         <h1>Usage &amp; Plan</h1>
-        <p class="admin-sub">Track limits and manage your subscription.</p>
+        <p class="admin-sub">Track your meeting usage, feature access, and subscription.</p>
       </div>
+      <% if (u.isPaid) { %>
+        <a class="btn-ghost" href="/#pricing"><span class="material-symbols-outlined">manage_accounts</span> Manage subscription</a>
+      <% } else { %>
+        <a class="btn-primary" href="/#pricing"><span class="material-symbols-outlined">bolt</span> Upgrade to Pro</a>
+      <% } %>
     </header>
 
-    <section class="card section-card" style="margin: 0 28px 16px;">
-      <div class="section-head">
+    <section class="usage-plan-card card section-card">
+      <div class="usage-plan-main">
+        <div class="usage-plan-icon"><span class="material-symbols-outlined"><%= u.isPaid ? 'workspace_premium' : 'person' %></span></div>
         <div>
-          <h2><% if (u.isPaid) { %>✦ <% } %><%= u.badge || 'FREE' %></h2>
-          <p class="muted"><%= u.isPaid ? 'Active subscription' : 'Free plan · limited monthly meetings' %></p>
+          <div class="usage-plan-kicker">CURRENT PLAN</div>
+          <h2><%= p.name || u.badge || 'FREE' %></h2>
+          <div class="usage-status"><span class="status-dot"></span><%= u.isPaid ? 'Active subscription' : 'Free plan' %></div>
         </div>
-        <% if (u.isPaid) { %>
-          <a class="btn-ghost" href="/#pricing">Manage subscription</a>
-        <% } else { %>
-          <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
-        <% } %>
       </div>
-      <% if (plan && plan.features && plan.features.length) { %>
-        <ul class="feature-check">
-          <% plan.features.forEach(function(f) { %><li>✓ <%= f %></li><% }) %>
-        </ul>
+      <div class="usage-plan-price"><strong><%= money || '$0/month' %></strong><span>Billing cycle: Monthly</span></div>
+      <div class="usage-plan-details">
+        <div><span>Started</span><strong>Current account</strong></div>
+        <div><span>Next reset</span><strong><%= resetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) %></strong></div>
+        <div><span>Status</span><strong><%= u.isPaid ? 'Active' : 'Free' %></strong></div>
+      </div>
+    </section>
+
+    <section class="usage-section">
+      <div class="section-title-row"><div><h2>Usage this month</h2><p class="muted">Your current consumption and remaining capacity.</p></div></div>
+      <div class="usage-metrics">
+        <article class="usage-metric card">
+          <div class="usage-metric-icon"><span class="material-symbols-outlined">mic</span></div>
+          <div class="usage-metric-label">Meetings</div>
+          <strong><%= u.meetingsUsed || 0 %></strong>
+          <span class="usage-metric-sub"><%= meetingLimit === 'Unlimited' ? 'Unlimited' : `${Math.max(0, meetingLimit - (u.meetingsUsed || 0))} remaining of ${meetingLimit}` %></span>
+          <div class="usage-progress"><i style="width:<%= meetingPct %>%"></i></div>
+          <small><%= meetingLimit === 'Unlimited' ? 'Unlimited plan' : `${meetingPct}% used` %></small>
+        </article>
+        <article class="usage-metric card">
+          <div class="usage-metric-icon"><span class="material-symbols-outlined">timer</span></div>
+          <div class="usage-metric-label">Transcription</div>
+          <strong><%= u.transcriptionMinutes || 0 %><small> min</small></strong>
+          <span class="usage-metric-sub"><%= transcriptionLimit === 'Unlimited' ? 'Unlimited' : `${Math.max(0, transcriptionLimit - (u.transcriptionMinutes || 0))} min remaining of ${transcriptionLimit}` %></span>
+          <div class="usage-progress"><i style="width:<%= transcriptionPct %>%"></i></div>
+          <small><%= transcriptionLimit === 'Unlimited' ? 'Unlimited plan' : `${transcriptionPct}% used` %></small>
+        </article>
+        <article class="usage-metric card">
+          <div class="usage-metric-icon"><span class="material-symbols-outlined">auto_awesome</span></div>
+          <div class="usage-metric-label">AI Notes</div>
+          <strong><%= u.aiNotes || 0 %></strong>
+          <span class="usage-metric-sub">Notes generated this month</span>
+          <div class="usage-progress"><i style="width:<%= Math.min(100, (u.aiNotes || 0) * 5) %>%"></i></div>
+          <small>AI summaries generated</small>
+        </article>
+        <article class="usage-metric card">
+          <div class="usage-metric-icon"><span class="material-symbols-outlined">chat_bubble</span></div>
+          <div class="usage-metric-label">Ask AI</div>
+          <strong><%= aiQuestionsUsed %></strong>
+          <span class="usage-metric-sub"><%= aiLimit === 'Unlimited' ? 'Unlimited requests' : `${Math.max(0, aiLimit - aiQuestionsUsed)} remaining of ${aiLimit}` %></span>
+          <div class="usage-progress"><i style="width:<%= aiPct %>%"></i></div>
+          <small><%= aiLimit === 'Unlimited' ? 'Unlimited plan' : `${aiPct}% used` %></small>
+        </article>
+      </div>
+      <div class="usage-reset"><span class="material-symbols-outlined">event_repeat</span><span><strong>Usage resets in <%= daysLeft || 30 %> days.</strong> Reset date: <%= resetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) %>.</span></div>
+    </section>
+
+    <section class="card section-card usage-history-card">
+      <div class="section-title-row"><div><h2>Usage history</h2><p class="muted">Meetings that contributed to this month's usage.</p></div><span class="usage-filter"><span class="material-symbols-outlined">calendar_month</span> This month</span></div>
+      <% if (usageHistory && usageHistory.length) { %>
+        <div class="usage-history-table-wrap"><table class="usage-history-table"><thead><tr><th>Date</th><th>Meeting</th><th>Transcription</th><th>AI output</th></tr></thead><tbody>
+          <% usageHistory.forEach(function(item) { %>
+            <tr><td><%= item.date ? new Date(item.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—' %></td><td><strong><%= item.title %></strong></td><td><%= item.minutes %> min</td><td><span class="history-chip"><%= item.summary ? 'Summary' : 'No summary' %></span><% if (item.actionItems) { %> <span class="history-chip"><%= item.actionItems %> action items</span><% } %></td></tr>
+          <% }) %>
+        </tbody></table></div>
+      <% } else { %>
+        <div class="usage-empty"><span class="material-symbols-outlined">query_stats</span><strong>No usage activity yet</strong><p>Your meeting activity will appear here as you use the app.</p></div>
       <% } %>
     </section>
 
-    <section class="card section-card" style="margin: 0 28px 16px;">
-      <h2>Monthly usage</h2>
-      <div class="usage-block">
-        <div class="usage-row">
-          <div class="plan-dist-meta"><strong>Meetings</strong><span><%= u.meetingsUsed || 0 %> / <%= maxM >= 9999 ? '∞' : maxM %></span></div>
-          <div class="plan-dist-bar"><div style="width:<%= pctM %>%"></div></div>
-        </div>
-        <div class="usage-row">
-          <div class="plan-dist-meta"><strong>AI Notes</strong><span><%= u.aiNotes || 0 %> generated</span></div>
-          <div class="plan-dist-bar"><div style="width:<%= Math.min(100, (u.aiNotes||0)*5) %>%"></div></div>
-        </div>
-        <div class="usage-row">
-          <div class="plan-dist-meta"><strong>Transcription</strong><span><%= u.transcriptionMinutes || 0 %> min</span></div>
-          <div class="plan-dist-bar"><div style="width:<%= Math.min(100, (u.transcriptionMinutes||0)) %>%"></div></div>
-        </div>
+    <section class="card section-card">
+      <div class="section-title-row"><div><h2>Feature access</h2><p class="muted">What your current plan includes.</p></div></div>
+      <div class="feature-access-grid">
+        <% featureRows.forEach(function(row) { %>
+          <div class="feature-access-item"><span class="material-symbols-outlined"><%= row[1] ? 'check_circle' : 'lock' %></span><span><%= row[0] %></span><b class="<%= row[1] ? 'included' : 'pro-only' %>"><%= row[1] ? 'Included' : 'PRO' %></b></div>
+        <% }) %>
       </div>
-      <p class="muted" style="margin-top:14px">Your limits reset in <strong><%= daysLeft || 30 %></strong> days.</p>
     </section>
 
-    <section class="card section-card" style="margin: 0 28px 24px;">
-      <h2>Feature access</h2>
-      <table class="feature-table">
-        <tr><td>Transcript</td><td>✓ Included</td></tr>
-        <tr><td>AI Summary</td><td>✓ Included</td></tr>
-        <tr><td>Action Items</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
-        <tr><td>Ask AI</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
-        <tr><td>AI Insights</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
-        <tr><td>Export PDF / MD</td><td><%= u.isPaid ? '✓ Included' : '✦ PRO' %></td></tr>
-      </table>
+    <% if (!u.isPaid) { %>
+    <section class="upgrade-card">
+      <div><p class="eyebrow">GET MORE FROM YOUR MEETINGS</p><h2>Upgrade to Pro</h2><p>Unlock higher limits, advanced AI analysis, Ask AI, insights, and exports.</p></div>
+      <div class="upgrade-benefits"><span>✓ Higher meeting limits</span><span>✓ Advanced AI analysis</span><span>✓ AI Insights</span><span>✓ Ask AI</span><span>✓ Advanced exports</span></div>
+      <a class="btn-primary" href="/#pricing">Upgrade to Pro <span class="material-symbols-outlined">arrow_forward</span></a>
+    </section>
+    <% } %>
+
+    <section class="card section-card plan-comparison">
+      <div class="section-title-row"><div><h2>Compare plans</h2><p class="muted">See what changes when you upgrade.</p></div></div>
+      <div class="comparison-table-wrap"><table class="comparison-table"><thead><tr><th>Feature</th><% (plans || []).forEach(function(pl) { %><th class="<%= pl.slug === (p.slug || '') ? 'current-plan' : '' %>"><%= pl.name %><% if (pl.slug === (p.slug || '')) { %><small>Current</small><% } %></th><% }) %></tr></thead><tbody>
+        <tr><td>Meetings / month</td><% (plans || []).forEach(function(pl) { %><td><%= limit(pl.maxMeetingsPerMonth, 'Unlimited') %></td><% }) %></tr>
+        <tr><td>Transcription</td><% (plans || []).forEach(function(pl) { %><td><%= limit(pl.maxTranscriptionMinutes, 'Unlimited') %><%= pl.maxTranscriptionMinutes ? ' min' : '' %></td><% }) %></tr>
+        <tr><td>Ask AI</td><% (plans || []).forEach(function(pl) { %><td><%= pl.featureFlags?.askAi ? '✓' : '—' %></td><% }) %></tr>
+        <tr><td>AI Insights</td><% (plans || []).forEach(function(pl) { %><td><%= pl.featureFlags?.aiInsights ? '✓' : '—' %></td><% }) %></tr>
+        <tr><td>Advanced exports</td><% (plans || []).forEach(function(pl) { %><td><%= pl.featureFlags?.pdfExport ? '✓' : 'Basic' %></td><% }) %></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="card section-card subscription-actions">
+      <div><h2>Subscription</h2><p class="muted">Manage your plan from the billing page.</p></div>
+      <div class="subscription-actions-buttons"><a class="btn-ghost" href="/#pricing"><span class="material-symbols-outlined">swap_horiz</span> Change plan</a><% if (u.isPaid) { %><a class="btn-ghost danger-soft" href="/#pricing"><span class="material-symbols-outlined">cancel</span> Manage cancellation</a><% } %></div>
     </section>
   </div>
 </div>

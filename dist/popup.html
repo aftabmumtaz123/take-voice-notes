@@ -35,7 +35,7 @@
         </div>
       </div>
       <div class="status-wrap">
-        <span id="statusDot" class="status-dot"></span>
+        <span id="statusDot" class="status-dot ready"></span>
         <span id="statusBadge" class="status-text">Ready</span>
       </div>
     </header>
@@ -52,25 +52,33 @@
 
     <section class="session-card">
       <div class="session-top">
-        <div>
+        <div class="session-title-wrap">
           <span class="eyebrow">CURRENT SESSION</span>
           <input id="sessionTitle" class="session-title-input" type="text" value="Untitled meeting" maxlength="120" aria-label="Meeting title">
+          <span class="title-hint">Click the title to rename</span>
         </div>
         <div class="provider-pill"><span class="pulse-mini"></span><span id="providerLabel">Auto</span></div>
       </div>
-      <div class="script-row">
-        <span>Output</span>
-        <select id="scriptMode" aria-label="Transcript output script">
-          <option value="roman">Roman / Latin</option>
-          <option value="native">Native script</option>
-        </select>
+      <div class="session-details-row">
+        <div class="script-control">
+          <span class="field-label">Transcript language</span>
+          <select id="scriptMode" aria-label="Transcript output script">
+            <option value="roman">Roman / Latin</option>
+            <option value="native">Native script</option>
+          </select>
+        </div>
+        <div class="source-control">
+          <span class="field-label">Source</span>
+          <strong id="sourceLabel">Ready</strong>
+        </div>
       </div>
-      <div class="session-meta">
+      <div class="recording-clock">
         <span id="timer">00:00</span>
-        <span class="meta-divider">•</span>
-        <span id="wordCount">0 words</span>
-        <span class="meta-divider">•</span>
-        <span id="charCount">0 chars</span>
+        <span id="timerLabel">Ready to capture</span>
+      </div>
+      <div class="capture-status-grid">
+        <div class="capture-status"><span class="capture-icon">🎙</span><div><span>Microphone</span><strong id="micStatus">Checking…</strong></div></div>
+        <div class="capture-status"><span class="capture-icon">🔊</span><div><span>Meeting audio</span><strong id="audioStatus">Ready</strong></div></div>
       </div>
     </section>
 
@@ -78,50 +86,73 @@
       <div class="section-head">
         <div>
           <span class="eyebrow">TRANSCRIPT</span>
-          <h2>Live notes</h2>
+          <h2>Live conversation</h2>
         </div>
-        <span class="live-label">● LIVE</span>
+        <span id="transcriptLiveLabel" class="live-label ready-label">● READY</span>
       </div>
-
       <div id="transcriptViewport" class="transcript-viewport">
-        <textarea id="transcriptArea" class="transcript-area"
-          placeholder="Your conversation will appear here…"
-          aria-label="Live transcript" spellcheck="true"></textarea>
+        <textarea id="transcriptArea" class="transcript-area" placeholder="Start a meeting to begin capturing your conversation…" aria-label="Live transcript" spellcheck="true"></textarea>
         <div id="interimHint" class="interim-hint hidden" aria-live="polite"></div>
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">◌</div>
           <strong>Ready when you are</strong>
-          <span>Start a meeting to capture every important detail.</span>
+          <span>Start a meeting to capture your conversation in real time.</span>
         </div>
+      </div>
+      <div class="transcript-meta">
+        <span id="wordCount">0 words</span><span>•</span><span id="charCount">0 chars</span>
       </div>
     </section>
 
-    <div class="primary-actions">
-      <button id="btnStart" class="btn btn-start"><span class="btn-icon">●</span> Start recording</button>
-      <button id="btnStop" class="btn btn-stop" disabled><span class="btn-icon">■</span> Stop</button>
-    </div>
+    <section id="participantCard" class="participants-card hidden">
+      <div class="participants-head"><div><span class="eyebrow">PARTICIPANTS</span><strong id="participantCount">0 participants</strong></div><span class="participant-source">Detected when available</span></div>
+      <div id="participantList" class="participant-list"></div>
+    </section>
 
-    <div class="save-analyze-row">
-      <button id="btnSaveAnalyze" class="btn btn-save" type="button" title="Save transcript to MongoDB and run AI summary">
-        <span class="btn-icon">✦</span> Save &amp; Analyze
-      </button>
-    </div>
+    <section id="readyState" class="state-panel ready-state">
+      <button id="btnStart" class="btn btn-start btn-primary-action" type="button"><span class="btn-icon">●</span> Start recording</button>
+      <p>Auto capture is available when a supported meeting is detected.</p>
+    </section>
 
-    <div class="secondary-actions">
-      <button id="btnPause" class="btn btn-ghost" disabled>Pause</button>
-      <button id="btnResume" class="btn btn-ghost" disabled>Resume</button>
-      <button id="btnNewNote" class="btn btn-ghost">New</button>
-      <button id="btnCopy" class="btn btn-ghost">Copy</button>
-      <button id="btnDownload" class="btn btn-ghost">Export</button>
-      <button id="btnClear" class="btn btn-ghost">Clear</button>
-    </div>
+    <section id="recordingState" class="state-panel recording-state hidden">
+      <div class="recording-banner"><span class="recording-indicator"></span><div><strong>Recording live</strong><span id="recordingPlatformText">Capturing your meeting</span></div><span class="live-chip">LIVE</span></div>
+      <div class="recording-actions">
+        <button id="btnPause" class="btn btn-pause" type="button"><span class="btn-icon">Ⅱ</span> Pause</button>
+        <button id="btnResume" class="btn btn-resume hidden" type="button"><span class="btn-icon">▶</span> Resume</button>
+        <button id="btnStop" class="btn btn-stop" type="button"><span class="btn-icon">■</span> Stop</button>
+      </div>
+    </section>
+
+    <section id="completedState" class="state-panel completed-state hidden">
+      <div class="completed-banner"><span class="completed-icon">✓</span><div><strong>Meeting captured</strong><span>Recording has stopped. Review it before saving.</span></div></div>
+      <button id="btnSaveAnalyze" class="btn btn-save btn-primary-action" type="button" title="Save transcript to MongoDB and run AI summary"><span class="btn-icon">✦</span> Save &amp; Analyze</button>
+      <div class="completed-actions">
+        <button id="btnCopy" class="btn btn-ghost" type="button">Copy transcript</button>
+        <button id="btnDownload" class="btn btn-ghost" type="button">Export</button>
+        <button id="btnClear" class="btn btn-ghost" type="button">Clear</button>
+      </div>
+    </section>
+
+    <section id="processingState" class="state-panel processing-state hidden" aria-live="polite">
+      <div class="processing-spinner"></div>
+      <strong id="processingTitle">Analyzing meeting…</strong>
+      <span id="processingMessage">Saving your transcript and generating meeting intelligence.</span>
+    </section>
+
+    <section id="savedState" class="state-panel saved-state hidden" aria-live="polite">
+      <div class="saved-icon">✓</div>
+      <strong>Meeting saved</strong>
+      <span id="savedMessage">AI summary is ready.</span>
+      <button id="btnOpenMeeting" class="btn btn-start" type="button">Open meeting →</button>
+      <button id="btnNewNote" class="btn btn-ghost" type="button">＋ New meeting</button>
+    </section>
 
     <footer>
       <span id="authFooter">Not signed in</span>
-      <span>
+      <span class="footer-links">
         <a href="#" id="logoutLink" class="hidden">Log out</a>
-        <a href="#" id="dashboardLink">Dashboard</a>
-        <a href="#" id="optionsLink">Settings</a>
+        <a href="#" id="dashboardLink">Dashboard ↗</a>
+        <a href="#" id="optionsLink">Settings ⚙</a>
       </span>
     </footer>
     </div>
