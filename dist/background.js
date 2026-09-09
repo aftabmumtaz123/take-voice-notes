@@ -452,6 +452,8 @@ async function flushPendingMeetingQueue() {
 }
 
 async function saveMeetingPayload(payload, { clearActiveMeeting = true } = {}) {
+  // Persist the finalized session before network work so a second end signal
+  // cannot manufacture a second meeting if the first request is still settling.
   await chrome.storage.local.set({ lastCompletedMeeting: payload });
   let sync = { ok: false, error: 'Backend unavailable.', meetingId: payload.externalId, analysisReady: false, analysisError: '' };
   try {
@@ -475,6 +477,16 @@ async function saveMeetingPayload(payload, { clearActiveMeeting = true } = {}) {
   }
 
   if (clearActiveMeeting) {
+    await chrome.storage.session.set({
+      lastFinalizedMeeting: {
+        meetingId: sync.meetingId || payload.externalId,
+        synced: sync.ok,
+        syncError: sync.error || '',
+        analysisReady: sync.analysisReady,
+        analysisError: sync.analysisError || '',
+        finalizedAt: Date.now()
+      }
+    });
     await chrome.storage.session.remove('activeMeeting');
   }
   return { payload, sync };
@@ -483,6 +495,16 @@ async function saveMeetingPayload(payload, { clearActiveMeeting = true } = {}) {
 async function saveCompletedMeeting() {
   const meetingState = await getMeetingState();
   const activeMeeting = meetingState.activeMeeting;
+  if (!activeMeeting?.id) {
+    const last = meetingState.lastFinalizedMeeting;
+    if (last?.meetingId && Date.now() - Number(last.finalizedAt || 0) < 10 * 60 * 1000) {
+      return {
+        payload: { externalId: last.meetingId },
+        sync: { ok: Boolean(last.synced), meetingId: last.meetingId, error: last.syncError || '', analysisReady: Boolean(last.analysisReady), analysisError: last.analysisError || '' }
+      };
+    }
+    throw new Error('There is no active meeting to save.');
+  }
   const transcript = await getTranscript();
   const recordingState = await getRecordingState();
   const now = Date.now();

@@ -1,35 +1,42 @@
 <%- include("partials/header", { title: "Processing meeting", bodyClass: "app-shell" }) %>
 <link rel="stylesheet" href="/public/meeting-processing.css" />
-<div class="shell">
+<div class="shell processing-page">
   <%- include("partials/sidebar", { user, activeNav: "meetings", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
   <main class="main processing-main">
-    <div class="processing-shell">
-      <div class="processing-card">
-        <div class="processing-icon" aria-hidden="true"><span class="material-symbols-outlined">auto_awesome</span></div>
+    <div class="processing-backdrop" aria-hidden="true">
+      <div class="backdrop-topbar"></div>
+      <div class="backdrop-grid">
+        <div class="backdrop-card large"></div><div class="backdrop-card"></div>
+        <div class="backdrop-card wide"></div><div class="backdrop-card"></div>
+      </div>
+    </div>
+    <div class="processing-overlay">
+      <section class="processing-card" role="status" aria-live="polite">
+        <div class="processing-icon"><span class="material-symbols-outlined">auto_awesome</span></div>
         <div class="processing-kicker">MEETING ENDED</div>
-        <h1>Processing your meeting</h1>
+        <h1>Preparing your meeting</h1>
         <p class="processing-subtitle" id="meetingTitle"><%= title || 'Your meeting' %></p>
-        <p class="processing-copy" id="processingMessage">We're saving the final transcript and preparing your meeting intelligence. This page will open the finished meeting automatically.</p>
+        <p class="processing-copy" id="processingMessage">Your meeting is being saved and processed. Please keep this tab open for a moment.</p>
 
-        <div class="processing-steps" role="status" aria-live="polite">
+        <div class="processing-steps">
           <div class="processing-step done" data-step="recording">
             <span class="step-icon material-symbols-outlined">mic_off</span><span>Recording stopped</span><span class="step-state">✓</span>
           </div>
-          <div class="processing-step active" data-step="transcript">
-            <span class="step-icon material-symbols-outlined">description</span><span>Saving transcript</span><span class="step-state">In progress</span>
+          <div class="processing-step" data-step="transcript">
+            <span class="step-icon material-symbols-outlined">description</span><span>Transcript received</span><span class="step-state">Waiting</span>
           </div>
           <div class="processing-step" data-step="analysis">
-            <span class="step-icon material-symbols-outlined">auto_awesome</span><span>Generating AI summary</span><span class="step-state">Waiting</span>
+            <span class="step-icon material-symbols-outlined">auto_awesome</span><span>Processing meeting</span><span class="step-state">Waiting</span>
           </div>
           <div class="processing-step" data-step="ready">
-            <span class="step-icon material-symbols-outlined">check_circle</span><span>Meeting details</span><span class="step-state">Waiting</span>
+            <span class="step-icon material-symbols-outlined">check_circle</span><span>Meeting processed</span><span class="step-state">Waiting</span>
           </div>
         </div>
 
         <div class="processing-loader" id="processingLoader"><span></span><span></span><span></span></div>
         <p class="processing-error" id="processingError" hidden></p>
         <button class="btn-primary processing-retry" id="retryBtn" type="button" hidden>Check again</button>
-      </div>
+      </section>
     </div>
   </main>
 </div>

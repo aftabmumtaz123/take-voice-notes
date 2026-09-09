@@ -145,6 +145,12 @@ meetingSchema.index({ userId: 1, isArchived: 1, startedAt: -1 });
 meetingSchema.index({ userId: 1, title: 'text', fullTranscript: 'text' });
 const Meeting = mongoose.model('Meeting', meetingSchema);
 
+// Short-lived lifecycle state used by the post-meeting processing screen.
+// It is intentionally separate from the Meeting document so the UI can show
+// progress while /api/meetings/complete is still saving/analyzing.
+const meetingProcessingStates = new Map();
+const meetingProcessingLocks = new Map();
+
 let lastGeminiOkAt = null;
 let lastGeminiError = '';
 
@@ -448,6 +454,12 @@ ${transcript}`;
 }
 
 const MEETING_PROMPT_TEMPLATES = {
+  detailed_transcript: {
+    id: 'detailed_transcript',
+    label: 'Detailed transcription',
+    icon: 'description',
+    instruction: `Create a detailed, chronological reconstruction of the meeting from the transcript. Preserve only what was actually said. Use speaker names only when present in the transcript or participant metadata. Include timestamps when available. Do not invent missing speech.`
+  },
   short_summary: {
     id: 'short_summary',
     label: 'Short summary',
@@ -511,6 +523,18 @@ Keep it scannable for someone who missed the meeting.`
 ## Recommended next moves
 ## Questions the team should resolve
 Be concrete and grounded in the transcript. Do not invent external facts.`
+  },
+  task_list: {
+    id: 'task_list',
+    label: 'Short task list',
+    icon: 'checklist',
+    instruction: `Create a short, prioritized task list from the meeting. Use checkbox bullets only. Include an owner and deadline only when explicitly supported by the transcript.`
+  },
+  other_mentions: {
+    id: 'other_mentions',
+    label: 'Other mentions',
+    icon: 'alternate_email',
+    instruction: `Extract notable mentions that are not already clear decisions or action items: people mentioned, products, customers, dates, requirements, risks, questions, or references. Group them under concise headings. Do not invent context.`
   },
   generate_tasks: {
     id: 'generate_tasks',
@@ -2471,6 +2495,28 @@ app.get('/api/meetings', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/meetings/:id/status', requireAuth, async (req, res) => {
+  try {
+    const requestedId = String(req.params.id);
+    const state = meetingProcessingStates.get(requestedId);
+    const id = state?.aliasId || requestedId;
+    const meeting = await Meeting.findOne({ externalId: id, userId: req.user.id }).lean();
+    if (meeting) {
+      return res.json({ ok: true, status: 'completed', stage: 'ready', meetingId: id, meeting });
+    }
+    res.json({
+      ok: true,
+      status: state?.status || 'processing',
+      stage: state?.stage || 'waiting',
+      message: state?.message || 'Waiting for the final transcript…',
+      updatedAt: state?.updatedAt || null,
+      meetingId: id
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('/api/meetings/:id', requireAuth, async (req, res) => {
   try {
     const meeting = await Meeting.findOne({
@@ -2527,8 +2573,20 @@ function deriveParticipantsFromTranscript(transcript = [], fullText = '', durati
 }
 
 app.post('/api/meetings/complete', requireAuth, async (req, res) => {
+  let processingId = String(req.body?.externalId || '');
   try {
     const data = normalizeMeetingBody({ ...req.body, userId: req.user.id });
+    processingId = data.externalId;
+
+    // Same externalId = same meeting. Never run two finalizers for it.
+    if (meetingProcessingLocks.has(processingId)) {
+      return await meetingProcessingLocks.get(processingId).then((result) => res.json(result));
+    }
+
+    const run = (async () => {
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'transcript', message: 'Transcript received. Saving your meeting…', updatedAt: Date.now()
+      });
     if (!data.participants?.length) {
       data.participants = deriveParticipantsFromTranscript(
         data.transcript,
@@ -2568,6 +2626,10 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
     }).sort({ startedAt: -1 });
     if (duplicateCandidate) {
       canonicalExternalId = duplicateCandidate.externalId;
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'transcript', aliasId: canonicalExternalId,
+        message: 'This meeting is already being finalized. Updating the existing meeting…', updatedAt: Date.now()
+      });
       console.warn(`[api] duplicate session folded: ${data.externalId} -> ${canonicalExternalId}`);
     }
     data.externalId = canonicalExternalId;
@@ -2586,30 +2648,53 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
       { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
     );
 
-    let analysis = meeting.ai || {};
-    let analysisReady = false;
-    try {
-      const generated = await analyzeTranscript(meeting);
-      analysis = { ...generated, generatedAt: new Date(), error: '' };
-      if (generated.generatedTitle) meeting.title = generated.generatedTitle;
-      meeting.ai = analysis;
-      await meeting.save();
-      analysisReady = Boolean(analysis.summary) && !analysis.error;
-      logBanner('ok', 'Meeting saved + analyzed', `title="${meeting.title}" | analysisReady=${analysisReady}`);
-    } catch (error) {
-      logBanner('fail', 'Meeting saved but analysis FAILED', error.message);
-      meeting.ai = { ...(meeting.ai || {}), error: error.message, generatedAt: null };
-      meeting.lastSyncError = error.message;
-      await meeting.save();
-      analysis = meeting.ai;
-    }
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'analysis', message: 'Transcript received. Generating AI meeting insights…', updatedAt: Date.now()
+      });
 
-    res.json({
-      ok: true,
-      meeting: meeting.toObject(),
-      analysisReady,
-      analysisError: analysis?.error || ''
-    });
+      // The analysis is deliberately performed after the transcript is persisted.
+      let analysis = meeting.ai || {};
+      let analysisReady = false;
+      try {
+        const generated = await analyzeTranscript(meeting);
+        analysis = { ...generated, generatedAt: new Date(), error: '' };
+        if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+        meeting.ai = analysis;
+        await meeting.save();
+        analysisReady = Boolean(analysis.summary) && !analysis.error;
+        logBanner('ok', 'Meeting saved + analyzed', `title="${meeting.title}" | analysisReady=${analysisReady}`);
+      } catch (error) {
+        logBanner('fail', 'Meeting saved but analysis FAILED', error.message);
+        meeting.ai = { ...(meeting.ai || {}), error: error.message, generatedAt: null };
+        meeting.lastSyncError = error.message;
+        await meeting.save();
+        analysis = meeting.ai;
+      }
+
+      const result = {
+        ok: true,
+        meeting: meeting.toObject(),
+        analysisReady,
+        analysisError: analysis?.error || ''
+      };
+      const readyState = {
+        status: 'completed', stage: 'ready', aliasId: data.externalId,
+        message: analysisReady ? 'Your meeting is ready.' : 'Your meeting was saved. AI analysis can be retried.', updatedAt: Date.now()
+      };
+      meetingProcessingStates.set(processingId, readyState);
+      if (data.externalId !== processingId) meetingProcessingStates.set(data.externalId, readyState);
+      setTimeout(() => {
+        meetingProcessingStates.delete(processingId);
+        if (data.externalId !== processingId) meetingProcessingStates.delete(data.externalId);
+      }, 10 * 60 * 1000);
+      return result;
+    })();
+    meetingProcessingLocks.set(processingId, run);
+    try {
+      return res.json(await run);
+    } finally {
+      meetingProcessingLocks.delete(processingId);
+    }
   } catch (error) {
     console.error('[api] complete failed:', error.message);
     res.status(500).json({ ok: false, error: error.message });

@@ -12,6 +12,14 @@ document.querySelectorAll("[data-tabs]").forEach((tabs) => {
   });
 });
 
+// Processing flow can deep-link directly into Ask AI after a meeting finishes.
+(() => {
+  const tabName = new URLSearchParams(window.location.search).get("tab");
+  if (!tabName) return;
+  const target = document.querySelector(`[data-tabs] .tab[data-tab="${CSS.escape(tabName)}"]`);
+  if (target) target.click();
+})();
+
 // Copy API key
 document.getElementById("copyKey")?.addEventListener("click", async () => {
   const el = document.getElementById("apiKey");

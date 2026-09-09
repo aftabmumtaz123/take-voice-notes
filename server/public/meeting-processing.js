@@ -9,60 +9,70 @@
   let attempts = 0;
   let finished = false;
 
-  const step = (name) => document.querySelector(`[data-step="${name}"]`);
+  const el = (name) => document.querySelector(`[data-step="${name}"]`);
   function setStep(name, state, done = false) {
-    const el = step(name); if (!el) return;
-    el.classList.toggle('active', !done);
-    el.classList.toggle('done', done);
-    const stateEl = el.querySelector('.step-state');
+    const node = el(name); if (!node) return;
+    node.classList.toggle('active', !done);
+    node.classList.toggle('done', done);
+    const stateEl = node.querySelector('.step-state');
     if (stateEl) stateEl.textContent = done ? '✓' : state;
   }
-
+  function resetSteps() {
+    setStep('recording', 'Done', true);
+    ['transcript','analysis','ready'].forEach(name => {
+      const node = el(name); node?.classList.remove('active','done');
+      const state = node?.querySelector('.step-state'); if (state) state.textContent = 'Waiting';
+    });
+  }
   function showError(text) {
-    errorEl.hidden = false;
-    errorEl.textContent = text;
-    retryBtn.hidden = false;
-    loader.style.display = 'none';
+    errorEl.hidden = false; errorEl.textContent = text;
+    retryBtn.hidden = false; loader.style.display = 'none';
+  }
+  function stageUpdate(stage, status, msg) {
+    if (msg) message.textContent = msg;
+    if (stage === 'transcript') {
+      setStep('transcript', 'Received', true);
+      setStep('analysis', 'Processing…', false);
+    } else if (stage === 'analysis') {
+      setStep('transcript', 'Received', true);
+      setStep('analysis', 'In progress', false);
+    } else if (stage === 'ready' || status === 'completed') {
+      setStep('transcript', 'Received', true);
+      setStep('analysis', 'Processed', true);
+      setStep('ready', 'Ready', true);
+    }
   }
 
   async function check() {
     if (!id || finished) return;
     attempts += 1;
     try {
-      const res = await fetch(`/api/meetings/${encodeURIComponent(id)}`, { credentials: 'same-origin', cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        const meeting = data.meeting || data;
-        if (meeting) {
-          finished = true;
-          clearInterval(timer);
-          titleEl.textContent = meeting.ai?.generatedTitle || meeting.title || 'Your meeting';
-          setStep('recording', 'Done', true);
-          setStep('transcript', 'Done', true);
-          setStep('analysis', 'Done', true);
-          setStep('ready', 'Done', true);
-          message.textContent = meeting.ai?.summary ? 'Your transcript and AI meeting summary are ready.' : 'Your meeting was saved. Opening the meeting details now.';
-          setTimeout(() => { window.location.replace(`/meetings/${encodeURIComponent(id)}`); }, 700);
-          return;
-        }
+      const res = await fetch(`/api/meetings/${encodeURIComponent(id)}/status`, { credentials:'same-origin', cache:'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'Unable to check meeting status.');
+
+      stageUpdate(data.stage, data.status, data.message);
+      if (data.status === 'completed' && data.meeting) {
+        finished = true; clearInterval(timer);
+        titleEl.textContent = data.meeting.ai?.generatedTitle || data.meeting.title || 'Your meeting';
+        message.textContent = 'Meeting processed successfully. Opening your meeting with Ask AI…';
+        setStep('transcript', 'Received', true);
+        setStep('analysis', 'Processed', true);
+        setStep('ready', 'Ready', true);
+        setTimeout(() => {
+          window.location.replace(`/meetings/${encodeURIComponent(id)}?tab=chat`);
+        }, 800);
+        return;
       }
-      if (attempts === 2) {
-        setStep('transcript', 'Saving…');
-        message.textContent = 'Saving the final transcript…';
-      }
-      if (attempts === 5) {
-        setStep('analysis', 'Generating…');
-        message.textContent = 'Generating your AI meeting summary…';
-      }
-      if (attempts > 80) showError('The meeting is taking longer than expected. You can retry this check.');
+      if (attempts > 120) showError('The meeting is taking longer than expected. You can check again.');
     } catch (err) {
-      if (attempts > 8) showError('Could not check meeting status. Make sure the server is running, then retry.');
+      if (attempts > 8) showError(err.message || 'Could not check meeting status.');
     }
   }
 
   retryBtn.addEventListener('click', () => {
-    errorEl.hidden = true; retryBtn.hidden = true; loader.style.display = 'flex'; attempts = 0; check();
+    errorEl.hidden = true; retryBtn.hidden = true; loader.style.display = 'flex'; attempts = 0; resetSteps(); check();
   });
   check();
-  timer = setInterval(check, 1500);
+  timer = setInterval(check, 1000);
 })();
