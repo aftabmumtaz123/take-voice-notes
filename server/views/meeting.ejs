@@ -26,9 +26,24 @@
     </header>
 
     <%
-      const parts = Array.isArray(meeting.participants) ? meeting.participants.filter(function(p){ return p && p.name; }) : [];
+      const participantUiPattern = /\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|settings|leave|end meeting|share screen|presenting|raise hand|captions|chat|you can't|can't unmute)\b/i;
+      const participantIgnore = new Set(['you','me','host','co-host','presenter','participant','participants','meeting','devices','more_vert','more actions','more options']);
+      const parts = [];
+      const seenPartNames = new Set();
+      (Array.isArray(meeting.participants) ? meeting.participants : []).forEach(function(p){
+        let name = String(p && p.name || '').replace(/\s+/g, ' ').trim();
+        name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+        const key = name.toLocaleLowerCase();
+        if (!name || name.length > 80 || participantIgnore.has(key) || participantUiPattern.test(name)) return;
+        if (/[a-z][A-Z]/.test(name)) return;
+        if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications)\b/i.test(name)) return;
+        if (name.split(' ').length > 6 || /https?:\/\//i.test(name) || /[{}<>]/.test(name)) return;
+        if (!/^[\p{L}\p{M}][\p{L}\p{M} .’'\-]{1,78}$/u.test(name)) return;
+        if ((name.match(/[.!?]/g) || []).length > 1 || seenPartNames.has(key)) return;
+        seenPartNames.add(key);
+        parts.push(Object.assign({}, p, { name: name }));
+      });
       let talkTotal = parts.reduce(function(s, p){ return s + (Number(p.talkSeconds) || 0); }, 0);
-      if (!talkTotal && mins) talkTotal = mins * 60;
       const partColors = ['#e07a3d', '#6bbf8a', '#e8a0a0', '#5b8def', '#c084fc', '#fbbf24'];
       function conicStops(list) {
         if (!list.length) return '#e5e7eb 0 100%';
@@ -84,7 +99,7 @@
                 <span class="part-dot" style="background:<%= c %>"></span>
                 <span class="part-name" title="<%= p.name %>"><%= p.name %></span>
                 <span class="part-bar"><span style="width:<%= Math.min(100, pct) %>%;background:<%= c %>"></span></span>
-                <span class="part-pct"><%= pct %><%= p.talkSeconds ? '' : '%' %><% if (p.talkSeconds) { %><% } %>%</span>
+                <span class="part-pct"><%= p.talkSeconds ? pct + '%' : '—' %></span>
               </li>
             <% }) %>
           </ul>

@@ -230,3 +230,7 @@ The final package intentionally does not include any real provider/API secret. P
 ## AI meeting intelligence update
 
 AI analysis now creates a meeting-specific title from the transcript and produces a richer detailed summary. The meeting detail page includes a discussion breakdown table, decision rationale table, action-item table, conflicts/differing-viewpoints table, open questions, risks, and follow-ups. PDF export includes these richer sections as well.
+
+## Plan & billing management
+
+The current release includes a manual admin-verified subscription workflow for Free and Pro. Users can submit a Pro upgrade request from Usage & Plan; admins can review requests, record a payment/reference, approve activation, inspect subscription history, and cancel subscriptions. See `BILLING.md` for the workflow and future payment-provider integration notes.

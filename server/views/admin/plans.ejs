@@ -43,6 +43,8 @@
 
     <div class="billing-tabs">
       <a class="billing-tab <%= tab === 'plans' ? 'active' : '' %>" href="/admin/plans">Plans</a>
+      <a class="billing-tab <%= tab === 'requests' ? 'active' : '' %>" href="/admin/plans?tab=requests">Upgrade requests</a>
+      <a class="billing-tab <%= tab === 'subscriptions' ? 'active' : '' %>" href="/admin/plans?tab=subscriptions">Subscriptions</a>
       <a class="billing-tab <%= tab === 'subscribers' ? 'active' : '' %>" href="/admin/plans?tab=subscribers">Subscribers</a>
       <a class="billing-tab <%= tab === 'revenue' ? 'active' : '' %>" href="/admin/plans?tab=revenue">Revenue</a>
       <a class="billing-tab <%= tab === 'transactions' ? 'active' : '' %>" href="/admin/plans?tab=transactions">Transactions</a>
@@ -182,6 +184,47 @@
       </div>
     <% } %>
 
+    <% if (tab === 'requests') { %>
+      <section class="card section-card">
+        <div class="section-title-row"><div><p class="eyebrow">MANUAL BILLING</p><h2>Upgrade requests</h2><p class="muted">Review payment details, then approve to activate the selected subscription period.</p></div></div>
+        <div class="table-wrap"><table class="ai-table billing-admin-table"><thead><tr><th>User</th><th>Plan</th><th>Billing</th><th>Amount</th><th>Payment</th><th>Submitted</th><th>Status</th><th></th></tr></thead><tbody>
+          <% if (!(upgradeRequests || []).length) { %><tr><td colspan="8" class="empty-row">No upgrade requests yet.</td></tr><% } %>
+          <% (upgradeRequests || []).forEach(function(r) { %>
+            <tr>
+              <td><strong><%= r.userId?.displayName || r.userId?.username || 'Unknown user' %></strong><div class="muted"><%= r.userId?.email || '@' + (r.userId?.username || 'unknown') %></div></td>
+              <td><span class="plan-pill plan-pro"><%= r.requestedPlanId?.name || r.requestedPlanSlug %></span></td>
+              <td><%= r.billingInterval === 'year' ? 'Yearly' : 'Monthly' %></td>
+              <td><strong><%= r.currency || 'USD' %> <%= Number(r.amount || 0).toFixed(2) %></strong></td>
+              <td><%= r.paymentMethod || 'manual' %><% if (r.note) { %><div class="muted billing-note-inline"><%= r.note %></div><% } %></td>
+              <td class="muted"><%= r.createdAt ? new Date(r.createdAt).toLocaleString() : '—' %></td>
+              <td><span class="billing-status <%= r.status %>"><%= r.status %></span></td>
+              <td><a class="btn-ghost" href="/admin/billing/requests/<%= r._id %>">Review</a></td>
+            </tr>
+          <% }) %>
+        </tbody></table></div>
+      </section>
+    <% } %>
+
+    <% if (tab === 'subscriptions') { %>
+      <section class="card section-card">
+        <div class="section-title-row"><div><p class="eyebrow">SUBSCRIPTIONS</p><h2>Active &amp; historical subscriptions</h2><p class="muted">Each approval creates a dated subscription period. Cancelling moves the user back to Free.</p></div></div>
+        <div class="table-wrap"><table class="ai-table billing-admin-table"><thead><tr><th>User</th><th>Plan</th><th>Status</th><th>Billing</th><th>Period</th><th>Method</th><th></th></tr></thead><tbody>
+          <% if (!(subscriptions || []).length) { %><tr><td colspan="7" class="empty-row">No subscriptions recorded yet.</td></tr><% } %>
+          <% (subscriptions || []).forEach(function(s) { %>
+            <tr>
+              <td><strong><%= s.userId?.displayName || s.userId?.username || 'Unknown user' %></strong><div class="muted"><%= s.userId?.email || '' %></div></td>
+              <td><span class="plan-pill <%= s.planSlug === 'pro' ? 'plan-pro' : 'plan-free' %>"><%= s.planId?.name || s.planSlug %></span></td>
+              <td><span class="billing-status <%= s.status %>"><%= s.status %></span></td>
+              <td><%= s.billingInterval === 'year' ? 'Yearly' : 'Monthly' %></td>
+              <td class="muted"><%= s.currentPeriodStart ? new Date(s.currentPeriodStart).toLocaleDateString() : '—' %> → <%= s.currentPeriodEnd ? new Date(s.currentPeriodEnd).toLocaleDateString() : 'No expiry' %></td>
+              <td><%= s.paymentMethod || 'manual' %></td>
+              <td><% if (s.status === 'active' && s.planSlug !== 'free') { %><form method="POST" action="/admin/billing/subscriptions/<%= s._id %>/cancel" onsubmit="return confirm('Cancel this subscription and move the user to Free?')"><button class="btn-ghost danger-text" type="submit">Cancel</button></form><% } %></td>
+            </tr>
+          <% }) %>
+        </tbody></table></div>
+      </section>
+    <% } %>
+
     <% if (tab === 'revenue') { %>
       <div class="admin-stats stats-4">
         <div class="stat-card rich">
@@ -238,16 +281,20 @@
 
     <% if (tab === 'transactions') { %>
       <section class="card section-card">
-        <h2>Payment system</h2>
-        <ul class="proc-list">
-          <li><span>Provider</span><span class="muted">Not connected</span></li>
-          <li><span>Payments</span><span class="muted">—</span></li>
-          <li><span>Subscriptions</span><span class="muted">—</span></li>
-          <li><span>Webhooks</span><span class="muted">—</span></li>
-        </ul>
-        <p class="muted" style="margin-top:14px;font-size:13px">
-          Transaction history will appear here once a payment provider (e.g. Stripe) is connected. Plan assignment and limits already work without billing integration.
-        </p>
+        <div class="section-title-row"><div><p class="eyebrow">PAYMENTS</p><h2>Verified payment records</h2><p class="muted">Manual payments recorded when an admin approves an upgrade request.</p></div></div>
+        <div class="table-wrap"><table class="ai-table billing-admin-table"><thead><tr><th>User</th><th>Amount</th><th>Method</th><th>Reference</th><th>Status</th><th>Verified</th></tr></thead><tbody>
+          <% if (!(payments || []).length) { %><tr><td colspan="6" class="empty-row">No payment records yet.</td></tr><% } %>
+          <% (payments || []).forEach(function(payment) { %>
+            <tr>
+              <td><strong><%= payment.userId?.displayName || payment.userId?.username || 'Unknown user' %></strong><div class="muted"><%= payment.userId?.email || '' %></div></td>
+              <td><strong><%= payment.currency || 'USD' %> <%= Number(payment.amount || 0).toFixed(2) %></strong></td>
+              <td><%= payment.method || 'manual' %></td>
+              <td><%= payment.reference || '—' %></td>
+              <td><span class="billing-status <%= payment.status %>"><%= payment.status %></span></td>
+              <td class="muted"><%= payment.verifiedAt ? new Date(payment.verifiedAt).toLocaleString() : '—' %></td>
+            </tr>
+          <% }) %>
+        </tbody></table></div>
       </section>
     <% } %>
   </div>

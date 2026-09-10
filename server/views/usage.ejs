@@ -161,18 +161,46 @@
       </div>
     </section>
 
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
     <% if (!u.isPaid) { %>
-    <section class="upgrade-card">
-      <div><p class="eyebrow">GET MORE FROM YOUR MEETINGS</p><h2>Upgrade to Pro</h2><p>Unlock unlimited meetings, advanced AI insights, Ask AI, and premium exports.</p></div>
-      <div class="upgrade-benefits"><span>✓ Unlimited meetings</span><span>✓ Advanced AI analysis</span><span>✓ AI Insights</span><span>✓ Unlimited Ask AI</span><span>✓ PDF &amp; Markdown exports</span></div>
-      <a class="btn-primary" href="/#pricing">Upgrade to Pro <span class="material-symbols-outlined">arrow_forward</span></a>
-    </section>
+    <% if (upgradeRequest) { %>
+      <section class="upgrade-card upgrade-pending">
+        <div><p class="eyebrow">UPGRADE REQUEST</p><h2>Pro request is pending</h2><p>Your request was submitted for admin verification. You will be moved to Pro after the payment is verified.</p></div>
+        <div class="upgrade-request-meta">
+          <span><strong>Plan</strong> <%= upgradeRequest.requestedPlanId?.name || 'Pro' %></span>
+          <span><strong>Billing</strong> <%= upgradeRequest.billingInterval === 'year' ? 'Yearly' : 'Monthly' %></span>
+          <span><strong>Amount</strong> <%= upgradeRequest.currency || 'USD' %> <%= Number(upgradeRequest.amount || 0).toFixed(2) %></span>
+          <span><strong>Submitted</strong> <%= formatDate(upgradeRequest.createdAt, { month: 'short', day: 'numeric', year: 'numeric' }) %></span>
+        </div>
+        <form method="POST" action="/billing/upgrade-request/<%= upgradeRequest._id %>/cancel" onsubmit="return confirm('Cancel this upgrade request?')"><button class="btn-ghost" type="submit">Cancel request</button></form>
+      </section>
+    <% } else { %>
+      <section class="upgrade-card">
+        <div><p class="eyebrow">GET MORE FROM YOUR MEETINGS</p><h2>Upgrade to Pro</h2><p>Unlock unlimited meetings, transcription, AI questions, advanced AI insights, and premium exports.</p></div>
+        <div class="upgrade-benefits"><span>✓ Unlimited meetings</span><span>✓ Unlimited transcription</span><span>✓ AI Insights</span><span>✓ Unlimited Ask AI</span><span>✓ PDF &amp; Markdown exports</span></div>
+        <form class="upgrade-request-form" method="POST" action="/billing/upgrade-request">
+          <input type="hidden" name="planSlug" value="pro" />
+          <label>Billing
+            <select name="billingInterval">
+              <option value="month">Monthly · $<%= Number(plansList.find(pl => pl.slug === 'pro')?.priceMonthly || 0) %>/month</option>
+              <option value="year">Yearly · $<%= Number(plansList.find(pl => pl.slug === 'pro')?.priceAnnual || 0) %>/year</option>
+            </select>
+          </label>
+          <label>Payment method
+            <select name="paymentMethod"><option value="manual">Manual / Admin verification</option></select>
+          </label>
+          <input name="note" maxlength="1000" placeholder="Optional payment/reference note" />
+          <button class="btn-primary" type="submit">Request Pro <span class="material-symbols-outlined">arrow_forward</span></button>
+          <small>Arrange payment with the administrator, then submit this request. No plan change happens until it is approved.</small>
+        </form>
+      </section>
+    <% } %>
     <% } %>
 
     <section class="card section-card plan-comparison">
       <div class="section-title-row">
         <div><p class="eyebrow">PLANS</p><h2>Compare plans</h2><p class="muted"><%= u.isPaid ? `See what your current ${currentPlanName} plan includes.` : 'See what changes when you upgrade.' %></p></div>
-        <% if (u.isPaid && p.slug === 'pro') { %><a class="text-link" href="/#pricing">Compare Pro vs Team <span class="material-symbols-outlined">arrow_forward</span></a><% } %>
+        
       </div>
       <div class="comparison-table-wrap"><table class="comparison-table"><thead><tr><th>Feature</th><% plansList.forEach(function(pl) { %><th class="<%= isCurrent(pl) ? 'current-plan' : '' %>"><%= pl.name %><% if (isCurrent(pl)) { %><small>YOUR PLAN</small><% } %></th><% }) %></tr></thead><tbody>
         <tr><td>Meetings / month</td><% plansList.forEach(function(pl) { %><td><%= limit(pl.maxMeetingsPerMonth) %></td><% }) %></tr>
@@ -195,7 +223,7 @@
         <div><span>Next usage reset</span><strong><%= formatDate(reset) %></strong></div>
         <div><span>Billing cycle</span><strong>Monthly</strong></div>
       </div>
-      <div class="billing-note"><span class="material-symbols-outlined">info</span> Payment method, invoices, and cancellation controls can be managed from your subscription settings.</div>
+      <div class="billing-note"><span class="material-symbols-outlined">info</span> Upgrades are currently handled through an admin-verified request. Once approved, your Pro subscription is activated for the selected billing period.</div>
       <div class="subscription-actions-buttons">
         <a class="btn-primary" href="/#pricing"><span class="material-symbols-outlined">manage_accounts</span> Manage subscription</a>
         <% if (u.isPaid) { %><a class="btn-ghost danger-soft" href="/#pricing"><span class="material-symbols-outlined">cancel</span> Manage cancellation</a><% } %>

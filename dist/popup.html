@@ -11,8 +11,8 @@
     <section id="authGate" class="auth-gate hidden">
       <div class="auth-gate-card">
         <div class="auth-gate-icon">✦</div>
-        <strong>Connect to server</strong>
-        <p>Create an account on the web app, copy your API key, and paste it here. The extension talks only to the API.</p>
+        <strong id="authGateTitle">Connect your account</strong>
+        <p id="authGateMessage">Connect this extension to your AI Note Taker account with the API key from your account settings.</p>
         <label class="auth-label">Server URL
           <input id="authServerUrl" type="url" value="http://localhost:4000" placeholder="http://localhost:4000" />
         </label>
@@ -25,7 +25,7 @@
       </div>
     </section>
 
-    <div id="mainApp">
+    <div id="mainApp" class="hidden">
     <header class="topbar">
       <div class="brand">
         <div class="brand-icon">✦</div>
@@ -35,6 +35,7 @@
         </div>
       </div>
       <div class="status-wrap">
+        <span id="connectionBadge" class="connection-badge checking"><span class="connection-dot"></span><span id="connectionText">Checking connection…</span></span>
         <span id="statusDot" class="status-dot ready"></span>
         <span id="statusBadge" class="status-text">Ready</span>
       </div>

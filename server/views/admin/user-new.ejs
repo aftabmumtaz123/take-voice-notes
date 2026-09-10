@@ -6,7 +6,7 @@
       <div>
         <a class="back" href="/admin/users">← Users</a>
         <h1>Add user</h1>
-        <p class="admin-sub">Create an account with a username and passkey.</p>
+        <p class="admin-sub">Create an account with verified contact details and a username/passkey. Admin-created accounts are email verified.</p>
       </div>
     </header>
 
@@ -17,6 +17,10 @@
         <label>
           Display name
           <input type="text" name="displayName" value="<%= form?.displayName || '' %>" placeholder="Aftab Mumtaz" />
+        </label>
+        <label>
+          Email
+          <input type="email" name="email" value="<%= form?.email || '' %>" required placeholder="user@example.com" />
         </label>
         <label>
           Username

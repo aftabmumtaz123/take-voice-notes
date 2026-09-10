@@ -53,83 +53,110 @@
   }
 
 
+  // Only accept values that look like real display names. Google Meet exposes
+  // many accessibility labels inside participant/video containers; reading
+  // textContent from those containers turns UI strings into "participants".
   const PARTICIPANT_IGNORE = new Set([
     'you', 'me', 'host', 'co-host', 'presenter', 'participant', 'participants',
-    'meeting', 'meeting controls', 'more options', 'options', 'chat', 'mute',
-    'unmute', 'camera', 'microphone', 'leave', 'leave meeting', 'end meeting',
-    'share screen', 'raise hand', 'captions', 'settings', 'close', 'minimize',
-    'maximize', 'recording', 'transcribing', 'connected', 'reconnecting'
+    'meeting', 'meeting controls', 'more options', 'more actions', 'options',
+    'chat', 'mute', 'unmute', 'camera', 'microphone', 'leave', 'leave meeting',
+    'end meeting', 'share screen', 'raise hand', 'captions', 'settings', 'close',
+    'minimize', 'maximize', 'recording', 'transcribing', 'connected',
+    'reconnecting', 'devices', 'more_vert'
   ]);
+
+  const PARTICIPANT_UI_WORDS = /\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|options|settings|leave|end meeting|hang up|share screen|present|presenting|raise hand|captions|chat|you can't|can't unmute|turn on|turn off|remove|pin|spotlight|hide|show|stop|start)\b/i;
 
   function cleanParticipantName(value) {
     let name = String(value || '').replace(/\s+/g, ' ').trim();
-    if (!name || name.length < 2 || name.length > 100) return '';
-    const normalized = name.toLowerCase().replace(/[•·]/g, '').trim();
+    if (!name || name.length < 2 || name.length > 80) return '';
+
+    // Meet often annotates the local user with "(You)". Keep the real name.
+    name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+    name = name.replace(/\s*[-–—|]\s*(?:you|me)\s*$/i, '').trim();
+    name = name.replace(/^[•·]\s*/, '').trim();
+
+    const normalized = name.toLowerCase();
     if (PARTICIPANT_IGNORE.has(normalized)) return '';
-    if (/^(button|menu|dialog|list|video|audio|tile|participant)\b/i.test(name)) return '';
-    if (/^(mute|unmute|remove|pin|spotlight|hide|show|turn|share|stop|start|leave|end|open|close)\b/i.test(name)) return '';
-    if (/https?:\/\//i.test(name) || /\b(call|meeting)\s*(controls|options)\b/i.test(name)) return '';
+    if (/[a-z][A-Z]/.test(name)) return '';
+    if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications)\b/i.test(name)) return '';
+    if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) return '';
+    if (PARTICIPANT_UI_WORDS.test(name)) return '';
+    if (/https?:\/\//i.test(name)) return '';
+    if (/\b(?:aria-label|data-participant|jsname|role)=/i.test(name)) return '';
+    if (/[\n\r\t]/.test(name)) return '';
+
+    // Display names can contain spaces, punctuation and Unicode, but not a
+    // sentence full of punctuation. This also rejects accessibility messages.
+    const words = name.split(' ').filter(Boolean);
+    if (words.length > 6) return '';
+    if ((name.match(/[.!?]/g) || []).length > 1) return '';
+    if (/[{}<>]/.test(name)) return '';
     return name;
   }
 
   function addCandidate(set, value) {
     const name = cleanParticipantName(value);
     if (!name) return;
-    // Avoid collecting long UI sentences as participant names.
-    if (name.split(' ').length > 8) return;
     set.add(name);
   }
 
   function collectParticipantNames() {
-    const names = new Set();
-    const selectors = [
-      // Google Meet participant/video tiles and labels.
-      '[data-participant-id]',
+    const names = new Map();
+    const add = value => {
+      const name = cleanParticipantName(value);
+      if (!name) return;
+      const key = name.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+      if (!names.has(key)) names.set(key, name);
+    };
+
+    // Prefer explicit participant-name attributes. Do NOT use textContent from
+    // broad video/list containers: those include Meet controls and messages.
+    const explicitSelectors = [
       '[data-self-name]',
       '[data-participant-name]',
-      '[jsname="participant"]',
-      '[jsname="camera"]',
-      // Common accessible participant/list labels across Meet/Zoom/Teams.
-      '[role="listitem"][aria-label]',
-      '[role="listitem"] [aria-label]',
-      '[data-tooltip*="participant" i]',
-      '[aria-label*="participant" i]'
+      '[data-participant-id][aria-label]',
+      '[data-participant-id][data-self-name]',
+      '[data-participant-id][data-participant-name]'
     ];
 
-    for (const selector of selectors) {
+    for (const selector of explicitSelectors) {
       let nodes = [];
       try { nodes = document.querySelectorAll(selector); } catch (_) { continue; }
       for (const node of nodes) {
-        addCandidate(names, node.getAttribute?.('data-self-name'));
-        addCandidate(names, node.getAttribute?.('data-participant-name'));
-        const aria = node.getAttribute?.('aria-label');
-        if (aria) {
-          // Prefer the part before common UI suffixes.
-          const cleaned = aria
-            .replace(/\s*[-–—|].*$/g, '')
-            .replace(/\s+(is|has)\s+(muted|unmuted|speaking|presenting).*$/i, '')
-            .trim();
-          addCandidate(names, cleaned);
-        }
-        const text = node.textContent;
-        if (text && text.length <= 100) addCandidate(names, text);
+        add(node.getAttribute?.('data-self-name'));
+        add(node.getAttribute?.('data-participant-name'));
       }
     }
 
-    // Inspect visible video elements' nearest labelled container.
+    // Accessibility labels are useful only when they are attached directly to
+    // participant tiles/list items. Never take arbitrary textContent here.
+    const labelledSelectors = [
+      '[role="listitem"][aria-label]',
+      '[data-participant-id][aria-label]'
+    ];
+    for (const selector of labelledSelectors) {
+      let nodes = [];
+      try { nodes = document.querySelectorAll(selector); } catch (_) { continue; }
+      for (const node of nodes) {
+        const aria = node.getAttribute?.('aria-label') || '';
+        // Common Meet format: "Name, video on, microphone off".
+        const first = aria.split(/\s*[,|•·]\s*/)[0].trim();
+        add(first);
+      }
+    }
+
+    // Some Meet builds expose a participant name through a direct label node.
+    // Read only small, non-control elements with explicit participant markers.
     try {
-      document.querySelectorAll('video').forEach(video => {
-        let el = video;
-        for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
-          addCandidate(names, el.getAttribute?.('aria-label'));
-          addCandidate(names, el.getAttribute?.('data-participant-name'));
-          addCandidate(names, el.getAttribute?.('data-self-name'));
-          if (names.size >= 100) break;
-        }
+      document.querySelectorAll('[data-participant-id] [aria-label]').forEach(node => {
+        const aria = node.getAttribute?.('aria-label') || '';
+        if (/^(?:video|microphone|audio|camera|more|options|button|menu)/i.test(aria)) return;
+        add(aria.split(/\s*[,|•·]\s*/)[0]);
       });
     } catch (_) {}
 
-    return Array.from(names).slice(0, 50);
+    return Array.from(names.values()).slice(0, 50);
   }
 
   let participantTimer = null;

@@ -12,7 +12,7 @@ globalThis.AI_NOTE_CONFIG = {
   ],
   "keys": {
     "deepgram": "",
-    "assemblyai": "",
+    "assemblyai": "f4d7a677c14b49dfa5166085c731e8a7",
     "openai": ""
   },
   "deepgramModel": "nova-3",
@@ -395,6 +395,47 @@ function getClientUrl() {
 async function getBackendUrl() {
   const { backendUrlOverride } = await chrome.storage.local.get({ backendUrlOverride: '' });
   return String(backendUrlOverride || globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+}
+
+async function checkAuthConnection() {
+  const backendUrl = await getBackendUrl();
+  const stored = await getAuthSession();
+  if (!stored.apiKey) {
+    return { ok: true, status: 'not_connected', user: null, backendUrl };
+  }
+  try {
+    const response = await fetch(`${backendUrl}/api/auth/me`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${stored.apiKey}`, 'X-API-Key': stored.apiKey },
+      cache: 'no-store'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || !data.user) {
+      if (response.status === 401 || response.status === 403) {
+        await chrome.storage.local.remove(['authToken', 'authApiKey', 'authUser']);
+        return { ok: true, status: 'not_connected', user: null, backendUrl };
+      }
+      // Keep the saved account session. A temporary server/network problem
+      // must never force the user to paste the API key again. The key remains
+      // persisted in chrome.storage.local and will be verified next time the
+      // server is reachable.
+      if (stored.apiKey && stored.user) {
+        return { ok: true, status: 'connected_cached', user: stored.user, backendUrl,
+          error: data.error || `Server returned ${response.status}` };
+      }
+      return { ok: true, status: 'unavailable', user: null, backendUrl, error: data.error || `Server returned ${response.status}` };
+    }
+    await chrome.storage.local.set({ authToken: stored.apiKey, authApiKey: stored.apiKey, authUser: data.user, noteUserId: data.user.id });
+    return { ok: true, status: 'connected', user: data.user, backendUrl };
+  } catch (error) {
+    // Network/server downtime is not a logout. If the extension has a saved
+    // API key and account, keep the main UI available and retry verification
+    // on the next popup open. Only a definitive 401/403 above clears auth.
+    if (stored.apiKey && stored.user) {
+      return { ok: true, status: 'connected_cached', user: stored.user, backendUrl, error: error.message || String(error) };
+    }
+    return { ok: true, status: 'unavailable', user: null, backendUrl, error: error.message || String(error) };
+  }
 }
 
 async function postMeetingToBackend(payload) {
@@ -987,6 +1028,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
 
+        case 'CHECK_AUTH_CONNECTION': {
+          sendResponse(await checkAuthConnection());
+          break;
+        }
+
         case 'AUTH_LOGIN': {
           try {
             const response = await fetch(`${await getBackendUrl()}/api/auth/login`, {
@@ -1101,9 +1147,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const existing = Array.isArray(activeMeeting.participants) ? activeMeeting.participants : [];
           const merged = new Map();
           for (const p of [...existing, ...incoming]) {
-            const name = String(p?.name || p?.displayName || '').replace(/\s+/g, ' ').trim();
-            if (!name || name.length > 100) continue;
-            const key = name.toLowerCase();
+            let name = String(p?.name || p?.displayName || '').replace(/\s+/g, ' ').trim();
+            name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+            if (!name || name.length > 80) continue;
+            if (/[a-z][A-Z]/.test(name)) continue;
+            if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications)\b/i.test(name)) continue;
+            if (/\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|settings|leave|end meeting|share screen|presenting|raise hand|captions|chat|you can't|can't unmute)\b/i.test(name)) continue;
+            if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) continue;
+            if (name.split(' ').length > 6 || /https?:\/\//i.test(name) || /[{}<>]/.test(name)) continue;
+            const key = name.toLocaleLowerCase();
             if (!merged.has(key)) merged.set(key, { name, email: String(p?.email || '') });
           }
           activeMeeting.participants = Array.from(merged.values()).slice(0, 50);

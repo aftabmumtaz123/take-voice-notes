@@ -29,8 +29,15 @@ import {
   planBadgeLabel,
   isUnlimited,
   formatLimit,
-  findOrCreateGoogleUser
+  findOrCreateGoogleUser,
+  resetPasskey,
+  createSession
 } from './auth.js';
+import {
+  Subscription, UpgradeRequest, Payment, getEffectivePlan, getPendingUpgradeRequest,
+  createUpgradeRequest, activateSubscription, rejectUpgradeRequest, cancelUserSubscription
+} from './billing.js';
+import { EmailTemplate, seedEmailTemplates, sendEmail, sendTemplateToUser, createOtp, hashSecret, appBaseUrl } from './email.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -156,6 +163,59 @@ const meetingProcessingLocks = new Map();
 let lastGeminiOkAt = null;
 let lastGeminiError = '';
 
+function sanitizeParticipantName(value) {
+  let name = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!name || name.length < 2 || name.length > 80) return '';
+  name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+  name = name.replace(/\s*[-–—|]\s*(?:you|me)\s*$/i, '').trim();
+  name = name.replace(/^[•·]\s*/, '').trim();
+  const normalized = name.toLowerCase();
+  const ignored = new Set([
+    'you','me','host','co-host','presenter','participant','participants','meeting',
+    'meeting controls','more options','more actions','options','chat','mute','unmute',
+    'camera','microphone','leave','leave meeting','end meeting','share screen',
+    'raise hand','captions','settings','close','minimize','maximize','recording',
+    'transcribing','connected','reconnecting','devices','more_vert'
+  ]);
+  if (ignored.has(normalized)) return '';
+  // Google Meet can concatenate multiple tile/accessibility labels, e.g.
+  // "Hassan RazaAdmit Hassan Raza" or "Rimsha AzharAdmit...".
+  // A real display name should not contain a camel-case word boundary.
+  if (/[a-z][A-Z]/.test(name)) return '';
+  if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications|mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|options|settings|leave|end meeting|hang up|share screen|present|presenting|raise hand|captions|chat|you can't|can't unmute|turn on|turn off|remove|pin|spotlight|hide|show|stop|start)\b/i.test(name)) return '';
+  if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) return '';
+  if (/https?:\/\//i.test(name) || /[{}<>]/.test(name)) return '';
+  if (!/^[\p{L}\p{M}][\p{L}\p{M} .’'\-]{1,78}$/u.test(name)) return '';
+  if (name.split(' ').filter(Boolean).length > 6) return '';
+  if ((name.match(/[.!?]/g) || []).length > 1) return '';
+  if (name.length > 3 && !/\s/.test(name) && !/^[\p{L}\p{M}]+(?:[-’'][\p{L}\p{M}]+)+$/u.test(name)) return '';
+  return name;
+}
+
+function sanitizeParticipants(list = []) {
+  const merged = new Map();
+  for (const p of Array.isArray(list) ? list : []) {
+    const name = sanitizeParticipantName(p?.name || p?.displayName);
+    if (!name) continue;
+    const key = name.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    if (!merged.has(key)) {
+      merged.set(key, {
+        name,
+        email: String(p?.email || '').slice(0, 200),
+        talkSeconds: Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0)),
+        talkPercent: Math.max(0, Math.min(100, Number(p?.talkPercent || 0))),
+        color: String(p?.color || '').slice(0, 20)
+      });
+    } else {
+      const current = merged.get(key);
+      current.talkSeconds += Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0));
+      current.talkPercent = Math.max(current.talkPercent, Math.max(0, Math.min(100, Number(p?.talkPercent || 0))));
+      if (!current.email && p?.email) current.email = String(p.email).slice(0, 200);
+    }
+  }
+  return Array.from(merged.values()).slice(0, 50);
+}
+
 function normalizeMeetingBody(body = {}) {
   return {
     externalId: String(body.externalId || crypto.randomUUID()),
@@ -166,15 +226,7 @@ function normalizeMeetingBody(body = {}) {
     startedAt: body.startedAt ? new Date(body.startedAt) : new Date(),
     endedAt: body.endedAt ? new Date(body.endedAt) : new Date(),
     duration: Math.max(0, Number(body.duration || 0)),
-    participants: Array.isArray(body.participants)
-      ? body.participants.slice(0, 100).map((p) => ({
-          name: String(p?.name || p?.displayName || '').slice(0, 120),
-          email: String(p?.email || '').slice(0, 200),
-          talkSeconds: Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0)),
-          talkPercent: Math.max(0, Math.min(100, Number(p?.talkPercent || 0))),
-          color: String(p?.color || '').slice(0, 20)
-        }))
-      : [],
+    participants: sanitizeParticipants(body.participants),
     fullTranscript: String(body.fullTranscript || ''),
     transcript: Array.isArray(body.transcript) ? body.transcript : [],
     notes: String(body.notes || '')
@@ -698,47 +750,30 @@ app.get('/', optionalAuth, async (req, res) => {
 
 
 async function loadUserPlanContext(user) {
-  const [plan, account] = await Promise.all([
-    Plan.findOne({ slug: user.planSlug || 'free' }).lean().catch(() => null),
-    User.findById(user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null)
-  ]);
+  const effective = await getEffectivePlan(user);
+  const plan = effective.plan;
+  const account = await User.findById(user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null);
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-  const usedThisMonth = await Meeting.countDocuments({
-    userId: user.id,
-    createdAt: { $gte: monthStart }
-  }).catch(() => 0);
-  const aiThisMonth = await Meeting.countDocuments({
-    userId: user.id,
-    createdAt: { $gte: monthStart },
-    'ai.summary': { $exists: true, $ne: '' }
-  }).catch(() => 0);
+  const usedThisMonth = await Meeting.countDocuments({ userId: user.id, createdAt: { $gte: monthStart } }).catch(() => 0);
+  const aiThisMonth = await Meeting.countDocuments({ userId: user.id, createdAt: { $gte: monthStart }, 'ai.summary': { $exists: true, $ne: '' } }).catch(() => 0);
   const durationSec = await Meeting.aggregate([
     { $match: { userId: user.id, createdAt: { $gte: monthStart } } },
     { $group: { _id: null, total: { $sum: '$duration' } } }
   ]).then((r) => r[0]?.total || 0).catch(() => 0);
-  const maxMeetings = plan?.maxMeetingsPerMonth ?? 5;
-  const remainingPct = isUnlimited(maxMeetings)
-    ? 100
-    : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
+  const maxMeetings = plan?.maxMeetingsPerMonth ?? 3;
+  const maxTranscriptionMinutes = plan?.maxTranscriptionMinutes ?? 30;
+  const maxAiQuestions = plan?.maxAiQuestions ?? 20;
+  const remainingPct = isUnlimited(maxMeetings) ? 100 : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
   const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`;
   const askAiCount = account?.askAiUsageMonth === monthKey ? Number(account.askAiUsageCount || 0) : 0;
+  const paid = plan?.slug === 'pro' || (plan?.slug && plan.slug !== 'free');
   return {
-    plan,
-    usage: {
-      meetingsUsed: usedThisMonth,
-      meetingsMax: maxMeetings,
-      aiNotes: aiThisMonth,
-      transcriptionMinutes: Math.round(durationSec / 60),
-      aiQuestions: askAiCount,
-      remainingPct,
-      isPaid: isPaidPlan(user.planSlug),
-      badge: planBadgeLabel(user.planSlug)
-    }
+    plan, subscription: effective.subscription,
+    usage: { meetingsUsed: usedThisMonth, meetingsMax: maxMeetings, aiNotes: aiThisMonth, transcriptionMinutes: Math.round(durationSec / 60), transcriptionMax: maxTranscriptionMinutes, aiQuestions: askAiCount, aiQuestionsMax: maxAiQuestions, remainingPct, isPaid: paid, badge: planBadgeLabel(plan?.slug || 'free') }
   };
 }
-
 
 app.get('/app', requireAuth, (req, res) => res.redirect('/app/overview'));
 
@@ -1029,10 +1064,11 @@ app.get('/app/usage', requireAuth, async (req, res) => {
     const periodEnd = monthEnd;
     const daysLeft = Math.max(1, Math.ceil((periodEnd - now) / 86400000));
     const periodLabel = range === 'today' ? 'Today' : range === '7d' ? 'Last 7 days' : range === 'last-month' ? 'Last month' : 'This month';
-    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug) || pl.slug === ctx.plan?.slug);
+    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug));
+    const upgradeRequest = await getPendingUpgradeRequest(req.user.id).catch(() => null);
     res.render('usage', {
-      user: req.user, settings, plan: ctx.plan, usage: ctx.usage, daysLeft, monthStart, monthEnd,
-      usageHistory, plans: comparisonPlans, aiActivity, range, periodLabel, error: null, success: null
+      user: req.user, settings, plan: ctx.plan, subscription: ctx.subscription, usage: ctx.usage, daysLeft, monthStart, monthEnd,
+      usageHistory, plans: comparisonPlans, aiActivity, upgradeRequest, range, periodLabel, error: null, success: req.query.success || null
     });
   } catch (error) {
     console.error('[usage] render failed:', error.message);
@@ -1062,8 +1098,10 @@ app.post('/login', async (req, res) => {
       label: 'web'
     });
     setSessionCookie(res, result.token);
+    sendTemplateToUser(result.user.id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Web sign-in' }).catch(() => {});
     res.redirect(postLoginRedirect(result.user));
   } catch (error) {
+    if (error.code === 'EMAIL_NOT_VERIFIED') return res.redirect('/verify-email?username=' + encodeURIComponent(error.username || req.body.username || '') + '&error=' + encodeURIComponent(error.message));
     const settings = await getSiteSettings().catch(() => null);
     res.status(error.status || 400).render('login', {
       user: null,
@@ -1166,6 +1204,7 @@ app.get('/api/google/callback', async (req, res) => {
       }
     });
     setSessionCookie(res, result.token);
+    sendTemplateToUser(result.user.id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Google sign-in' }).catch(() => {});
     console.log(`[auth] google login @${result.user.username}`);
     res.redirect(postLoginRedirect(result.user));
   } catch (err) {
@@ -1189,13 +1228,127 @@ app.post('/register', async (req, res) => {
     const result = await registerUser({
       username: req.body.username,
       passkey: req.body.passkey,
-      displayName: req.body.displayName
+      displayName: req.body.displayName,
+      email: req.body.email
     });
-    setSessionCookie(res, result.token);
-    res.redirect(postLoginRedirect(result.user));
+    const user = await User.findById(result.user.id);
+    const mail = await issueVerificationOtp(user);
+    if (!mail.ok) {
+      await User.deleteOne({ _id: user._id }).catch(() => {});
+      throw new Error(mail.error || 'We could not send the verification email. Please check the Gmail configuration.');
+    }
+    res.redirect('/verify-email?username=' + encodeURIComponent(user.username));
   } catch (error) {
     const settings = await getSiteSettings().catch(() => null);
     res.status(error.status || 400).render('register', { user: null, error: error.message, success: null, settings });
+  }
+});
+
+
+
+// ─── Email verification & password recovery ────────────────────────────────
+function safeEmail(raw) { return String(raw || '').trim().toLowerCase(); }
+function formatUserDate(d) { return d ? new Date(d).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '—'; }
+
+async function issueVerificationOtp(user) {
+  const otp = createOtp();
+  user.emailOtpHash = hashSecret(otp);
+  user.emailOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  user.emailOtpAttempts = 0;
+  await user.save();
+  return sendEmail({
+    to: user.email, templateKey: 'signup-otp', transactional: true,
+    vars: { siteName: (await getSiteSettings().catch(() => null))?.siteName || 'AI Note Taker', username: user.username, displayName: user.displayName || user.username, otp, expiresMinutes: 10 }
+  });
+}
+
+app.get('/verify-email', async (req, res) => {
+  const username = String(req.query.username || '').trim().toLowerCase();
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('verify-email', { user: null, username, error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/verify-email', async (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase();
+  const otp = String(req.body.otp || '').trim();
+  const settings = await getSiteSettings().catch(() => null);
+  try {
+    const user = await User.findOne({ username });
+    if (!user) throw Object.assign(new Error('We could not find that account.'), { status: 404 });
+    if (user.emailVerified) return res.redirect('/login?success=' + encodeURIComponent('Your email is already verified. You can log in now.'));
+    if (!user.emailOtpHash || !user.emailOtpExpiresAt || new Date(user.emailOtpExpiresAt) < new Date()) throw Object.assign(new Error('That verification code has expired. Request a new one.'), { status: 400 });
+    if (Number(user.emailOtpAttempts || 0) >= 5) throw Object.assign(new Error('Too many incorrect attempts. Request a new verification code.'), { status: 429 });
+    user.emailOtpAttempts = Number(user.emailOtpAttempts || 0) + 1;
+    if (hashSecret(otp) !== user.emailOtpHash) { await user.save(); throw Object.assign(new Error('That verification code is incorrect.'), { status: 400 }); }
+    user.emailVerified = true; user.emailOtpHash = ''; user.emailOtpExpiresAt = null; user.emailOtpAttempts = 0;
+    await user.save();
+    const session = await createSession(user, 'web');
+    await sendTemplateToUser(user._id, 'welcome', { appUrl: appBaseUrl() }, { transactional: true }).catch(() => {});
+    setSessionCookie(res, session.token);
+    res.redirect(postLoginRedirect(publicUser(user)));
+  } catch (error) {
+    res.status(error.status || 400).render('verify-email', { user: null, username, error: error.message, success: null, settings });
+  }
+});
+
+app.post('/verify-email/resend', async (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase();
+  try {
+    const user = await User.findOne({ username });
+    if (!user || !user.email) throw new Error('We could not find a verifiable account for that username.');
+    if (user.emailVerified) return res.redirect('/login?success=' + encodeURIComponent('Your email is already verified.'));
+    const result = await issueVerificationOtp(user);
+    if (!result.ok) throw new Error(result.error || 'Unable to send the verification email.');
+    res.redirect('/verify-email?username=' + encodeURIComponent(username) + '&success=' + encodeURIComponent('A fresh verification code has been sent to your email.'));
+  } catch (error) {
+    res.redirect('/verify-email?username=' + encodeURIComponent(username) + '&error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/forgot-password', optionalAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('forgot-password', { user: null, error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/forgot-password', async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  const identifier = safeEmail(req.body.identifier);
+  try {
+    const user = await User.findOne({ $or: [{ email: identifier }, { username: identifier }] });
+    // Always return the same user-facing result to avoid account enumeration.
+    if (user?.email) {
+      const rawToken = crypto.randomBytes(32).toString('base64url');
+      user.passwordResetTokenHash = hashSecret(rawToken);
+      user.passwordResetExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      await user.save();
+      const resetUrl = `${appBaseUrl()}/reset-password?token=${encodeURIComponent(rawToken)}`;
+      await sendTemplateToUser(user._id, 'password-reset', { resetUrl, expiresMinutes: 30 }, { transactional: true });
+    }
+    res.render('forgot-password', { user: null, error: null, success: 'If an account matches that information, a password reset email has been sent.' , settings });
+  } catch (error) {
+    res.status(200).render('forgot-password', { user: null, error: 'We could not start the reset process right now. Please try again.', success: null, settings });
+  }
+});
+
+app.get('/reset-password', async (req, res) => {
+  const token = String(req.query.token || '');
+  const settings = await getSiteSettings().catch(() => null);
+  const valid = token && await User.findOne({ passwordResetTokenHash: hashSecret(token), passwordResetExpiresAt: { $gt: new Date() } }).select('_id').lean().catch(() => null);
+  res.render('reset-password', { user: null, token, valid: Boolean(valid), error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/reset-password', async (req, res) => {
+  const token = String(req.body.token || '');
+  const settings = await getSiteSettings().catch(() => null);
+  try {
+    const user = await User.findOne({ passwordResetTokenHash: hashSecret(token), passwordResetExpiresAt: { $gt: new Date() } });
+    if (!user) throw Object.assign(new Error('This reset link is invalid or has expired.'), { status: 400 });
+    if (String(req.body.passkey || '') !== String(req.body.passkey2 || '')) throw Object.assign(new Error('Passkeys do not match.'), { status: 400 });
+    await resetPasskey(user._id, req.body.passkey);
+    await sendTemplateToUser(user._id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Passkey reset' }, { transactional: true }).catch(() => {});
+    res.redirect('/login?success=' + encodeURIComponent('Your passkey has been reset. You can now log in securely.'));
+  } catch (error) {
+    res.status(error.status || 400).render('reset-password', { user: null, token, valid: false, error: error.message, success: null, settings });
   }
 });
 
@@ -1277,6 +1430,39 @@ app.post('/onboarding/skip', requireAuth, async (req, res) => {
   res.redirect('/app/overview');
 });
 
+
+
+// ─── Admin Email Template Center ──────────────────────────────────────────
+const emailPreviewSamples = { siteName:'AI Note Taker', username:'alex', displayName:'Alex', otp:'482193', expiresMinutes:'10', resetUrl:'#reset', appUrl:'#app', planName:'Pro', billingInterval:'Monthly', amount:'19', currency:'USD', paymentMethod:'Manual verification', requestId:'A-1042', reason:'Payment reference could not be verified.', meetingTitle:'Product planning session', platform:'Google Meet', meetingDate:'Sep 9, 2026, 2:00 PM', duration:'48 minutes', meetingId:'MTG-8291', meetingUrlInApp:'#meeting', summary:'The team aligned on the next release scope and assigned owners for the remaining work.', actionCount:'3', actionItems:'• Finalize release notes\\n• Confirm QA window\\n• Share customer update', error:'AI analysis timed out. Please retry analysis.' };
+
+app.get('/admin/email-templates', requireAdmin, async (req, res) => {
+  try {
+    const templates = await EmailTemplate.find().sort({ sortOrder: 1, category: 1, name: 1 }).lean();
+    const gmailConfigured = Boolean(process.env.GMAIL_SMTP_USER && process.env.GMAIL_SMTP_APP_PASSWORD);
+    res.render('admin/email-templates', { user: req.user, templates, gmailConfigured, error: req.query.error || null, success: req.query.success || null });
+  } catch (error) { res.status(500).render('admin/email-templates', { user: req.user, templates: [], gmailConfigured: false, error: error.message, success: null }); }
+});
+app.get('/admin/email-templates/new', requireAdmin, (req, res) => res.render('admin/email-template-edit', { user: req.user, template: { key:'',name:'',category:'General',description:'',subject:'',preheader:'',bodyHtml:'<div class="email-card"><div class="email-kicker">UPDATE</div><h1>Hello {{displayName}}</h1><p>Write your professional message here.</p></div>',bodyText:'',variables:[],isActive:true }, isNew:true, error:null, samples: emailPreviewSamples }));
+app.get('/admin/email-templates/:id/edit', requireAdmin, async (req, res) => {
+  const template = await EmailTemplate.findById(req.params.id).lean().catch(() => null);
+  if (!template) return res.redirect('/admin/email-templates?error=' + encodeURIComponent('Template not found.'));
+  res.render('admin/email-template-edit', { user: req.user, template, isNew:false, error:req.query.error || null, success:req.query.success || null, samples: emailPreviewSamples });
+});
+function parseTemplateBody(body = {}, isNew = false) {
+  const key = String(body.key || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 80);
+  const variables = String(body.variables || '').split(',').map(v => v.trim().replace(/^{{|}}$/g,'')).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(0,40);
+  return { key, name:String(body.name||'').trim().slice(0,120), category:String(body.category||'General').trim().slice(0,60), description:String(body.description||'').slice(0,500), subject:String(body.subject||'').slice(0,250), preheader:String(body.preheader||'').slice(0,250), bodyHtml:String(body.bodyHtml||'').slice(0,30000), bodyText:String(body.bodyText||'').slice(0,10000), variables, isActive:body.isActive === '1' || body.isActive === 'on' || body.isActive === true, ...(isNew ? { isSystem:false } : {}) };
+}
+app.post('/admin/email-templates', requireAdmin, async (req, res) => {
+  try { const data=parseTemplateBody(req.body,true); if(!data.key||!data.name||!data.subject||!data.bodyHtml) throw new Error('Key, name, subject, and HTML body are required.'); await EmailTemplate.create(data); res.redirect('/admin/email-templates?success='+encodeURIComponent('Email template created.')); }
+  catch(error){ res.status(400).render('admin/email-template-edit',{user:req.user,template:{...req.body,key:String(req.body.key||''),variables:String(req.body.variables||'').split(',').map(x=>x.trim()),isActive:req.body.isActive==='1'},isNew:true,error:error.message,samples:emailPreviewSamples}); }
+});
+app.post('/admin/email-templates/:id', requireAdmin, async (req, res) => {
+  try { const data=parseTemplateBody(req.body,false); delete data.key; if(!data.name||!data.subject||!data.bodyHtml) throw new Error('Name, subject, and HTML body are required.'); await EmailTemplate.updateOne({_id:req.params.id},{$set:data}); res.redirect('/admin/email-templates?success='+encodeURIComponent('Email template updated. Changes are live immediately.')); }
+  catch(error){ const template=await EmailTemplate.findById(req.params.id).lean().catch(()=>null); res.status(400).render('admin/email-template-edit',{user:req.user,template:{...(template||{}),...req.body,variables:String(req.body.variables||'').split(',').map(x=>x.trim())},isNew:false,error:error.message,samples:emailPreviewSamples}); }
+});
+app.post('/admin/email-templates/:id/toggle', requireAdmin, async (req,res)=>{ const t=await EmailTemplate.findById(req.params.id); if(t){t.isActive=!t.isActive;await t.save();} res.redirect('/admin/email-templates?success='+encodeURIComponent('Template status updated.')); });
+app.post('/admin/email-templates/:id/test', requireAdmin, async (req,res)=>{ try { const t=await EmailTemplate.findById(req.params.id).lean(); if(!t) throw new Error('Template not found.'); const to=String(req.body.to||req.user.email||'').trim(); if(!to) throw new Error('Enter a test recipient email.'); const result=await sendEmail({to,templateKey:t.key,vars:emailPreviewSamples}); if(!result.ok) throw new Error(result.error||'Email could not be sent.'); res.redirect('/admin/email-templates/'+t._id+'/edit?success='+encodeURIComponent('Test email sent.')); } catch(error){ res.redirect('/admin/email-templates/'+req.params.id+'/edit?error='+encodeURIComponent(error.message)); } });
 
 // ─── Admin ──────────────────────────────────────────────────────────
 app.get('/admin', requireAdmin, async (req, res) => {
@@ -1532,9 +1718,10 @@ app.post('/admin/users', requireAdmin, async (req, res) => {
     const result = await registerUser({
       username: req.body.username,
       passkey: req.body.passkey,
-      displayName: req.body.displayName || ''
+      displayName: req.body.displayName || '',
+      email: req.body.email
     });
-    const updates = {};
+    const updates = { emailVerified: true };
     if (req.body.role === 'admin') updates.role = 'admin';
     if (req.body.planSlug) {
       const plan = await Plan.findOne({ slug: String(req.body.planSlug) });
@@ -1546,7 +1733,8 @@ app.post('/admin/users', requireAdmin, async (req, res) => {
     if (Object.keys(updates).length) {
       await User.findByIdAndUpdate(result.user.id, { $set: updates });
     }
-    res.redirect('/admin/users/' + result.user.id + '?success=' + encodeURIComponent('User created'));
+    await sendTemplateToUser(result.user.id, 'welcome', { appUrl: appBaseUrl() }, { transactional: true }).catch(() => {});
+    res.redirect('/admin/users/' + result.user.id + '?success=' + encodeURIComponent('User created and welcome email sent when Gmail is configured.'));
   } catch (error) {
     const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
     res.status(400).render('admin/user-new', {
@@ -1554,7 +1742,8 @@ app.post('/admin/users', requireAdmin, async (req, res) => {
       plans,
       form: {
         username: req.body.username || '',
-        displayName: req.body.displayName || ''
+        displayName: req.body.displayName || '',
+        email: req.body.email || ''
       },
       error: error.message
     });
@@ -1665,13 +1854,9 @@ app.post('/admin/users/:id/role', requireAdmin, async (req, res) => {
 
 app.post('/admin/users/:id/plan', requireAdmin, async (req, res) => {
   try {
-    const plan = await Plan.findOne({ slug: String(req.body.planSlug || 'free') });
-    await User.findByIdAndUpdate(req.params.id, {
-      $set: {
-        planSlug: plan?.slug || 'free',
-        planId: plan?._id || null
-      }
-    });
+    const plan = await Plan.findOne({ slug: String(req.body.planSlug || 'free'), isActive: true });
+    if (!plan) throw new Error('Plan is not available.');
+    await activateSubscription({ userId: req.params.id, planId: plan._id, billingInterval: 'month', paymentMethod: 'admin-assigned', adminId: req.user.id });
     const back = req.get('Referer')?.includes('/admin/users/')
       ? '/admin/users/' + req.params.id
       : '/admin/users';
@@ -1763,6 +1948,67 @@ function parsePlanBody(body = {}, { isNew = false } = {}) {
   return data;
 }
 
+app.get('/admin/billing/requests/:id', requireAdmin, async (req, res) => {
+  const request = await UpgradeRequest.findById(req.params.id).populate('userId requestedPlanId').lean().catch(() => null);
+  if (!request) return res.redirect('/admin/plans?tab=requests');
+  res.render('admin/billing-request', { user: req.user, request, error: req.query.error || null, success: req.query.success || null });
+});
+
+app.post('/admin/billing/requests/:id/approve', requireAdmin, async (req, res) => {
+  try {
+    const request = await UpgradeRequest.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'processing' } },
+      { returnDocument: 'after' }
+    ).lean();
+    if (!request) throw new Error('This request is no longer pending.');
+    try {
+      await activateSubscription({
+        userId: request.userId, planId: request.requestedPlanId, billingInterval: request.billingInterval,
+        paymentMethod: request.paymentMethod || 'manual', adminId: req.user.id, upgradeRequestId: request._id,
+        amount: request.amount, currency: request.currency, reference: req.body.reference
+      });
+    } catch (activationError) {
+      await UpgradeRequest.updateOne({ _id: request._id, status: 'processing' }, { $set: { status: 'pending' } }).catch(() => {});
+      throw activationError;
+    }
+    const approvedSub = await Subscription.findOne({ _id: (await UpgradeRequest.findById(req.params.id).lean())?.subscriptionId }).lean().catch(() => null);
+    const approvedUser = await User.findById(request.userId).lean().catch(() => null);
+    const approvedPlan = await Plan.findById(request.requestedPlanId).lean().catch(() => null);
+    await sendEmail({ to: approvedUser?.email, templateKey: 'upgrade-approved', vars: { siteName:(await getSiteSettings()).siteName, username:approvedUser?.username, displayName:approvedUser?.displayName || approvedUser?.username, planName:approvedPlan?.name || request.requestedPlanSlug, billingInterval:request.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount:Number(request.amount||0).toFixed(2), currency:request.currency||'USD', periodEnd:approvedSub?.currentPeriodEnd ? formatUserDate(approvedSub.currentPeriodEnd) : 'Unlimited', requestId:String(request._id).slice(-8).toUpperCase(), appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=requests&success=' + encodeURIComponent('Upgrade approved and subscription activated.'));
+  } catch (error) {
+    res.redirect('/admin/billing/requests/' + req.params.id + '?error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/billing/requests/:id/reject', requireAdmin, async (req, res) => {
+  try {
+    const result = await rejectUpgradeRequest(req.params.id, req.user.id, req.body.reason);
+    if (!result) throw new Error('This request is no longer pending.');
+    const rejectedUser = await User.findById(result.userId).lean().catch(() => null);
+    const rejectedPlan = await Plan.findById(result.requestedPlanId).lean().catch(() => null);
+    await sendEmail({ to: rejectedUser?.email, templateKey: 'upgrade-rejected', vars: { siteName:(await getSiteSettings()).siteName, username:rejectedUser?.username, displayName:rejectedUser?.displayName || rejectedUser?.username, planName:rejectedPlan?.name || result.requestedPlanSlug, requestId:String(result._id).slice(-8).toUpperCase(), reason:result.rejectionReason || 'The payment could not be verified.', appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=requests&success=' + encodeURIComponent('Upgrade request rejected. The user has been notified by email.'));
+  } catch (error) {
+    res.redirect('/admin/billing/requests/' + req.params.id + '?error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/billing/subscriptions/:id/cancel', requireAdmin, async (req, res) => {
+  try {
+    const sub = await Subscription.findById(req.params.id).lean();
+    if (!sub) throw new Error('Subscription not found.');
+    await cancelUserSubscription(sub.userId, req.user.id);
+    const cancelledUser = await User.findById(sub.userId).lean().catch(() => null);
+    const cancelledPlan = await Plan.findById(sub.planId).lean().catch(() => null);
+    await sendEmail({ to: cancelledUser?.email, templateKey: 'subscription-cancelled', vars: { siteName:(await getSiteSettings()).siteName, username:cancelledUser?.username, displayName:cancelledUser?.displayName || cancelledUser?.username, planName:cancelledPlan?.name || sub.planSlug, cancelledAt:formatUserDate(new Date()), appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=subscriptions&success=' + encodeURIComponent('Subscription cancelled and user moved to Free. The user has been notified by email.'));
+  } catch (error) {
+    res.redirect('/admin/plans?tab=subscriptions&success=' + encodeURIComponent(error.message));
+  }
+});
+
 app.get('/admin/plans', requireAdmin, async (req, res) => {
   try {
     const tab = String(req.query.tab || 'plans');
@@ -1792,6 +2038,24 @@ app.get('/admin/plans', requireAdmin, async (req, res) => {
     }
 
     let subscribers = [];
+    let upgradeRequests = [];
+    let subscriptions = [];
+    let payments = [];
+    if (tab === 'requests') {
+      upgradeRequests = await UpgradeRequest.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('requestedPlanId', 'name slug priceMonthly priceAnnual currency').lean();
+    }
+    if (tab === 'subscriptions') {
+      subscriptions = await Subscription.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('planId', 'name slug').lean();
+    }
+    if (tab === 'transactions') {
+      payments = await Payment.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('subscriptionId', 'planSlug billingInterval').lean();
+    }
     const filters = { q: String(req.query.q || '').trim(), plan: String(req.query.plan || 'all') };
     if (tab === 'subscribers') {
       const filter = {};
@@ -1809,7 +2073,7 @@ app.get('/admin/plans', requireAdmin, async (req, res) => {
       plans,
       activeTab: tab,
       subscriberCounts,
-      subscribers,
+      subscribers, upgradeRequests, subscriptions, payments,
       filters,
       billingStats: { totalUsers, paidUsers, freeUsers, activeUsers, newThisMonth, mrr },
       error: null,
@@ -1821,7 +2085,7 @@ app.get('/admin/plans', requireAdmin, async (req, res) => {
       plans: [],
       activeTab: 'plans',
       subscriberCounts: {},
-      subscribers: [],
+      subscribers: [], upgradeRequests: [], subscriptions: [], payments: [],
       filters: { q: '', plan: 'all' },
       billingStats: {},
       error: error.message,
@@ -2385,6 +2649,29 @@ app.post('/admin/settings', requireAdmin, async (req, res) => {
 
 
 
+app.post('/billing/upgrade-request', requireAuth, async (req, res) => {
+  try {
+    const { planSlug, billingInterval, paymentMethod, note } = req.body || {};
+    const created = await createUpgradeRequest({ userId: req.user.id, planSlug: planSlug || 'pro', billingInterval, paymentMethod, note });
+    if (!created.duplicate) {
+      const r = created.request;
+      await sendTemplateToUser(req.user.id, 'upgrade-request-submitted', { planName: r.requestedPlanSlug === 'pro' ? 'Pro' : r.requestedPlanSlug, billingInterval: r.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount: Number(r.amount || 0).toFixed(2), currency: r.currency || 'USD', paymentMethod: r.paymentMethod || 'Manual verification', requestId: String(r._id).slice(-8).toUpperCase(), appUrl: appBaseUrl() }, { transactional: true });
+    }
+    return res.redirect('/app/usage?success=' + encodeURIComponent(created.duplicate ? 'You already have a pending upgrade request.' : 'Your upgrade request has been sent. We emailed you a confirmation and will notify you after verification.'));
+  } catch (error) {
+    return res.redirect('/app/usage?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/billing/upgrade-request/:id/cancel', requireAuth, async (req, res) => {
+  try {
+    await UpgradeRequest.updateOne({ _id: req.params.id, userId: req.user.id, status: 'pending' }, { $set: { status: 'cancelled' } });
+    res.redirect('/app/usage?success=' + encodeURIComponent('Upgrade request cancelled.'));
+  } catch (error) {
+    res.redirect('/app/usage?success=' + encodeURIComponent(error.message));
+  }
+});
+
 app.get('/account', requireAuth, async (req, res) => {
   const success = req.query.welcome ? 'Account ready. Your extension key is protected and masked by default.' : null;
   const settings = await getSiteSettings().catch(() => null);
@@ -2573,6 +2860,16 @@ app.get('/meetings/:id', requireAuth, async (req, res) => {
   try {
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
+    // Clean legacy participant records at read time too, so meetings saved
+    // before the stricter participant filter cannot display Meet UI labels.
+    const cleanedParticipants = sanitizeParticipants(meeting.participants);
+    if (JSON.stringify(cleanedParticipants) !== JSON.stringify(meeting.participants || [])) {
+      await Meeting.updateOne(
+        { _id: meeting._id, userId: req.user.id },
+        { $set: { participants: cleanedParticipants } }
+      ).catch(() => {});
+      meeting.participants = cleanedParticipants;
+    }
     const settings = await getSiteSettings().catch(() => null);
     const ctx = await loadUserPlanContext(req.user);
     res.render('meeting', { user: req.user, meeting, error: null, success: null, settings, plan: ctx.plan, usage: ctx.usage });
@@ -2665,9 +2962,10 @@ app.post('/api/auth/register', async (req, res) => {
     const result = await registerUser({
       username: req.body.username,
       passkey: req.body.passkey || req.body.password,
-      displayName: req.body.displayName
+      displayName: req.body.displayName,
+      email: req.body.email
     });
-    console.log(`[auth] registered @${result.username}`);
+    console.log(`[auth] registered @${result.user?.username || req.body.username}`);
     res.json({ ok: true, ...result });
   } catch (error) {
     console.error('[auth] register failed:', error.message);
@@ -2861,6 +3159,20 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
     const data = normalizeMeetingBody({ ...req.body, userId: req.user.id });
     processingId = data.externalId;
 
+    // Enforce monthly plan limits on the server. The extension UI is only a convenience;
+    // limits must never depend on client-side checks.
+    const existingForExternal = await Meeting.findOne({ externalId: data.externalId, userId: req.user.id }).select('_id').lean().catch(() => null);
+    const planCtx = await loadUserPlanContext(req.user);
+    const maxMeetings = planCtx.usage.meetingsMax;
+    if (!existingForExternal && !isUnlimited(maxMeetings) && planCtx.usage.meetingsUsed >= Number(maxMeetings)) {
+      return res.status(402).json({ ok: false, code: 'MEETING_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan allows ${maxMeetings} meetings per month. Upgrade to Pro to continue.` });
+    }
+    const maxMinutes = planCtx.usage.transcriptionMax;
+    const incomingMinutes = Math.ceil(Math.max(0, Number(data.duration || 0)) / 60);
+    if (!existingForExternal && !isUnlimited(maxMinutes) && (planCtx.usage.transcriptionMinutes + incomingMinutes) > Number(maxMinutes)) {
+      return res.status(402).json({ ok: false, code: 'TRANSCRIPTION_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan has ${Math.max(0, Number(maxMinutes) - planCtx.usage.transcriptionMinutes)} transcription minutes remaining this month.` });
+    }
+
     // Same externalId = same meeting. Never run two finalizers for it.
     if (meetingProcessingLocks.has(processingId)) {
       return await meetingProcessingLocks.get(processingId).then((result) => res.json(result));
@@ -2870,12 +3182,13 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
       meetingProcessingStates.set(processingId, {
         status: 'processing', stage: 'transcript', message: 'Transcript received. Saving your meeting…', updatedAt: Date.now()
       });
+    data.participants = sanitizeParticipants(data.participants);
     if (!data.participants?.length) {
-      data.participants = deriveParticipantsFromTranscript(
+      data.participants = sanitizeParticipants(deriveParticipantsFromTranscript(
         data.transcript,
         data.fullTranscript,
         data.duration
-      );
+      ));
     } else {
       const total = data.participants.reduce((s, p) => s + (p.talkSeconds || 0), 0);
       data.participants = data.participants.map((p, i) => ({
@@ -2954,6 +3267,22 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
         analysis = meeting.ai;
       }
 
+      const inAppMeetingUrl = `${appBaseUrl()}/meetings/${encodeURIComponent(data.externalId)}?tab=chat`;
+      const commonMeetingVars = {
+        displayName: req.user.displayName || req.user.username,
+        meetingTitle: meeting.title || 'Untitled meeting', platform: meeting.platform || 'Meeting',
+        meetingDate: formatUserDate(meeting.startedAt || meeting.createdAt), duration: meeting.duration ? `${Math.max(1, Math.round(meeting.duration / 60))} minutes` : '—',
+        meetingId: String(meeting.externalId || '').slice(-12), meetingUrlInApp: inAppMeetingUrl, meetingUrl: meeting.meetingUrl || ''
+      };
+      sendTemplateToUser(req.user.id, 'meeting-created', commonMeetingVars).catch(() => {});
+      if (analysisReady) {
+        sendTemplateToUser(req.user.id, 'meeting-summary-ready', { ...commonMeetingVars, summary: String(analysis.summary || '').slice(0, 1800) }).catch(() => {});
+        const actionItems = Array.isArray(analysis.actionItems) ? analysis.actionItems.filter(a => !a?.completed).slice(0, 8) : [];
+        if (actionItems.length) sendTemplateToUser(req.user.id, 'action-items-ready', { ...commonMeetingVars, actionCount: actionItems.length, actionItems: actionItems.map(a => `• ${a.task || 'Follow up'}${a.owner ? ` — ${a.owner}` : ''}${a.deadline ? ` · ${a.deadline}` : ''}`).join('\n') }).catch(() => {});
+      } else if (analysis?.error) {
+        sendTemplateToUser(req.user.id, 'meeting-processing-failed', { ...commonMeetingVars, error: String(analysis.error).slice(0, 1200) }).catch(() => {});
+      }
+
       const result = {
         ok: true,
         meeting: meeting.toObject(),
@@ -3021,6 +3350,13 @@ app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
     if (promptId && !MEETING_PROMPT_TEMPLATES[promptId]) {
       return res.status(400).json({ ok: false, error: 'Unknown prompt template.' });
     }
+    const chatCtx = await loadUserPlanContext(req.user);
+    if (!chatCtx.plan?.featureFlags?.askAi) {
+      return res.status(403).json({ ok: false, code: 'FEATURE_NOT_AVAILABLE', error: 'Ask AI is not included in your current plan. Upgrade to Pro to use Ask AI.' });
+    }
+    if (!isUnlimited(chatCtx.usage.aiQuestionsMax) && chatCtx.usage.aiQuestions >= Number(chatCtx.usage.aiQuestionsMax)) {
+      return res.status(402).json({ ok: false, code: 'AI_QUESTION_LIMIT_REACHED', error: `You have reached your ${chatCtx.plan?.name || 'Free'} plan limit of ${chatCtx.usage.aiQuestionsMax} AI questions this month.` });
+    }
     const answer = await answerMeetingQuestion(meeting, question || MEETING_PROMPT_TEMPLATES[promptId]?.label, promptId);
     const chatNow = new Date();
     const monthKey = `${chatNow.getFullYear()}-${String(chatNow.getMonth() + 1).padStart(2, '0')}`;
@@ -3081,6 +3417,7 @@ app.delete('/api/meetings/:id', requireAuth, async (req, res) => {
 mongoose.connect(mongoUri)
   .then(async () => {
     await seedDefaults();
+    await seedEmailTemplates();
     await Plan.updateOne(
       { slug: 'pro' },
       { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
@@ -3088,8 +3425,6 @@ mongoose.connect(mongoUri)
     app.listen(port, () => {
       console.log(`AI Note Taker API listening on http://localhost:${port}`);
       console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
-      console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
-      console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
     });
   })
   .catch((error) => {

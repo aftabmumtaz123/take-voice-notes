@@ -28,6 +28,10 @@
           <input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" placeholder="username" autocomplete="username" />
         </label>
         <label class="field">
+          <span class="field-ico">@</span>
+          <input name="email" type="email" required maxlength="200" placeholder="Email address" autocomplete="email" />
+        </label>
+        <label class="field">
           <span class="field-ico">Aa</span>
           <input name="displayName" maxlength="80" placeholder="Display name (optional)" autocomplete="name" />
         </label>
@@ -45,7 +49,7 @@
       <div class="auth-divider"><span>Already registered?</span></div>
       <a class="auth-secondary" href="/login">Log in instead</a>
       <p class="auth-legal">
-        You will get an API key for the Chrome extension after sign-up.
+        We’ll send a 6-digit verification code to your email before your first login. You will get an API key for the Chrome extension after verification.
         <a href="/">Back to home</a>
       </p>
     </div>

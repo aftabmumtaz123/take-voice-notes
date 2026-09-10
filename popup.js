@@ -1,6 +1,10 @@
 const $ = (id) => document.getElementById(id);
 
 const statusBadge = $('statusBadge');
+const connectionBadge = $('connectionBadge');
+const connectionText = $('connectionText');
+const authGateTitle = $('authGateTitle');
+const authGateMessage = $('authGateMessage');
 const statusDot = $('statusDot');
 const providerLabel = $('providerLabel');
 const transcriptArea = $('transcriptArea');
@@ -252,21 +256,39 @@ async function refreshCaptureStatus(snapshot = {}) {
 }
 
 function applyAuthUI(snapshot) {
-  const loggedIn = Boolean(snapshot?.isLoggedIn && snapshot?.authUser);
+  const connection = snapshot?.connectionStatus || (snapshot?.isLoggedIn ? 'connected' : 'not_connected');
+  const loggedIn = ['connected', 'connected_cached'].includes(connection) && Boolean(snapshot?.authUser);
+  const labels = {
+    connected: 'Connected',
+    connected_cached: 'Connected · saved account',
+    not_connected: 'Connect your account',
+    unavailable: 'Connection unavailable',
+    checking: 'Checking connection…'
+  };
+  if (connectionBadge) {
+    connectionBadge.className = `connection-badge ${connection}`;
+  }
+  if (connectionText) {
+    if (loggedIn && snapshot.authUser?.username) {
+      connectionText.textContent = connection === 'connected_cached'
+        ? `Connected · @${snapshot.authUser.username}`
+        : `Connected · @${snapshot.authUser.username}`;
+    } else {
+      connectionText.textContent = labels[connection] || 'Connect your account';
+    }
+  }
+  if (authGateTitle) authGateTitle.textContent = connection === 'unavailable' ? 'Reconnect your account' : 'Connect your account';
+  if (authGateMessage) authGateMessage.textContent = connection === 'unavailable'
+    ? 'We could not reach the server. Your saved account is kept securely; reconnect is only required if the API key is invalid or revoked.'
+    : 'Connect this extension to your AI Note Taker account with the API key from your account settings.';
   if (authGate) authGate.classList.toggle('hidden', loggedIn);
   if (mainApp) mainApp.classList.toggle('hidden', !loggedIn);
   if (authFooter) {
-    authFooter.textContent = loggedIn
-      ? `@${snapshot.authUser.username}`
-      : 'Not signed in';
+    authFooter.textContent = loggedIn ? `@${snapshot.authUser.username} · Connected` : 'Account not connected';
   }
   if (logoutLink) logoutLink.classList.toggle('hidden', !loggedIn);
-  if (!loggedIn && authServerUrl && snapshot?.backendUrl) {
-    authServerUrl.value = snapshot.backendUrl;
-  }
-  if (!loggedIn && authApiKey) {
-    setTimeout(() => authApiKey.focus(), 50);
-  }
+  if (!loggedIn && authServerUrl && snapshot?.backendUrl) authServerUrl.value = snapshot.backendUrl;
+  if (!loggedIn && authApiKey && connection !== 'unavailable') setTimeout(() => authApiKey.focus(), 50);
 }
 
 function applySnapshot(snapshot) {
@@ -316,9 +338,41 @@ sessionTitle.addEventListener('keydown', (event) => {
 });
 
 async function loadState() {
-  const result = await send('GET_STATE');
-  if (!result?.ok) return;
-  applySnapshot(result);
+  // Verify the stored API key first. A successful verification is enough to
+  // unlock the transcription UI; do not wait for GET_STATE to decide whether
+  // the account is connected. This also makes the Connect button transition
+  // immediately to the main transcription page after a successful API-key
+  // validation.
+  const connection = await send('CHECK_AUTH_CONNECTION');
+
+  if (connection?.status === 'connected' && connection?.user) {
+    const authSnapshot = {
+      connectionStatus: 'connected',
+      authUser: connection.user,
+      isLoggedIn: true,
+      backendUrl: connection.backendUrl
+    };
+    applyAuthUI(authSnapshot);
+
+    const result = await send('GET_STATE');
+    if (!result?.ok) {
+      // Keep the main app visible because authentication itself succeeded.
+      return;
+    }
+    applySnapshot({
+      ...result,
+      ...authSnapshot,
+      authUser: connection.user
+    });
+    return;
+  }
+
+  applyAuthUI({
+    connectionStatus: connection?.status || 'unavailable',
+    authUser: null,
+    isLoggedIn: false,
+    backendUrl: connection?.backendUrl
+  });
 }
 
 btnStart.addEventListener('click', async () => {
@@ -639,8 +693,27 @@ btnSaveApiKey?.addEventListener('click', async () => {
       showAuthError(result?.error || 'Could not connect. Check server and API key.');
       return;
     }
+    // SET_API_KEY already performed a real /api/auth/me verification.
+    // Transition the popup to the transcription app immediately instead of
+    // showing the connection form until a second check completes.
+    applyAuthUI({
+      connectionStatus: 'connected',
+      authUser: result.user,
+      isLoggedIn: true,
+      backendUrl: serverUrl
+    });
     showToast(`Connected as @${result.user?.username || 'user'}`, { type: 'success', duration: 2500 });
-    await loadState();
+
+    const state = await send('GET_STATE');
+    if (state?.ok) {
+      applySnapshot({
+        ...state,
+        connectionStatus: 'connected',
+        authUser: result.user,
+        isLoggedIn: true,
+        backendUrl: serverUrl
+      });
+    }
   } finally {
     btnSaveApiKey.disabled = false;
     btnSaveApiKey.textContent = prevLabel;

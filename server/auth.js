@@ -131,6 +131,12 @@ const userSchema = new mongoose.Schema({
   passkeySalt: { type: String, default: "" },
   displayName: { type: String, default: "" },
   email: { type: String, default: "", index: true },
+  emailVerified: { type: Boolean, default: false },
+  emailOtpHash: { type: String, default: "" },
+  emailOtpExpiresAt: { type: Date, default: null },
+  emailOtpAttempts: { type: Number, default: 0 },
+  passwordResetTokenHash: { type: String, default: "" },
+  passwordResetExpiresAt: { type: Date, default: null },
   avatarUrl: { type: String, default: "" },
   googleId: { type: String, default: "", index: true, sparse: true },
   googleTokens: {
@@ -242,6 +248,7 @@ export function publicUser(user) {
     username: user.username,
     displayName: user.displayName || user.username,
     email: user.email || "",
+    emailVerified: Boolean(user.emailVerified),
     avatarUrl: user.avatarUrl || "",
     googleId: user.googleId || "",
     role: user.role || "user",
@@ -289,10 +296,14 @@ export function formatLimit(limit, unit = "") {
 }
 
 
-export async function registerUser({ username, passkey, displayName = "" }) {
+export async function registerUser({ username, passkey, displayName = "", email = "" }) {
   const err = validateCredentials(username, passkey);
   if (err) throw Object.assign(new Error(err), { status: 400 });
   const u = normalizeUsername(username);
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw Object.assign(new Error("A valid email address is required to verify your account."), { status: 400 });
+  }
   if (await User.findOne({ username: u })) {
     throw Object.assign(new Error("Username is already taken."), { status: 409 });
   }
@@ -303,13 +314,14 @@ export async function registerUser({ username, passkey, displayName = "" }) {
     passkeyHash: hashPasskey(passkey, salt),
     passkeySalt: salt.toString("hex"),
     displayName: String(displayName || u).slice(0, 80),
+    email: normalizedEmail,
+    emailVerified: false,
     role: "user",
     planId: freePlan?._id || null,
     planSlug: freePlan?.slug || "free",
     apiKey: `ntk_${crypto.randomBytes(24).toString("base64url")}`
   });
-  const session = await createSession(user, "web");
-  return { user: publicUser(user), ...session };
+  return { user: publicUser(user) };
 }
 
 export async function loginUser({ username, passkey, label = "web" }) {
@@ -318,6 +330,9 @@ export async function loginUser({ username, passkey, label = "web" }) {
   const user = await User.findOne({ username: normalizeUsername(username) });
   if (!user) throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
   if (user.isActive === false) throw Object.assign(new Error("Account is disabled."), { status: 403 });
+  if (user.email && user.emailVerified === false) {
+    throw Object.assign(new Error("Please verify your email before logging in."), { status: 403, code: "EMAIL_NOT_VERIFIED", username: user.username });
+  }
   if (!user.passkeyHash || !user.passkeySalt) {
     throw Object.assign(new Error("This account uses Google sign-in. Continue with Google."), { status: 401 });
   }
@@ -374,6 +389,7 @@ export async function findOrCreateGoogleUser({
       passkeySalt: "",
       displayName: String(displayName || uname).slice(0, 80),
       email: String(email || "").toLowerCase().slice(0, 200),
+      emailVerified: true,
       avatarUrl: String(avatarUrl || "").slice(0, 500),
       googleId: String(googleId),
       googleTokens: {
@@ -390,7 +406,7 @@ export async function findOrCreateGoogleUser({
     });
   } else {
     user.googleId = String(googleId);
-    if (email) user.email = String(email).toLowerCase().slice(0, 200);
+    if (email) { user.email = String(email).toLowerCase().slice(0, 200); user.emailVerified = true; }
     if (displayName) user.displayName = String(displayName).slice(0, 80);
     if (avatarUrl) user.avatarUrl = String(avatarUrl).slice(0, 500);
     if (tokens.accessToken) {
@@ -412,7 +428,7 @@ export async function findOrCreateGoogleUser({
   return { user: publicUser(user), ...session };
 }
 
-async function createSession(user, label = "web") {
+export async function createSession(user, label = "web") {
   const token = crypto.randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -462,6 +478,21 @@ export async function verifyPasskey(userId, passkey) {
   const current = hashPasskey(String(passkey || ""), Buffer.from(user.passkeySalt, "hex"));
   if (!crypto.timingSafeEqual(Buffer.from(current, "hex"), Buffer.from(user.passkeyHash, "hex"))) throw Object.assign(new Error("Passkey is incorrect."), { status: 400 });
   return true;
+}
+
+export async function resetPasskey(userId, newPasskey) {
+  const user = await User.findById(userId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  const p = String(newPasskey || "");
+  if (p.length < 6 || p.length > 128) throw Object.assign(new Error("Passkey must be 6–128 characters."), { status: 400 });
+  const salt = crypto.randomBytes(16);
+  user.passkeySalt = salt.toString("hex");
+  user.passkeyHash = hashPasskey(p, salt);
+  user.passwordResetTokenHash = "";
+  user.passwordResetExpiresAt = null;
+  user.sessions = [];
+  await user.save();
+  return publicUser(user);
 }
 
 export async function changePasskey(userId, currentPasskey, newPasskey) {
@@ -612,17 +643,18 @@ export async function seedDefaults() {
         priceAnnual: 0,
         description: "Get started with AI-powered meeting notes.",
         features: [
-          "5 meetings / month",
+          "3 meetings / month",
+          "30 transcription minutes / month",
+          "20 AI questions / month",
           "Live transcription",
-          "Basic AI summaries",
-          "Basic action items",
+          "AI summaries",
+          "Action items",
           "Chrome extension",
-          "Limited Ask AI",
           "Basic exports"
         ],
-        maxMeetingsPerMonth: 5,
-        maxTranscriptionMinutes: 60,
-        maxAiQuestions: 10,
+        maxMeetingsPerMonth: 3,
+        maxTranscriptionMinutes: 30,
+        maxAiQuestions: 20,
         maxStorageGb: 1,
         featureFlags: {
           liveTranscription: true,
@@ -658,8 +690,8 @@ export async function seedDefaults() {
           "Priority processing"
         ],
         maxMeetingsPerMonth: null,
-        maxTranscriptionMinutes: 1000,
-        maxAiQuestions: 500,
+        maxTranscriptionMinutes: null,
+        maxAiQuestions: null,
         maxStorageGb: 10,
         featureFlags: {
           liveTranscription: true,
@@ -709,13 +741,21 @@ export async function seedDefaults() {
           teamWorkspace: true,
           adminDashboard: true
         },
-        isActive: true,
+        isActive: false,
         isRecommended: false,
         sortOrder: 2
       }
     ]);
     console.log("[seed] Default plans created (free, pro, team)");
   }
+
+  // Keep the current product limited to Free + Pro while remaining safe for existing databases.
+  const free = await Plan.findOne({ slug: "free" });
+  const pro = await Plan.findOne({ slug: "pro" });
+  if (free) await Plan.updateOne({ _id: free._id }, { $set: { maxMeetingsPerMonth: 3, maxTranscriptionMinutes: 30, maxAiQuestions: 20, isActive: true, isRecommended: false, sortOrder: 0 } });
+  if (pro) await Plan.updateOne({ _id: pro._id }, { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null, isActive: true, isRecommended: true, sortOrder: 1 } });
+  await Plan.updateMany({ slug: "team" }, { $set: { isActive: false, isRecommended: false } });
+  if (pro) await User.updateMany({ planSlug: "team" }, { $set: { planSlug: "pro", planId: pro._id } });
 
   const admin = await User.findOne({ username: "admin" });
   if (!admin) {
@@ -727,8 +767,8 @@ export async function seedDefaults() {
       passkeySalt: salt.toString("hex"),
       displayName: "Administrator",
       role: "admin",
-      planId: freePlan?._id || null,
-      planSlug: "team",
+      planId: pro?._id || freePlan?._id || null,
+      planSlug: pro ? "pro" : "free",
       apiKey: `ntk_${crypto.randomBytes(24).toString("base64url")}`
     });
     console.log("[seed] Admin user created — username: admin / passkey: admin123");
