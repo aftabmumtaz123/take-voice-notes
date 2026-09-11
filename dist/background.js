@@ -12,14 +12,15 @@ globalThis.AI_NOTE_CONFIG = {
   ],
   "keys": {
     "deepgram": "",
-    "assemblyai": "f4d7a677c14b49dfa5166085c731e8a7",
+    "assemblyai": "",
     "openai": ""
   },
   "deepgramModel": "nova-3",
   "assemblyaiModel": "universal-3-5-pro",
   "openaiModel": "gpt-4o-mini-transcribe",
-  "backendUrl": "http://localhost:4000",
-  "clientUrl": "http://localhost:3000"
+  "backendUrl": "http://192.168.1.5:4000",
+  "clientUrl": "http://192.168.1.5:3000",
+  "buildEnvironment": "qa"
 };
 
 // Offline script normalization for multilingual transcripts.
@@ -380,7 +381,7 @@ async function requireAuthOrThrow() {
   });
   const key = authApiKey || authToken || '';
   if (!key) {
-    const err = new Error('Connect the extension with your API key from http://localhost:4000/account');
+    const err = new Error('Connect the extension with your API key from http://192.168.1.5:4000/account');
     err.code = 'AUTH_REQUIRED';
     throw err;
   }
@@ -389,12 +390,12 @@ async function requireAuthOrThrow() {
 
 function getClientUrl() {
   // Web UI is served by the same backend (EJS) on :4000
-  return String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  return String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://192.168.1.5:4000').replace(/\/$/, '');
 }
 
 async function getBackendUrl() {
   const { backendUrlOverride } = await chrome.storage.local.get({ backendUrlOverride: '' });
-  return String(backendUrlOverride || globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  return String(backendUrlOverride || globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://192.168.1.5:4000').replace(/\/$/, '');
 }
 
 async function checkAuthConnection() {
@@ -719,7 +720,7 @@ async function finishActiveMeeting(reason = 'manual-stop') {
 }
 
 async function openProcessingPage(meetingId, title = 'Meeting') {
-  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://192.168.1.5:4000').replace(/\/$/, '');
   const params = new URLSearchParams({ title: String(title || 'Meeting').slice(0, 160) });
   const url = `${base}/meetings/processing/${encodeURIComponent(meetingId)}?${params.toString()}`;
   try {
@@ -731,7 +732,7 @@ async function openProcessingPage(meetingId, title = 'Meeting') {
 
 async function openDashboard(meetingId = '') {
   // Prefer the EJS web dashboard on the API server so the user sees summary/chat there
-  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://localhost:4000').replace(/\/$/, '');
+  const base = String(globalThis.AI_NOTE_CONFIG?.backendUrl || 'http://192.168.1.5:4000').replace(/\/$/, '');
   const url = meetingId
     ? `${base}/meetings/${encodeURIComponent(meetingId)}`
     : `${base}/`;
@@ -1150,8 +1151,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             let name = String(p?.name || p?.displayName || '').replace(/\s+/g, ' ').trim();
             name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
             if (!name || name.length > 80) continue;
-            if (/[a-z][A-Z]/.test(name)) continue;
-            if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications)\b/i.test(name)) continue;
             if (/\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|settings|leave|end meeting|share screen|presenting|raise hand|captions|chat|you can't|can't unmute)\b/i.test(name)) continue;
             if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) continue;
             if (name.split(' ').length > 6 || /https?:\/\//i.test(name) || /[{}<>]/.test(name)) continue;
@@ -1206,7 +1205,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SET_API_KEY': {
           try {
             const apiKey = String(message.apiKey || '').trim();
-            const serverUrl = String(message.serverUrl || '').trim().replace(/\/$/, '') || 'http://localhost:4000';
+            const serverUrl = String(message.serverUrl || '').trim().replace(/\/$/, '') || 'http://192.168.1.5:4000';
             if (!apiKey) throw new Error('API key is required');
             await chrome.storage.local.set({ backendUrlOverride: serverUrl });
             // Validate key against server

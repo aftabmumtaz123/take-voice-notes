@@ -3,7 +3,13 @@ import path from 'node:path';
 
 const root = process.cwd();
 const dist = path.join(root, 'dist');
-const envPath = path.join(root, '.env');
+const args = process.argv.slice(2);
+const envArg = args.find((arg) => arg.startsWith('--env='));
+const buildEnv = (envArg ? envArg.slice('--env='.length) : 'development').trim().toLowerCase() || 'development';
+const envCandidates = buildEnv === 'qa'
+  ? [path.join(root, '.env.qa'), path.join(root, '.env')]
+  : [path.join(root, '.env')];
+const envPath = envCandidates.find((candidate) => fs.existsSync(candidate));
 
 function parseEnv(text) {
   const out = {};
@@ -23,8 +29,8 @@ function parseEnv(text) {
   return out;
 }
 
-if (!fs.existsSync(envPath)) {
-  throw new Error('.env not found. Copy .env.example to .env and configure the developer keys.');
+if (!envPath) {
+  throw new Error(`No environment file found for '${buildEnv}'. Copy .env.example to .env${buildEnv === 'qa' ? ' or create .env.qa' : ''} and configure the developer keys.`);
 }
 
 const env = parseEnv(fs.readFileSync(envPath, 'utf8'));
@@ -47,7 +53,8 @@ const config = {
   assemblyaiModel: env.ASSEMBLYAI_MODEL || 'universal-3-5-pro',
   openaiModel: env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
   backendUrl: env.BACKEND_URL || 'http://localhost:4000',
-  clientUrl: env.CLIENT_URL || 'http://localhost:3000'
+  clientUrl: env.CLIENT_URL || 'http://localhost:3000',
+  buildEnvironment: buildEnv
 };
 
 fs.rmSync(dist, { recursive: true, force: true });
@@ -65,6 +72,17 @@ for (const file of files) {
 }
 fs.cpSync(path.join(root, 'icons'), path.join(dist, 'icons'), { recursive: true });
 
+// Generate manifest permissions from the selected backend URL so QA builds
+// work against the LAN server without manually editing dist/.
+const manifestPath = path.join(dist, 'manifest.json');
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const backendOrigin = new URL(config.backendUrl).origin;
+manifest.host_permissions = Array.from(new Set([
+  ...(manifest.host_permissions || []),
+  `${backendOrigin}/*`
+]));
+fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+
 fs.writeFileSync(
   path.join(dist, 'runtime-config.js'),
   `// Generated from .env. This file is ignored by git.\n` +
@@ -81,6 +99,9 @@ builtBackground = builtBackground.replace(
 );
 fs.writeFileSync(builtBackgroundPath, builtBackground);
 
+console.log(`Build environment: ${buildEnv}`);
+console.log(`Environment file: ${path.relative(root, envPath)}`);
+console.log(`Backend URL: ${config.backendUrl}`);
 console.log(`Built extension -> ${dist}`);
 console.log(`Active provider: ${active}`);
 console.log(`Configured providers: ${config.fallbackProviders.filter(p => config.keys[p]).join(', ') || 'none'}`);

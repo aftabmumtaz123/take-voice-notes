@@ -631,131 +631,49 @@ export async function completeOnboarding(userId, { useCase = "", heardFrom = "" 
   return publicUser(user);
 }
 
+const PLAN_DEFINITIONS = {
+  free: {
+    name: "Free", priceMonthly: 0, priceAnnual: 0, description: "Get started with AI-powered meeting notes.",
+    features: ["3 meetings / month", "30 transcription minutes / month", "20 AI questions / month", "Live transcription", "Chrome extension"],
+    maxMeetingsPerMonth: 3, maxTranscriptionMinutes: 30, maxAiQuestions: 20, maxStorageGb: 1,
+    featureFlags: { liveTranscription: true, aiSummaries: false, actionItems: false, askAi: true, aiInsights: false, pdfExport: false, markdownExport: false, txtExport: false, teamWorkspace: false, adminDashboard: false },
+    isActive: true, isRecommended: false, sortOrder: 0
+  },
+  pro: {
+    name: "Pro", priceMonthly: 12, priceAnnual: 120, description: "Advanced AI meeting intelligence for individuals.",
+    features: ["Unlimited meetings", "Unlimited transcription", "AI summaries", "Action items", "Ask AI", "AI Insights", "PDF / Markdown / TXT export", "Meeting history"],
+    maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null, maxStorageGb: 10,
+    featureFlags: { liveTranscription: true, aiSummaries: true, actionItems: true, askAi: true, aiInsights: true, pdfExport: true, markdownExport: true, txtExport: true, teamWorkspace: false, adminDashboard: false },
+    isActive: true, isRecommended: true, sortOrder: 1
+  },
+  team: {
+    name: "Team", priceMonthly: 29, priceAnnual: 290, description: "Collaborative meeting intelligence for teams.",
+    features: ["Everything in Pro", "Team workspace", "Shared meetings", "Team analytics", "Member management"],
+    maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null, maxStorageGb: 50,
+    featureFlags: { liveTranscription: true, aiSummaries: true, actionItems: true, askAi: true, aiInsights: true, pdfExport: true, markdownExport: true, txtExport: true, teamWorkspace: true, adminDashboard: false },
+    isActive: true, isRecommended: false, sortOrder: 2
+  }
+};
+
+export function getPlanDefinition(slug) {
+  return PLAN_DEFINITIONS[String(slug || 'free').toLowerCase()] || PLAN_DEFINITIONS.free;
+}
+
 /** Seed default plans + first admin (admin / admin123) if missing */
 export async function seedDefaults() {
-  const planCount = await Plan.countDocuments();
-  if (planCount === 0) {
-    await Plan.insertMany([
-      {
-        name: "Free",
-        slug: "free",
-        priceMonthly: 0,
-        priceAnnual: 0,
-        description: "Get started with AI-powered meeting notes.",
-        features: [
-          "3 meetings / month",
-          "30 transcription minutes / month",
-          "20 AI questions / month",
-          "Live transcription",
-          "AI summaries",
-          "Action items",
-          "Chrome extension",
-          "Basic exports"
-        ],
-        maxMeetingsPerMonth: 3,
-        maxTranscriptionMinutes: 30,
-        maxAiQuestions: 20,
-        maxStorageGb: 1,
-        featureFlags: {
-          liveTranscription: true,
-          aiSummaries: true,
-          actionItems: true,
-          askAi: true,
-          aiInsights: false,
-          pdfExport: false,
-          markdownExport: false,
-          txtExport: true,
-          teamWorkspace: false,
-          adminDashboard: false
-        },
-        isActive: true,
-        isRecommended: false,
-        sortOrder: 0
-      },
-      {
-        name: "Pro",
-        slug: "pro",
-        priceMonthly: 12,
-        priceAnnual: 120,
-        description: "Advanced AI meeting intelligence for individuals.",
-        features: [
-          "Unlimited meetings",
-          "Extended transcription",
-          "Detailed AI summaries",
-          "Action items",
-          "Ask AI",
-          "AI Insights",
-          "PDF / Markdown / TXT export",
-          "Meeting history",
-          "Priority processing"
-        ],
-        maxMeetingsPerMonth: null,
-        maxTranscriptionMinutes: null,
-        maxAiQuestions: null,
-        maxStorageGb: 10,
-        featureFlags: {
-          liveTranscription: true,
-          aiSummaries: true,
-          actionItems: true,
-          askAi: true,
-          aiInsights: true,
-          pdfExport: true,
-          markdownExport: true,
-          txtExport: true,
-          teamWorkspace: false,
-          adminDashboard: false
-        },
-        isActive: true,
-        isRecommended: true,
-        sortOrder: 1
-      },
-      {
-        name: "Team",
-        slug: "team",
-        priceMonthly: 29,
-        priceAnnual: 290,
-        description: "AI Notes for teams that collaborate on meetings.",
-        features: [
-          "Everything in Pro",
-          "Team workspace",
-          "Multiple team members",
-          "Shared meetings",
-          "Team AI insights",
-          "Admin controls",
-          "Team usage analytics",
-          "Priority support"
-        ],
-        maxMeetingsPerMonth: null,
-        maxTranscriptionMinutes: null,
-        maxAiQuestions: null,
-        maxStorageGb: 50,
-        featureFlags: {
-          liveTranscription: true,
-          aiSummaries: true,
-          actionItems: true,
-          askAi: true,
-          aiInsights: true,
-          pdfExport: true,
-          markdownExport: true,
-          txtExport: true,
-          teamWorkspace: true,
-          adminDashboard: true
-        },
-        isActive: false,
-        isRecommended: false,
-        sortOrder: 2
-      }
-    ]);
-    console.log("[seed] Default plans created (free, pro, team)");
+  for (const [slug, def] of Object.entries(PLAN_DEFINITIONS)) {
+    const existing = await Plan.findOne({ slug });
+    if (!existing) {
+      await Plan.create({ slug, ...def });
+      console.log(`[seed] Created ${slug} plan`);
+    } else {
+      // Keep the database aligned with the single product definition so UI and enforcement cannot drift.
+      await Plan.updateOne({ _id: existing._id }, { $set: { ...def, slug } });
+    }
   }
 
-  // Keep the current product limited to Free + Pro while remaining safe for existing databases.
-  const free = await Plan.findOne({ slug: "free" });
   const pro = await Plan.findOne({ slug: "pro" });
-  if (free) await Plan.updateOne({ _id: free._id }, { $set: { maxMeetingsPerMonth: 3, maxTranscriptionMinutes: 30, maxAiQuestions: 20, isActive: true, isRecommended: false, sortOrder: 0 } });
-  if (pro) await Plan.updateOne({ _id: pro._id }, { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null, isActive: true, isRecommended: true, sortOrder: 1 } });
-  await Plan.updateMany({ slug: "team" }, { $set: { isActive: false, isRecommended: false } });
-  if (pro) await User.updateMany({ planSlug: "team" }, { $set: { planSlug: "pro", planId: pro._id } });
+  const team = await Plan.findOne({ slug: "team" });
 
   const admin = await User.findOne({ username: "admin" });
   if (!admin) {

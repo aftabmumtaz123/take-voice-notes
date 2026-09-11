@@ -3,7 +3,7 @@
   <%- include("partials/admin-sidebar", { user, activeNav: "plans" }) %>
   <div class="main admin-main">
     <header class="main-top admin-hero">
-      <div><a class="back" href="/admin/plans?tab=requests">← Upgrade requests</a><h1 style="margin-top:8px">Review upgrade request</h1><p class="admin-sub">Verify the payment outside the app, then activate the requested Pro subscription.</p></div>
+      <div><a class="back" href="/admin/plans?tab=requests">← Upgrade requests</a><h1 style="margin-top:8px">Review upgrade request</h1><p class="admin-sub">Verify the request outside the app, then activate the requested subscription.</p></div>
     </header>
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
@@ -17,6 +17,7 @@
           <div><dt>Billing period</dt><dd><%= request.billingInterval === 'year' ? 'Yearly' : 'Monthly' %></dd></div>
           <div><dt>Amount</dt><dd><strong><%= request.currency || 'USD' %> <%= Number(request.amount || 0).toFixed(2) %></strong></dd></div>
           <div><dt>Payment method</dt><dd><%= request.paymentMethod || 'Manual / Admin verification' %></dd></div>
+          <% if (request.requestedPlanSlug === 'team') { %><div><dt>Workspace</dt><dd><%= request.workspaceName || 'My Team' %></dd></div><div><dt>Seats</dt><dd><%= request.seats || 5 %></dd></div><% } %>
           <div><dt>Submitted</dt><dd><%= request.createdAt ? new Date(request.createdAt).toLocaleString() : '—' %></dd></div>
           <div><dt>Status</dt><dd><span class="billing-status <%= request.status %>"><%= request.status %></span></dd></div>
         </dl>
@@ -25,11 +26,11 @@
       <section class="card section-card">
         <p class="eyebrow">ADMIN ACTION</p>
         <h2>Verify &amp; activate</h2>
-        <p class="muted">Approval creates a Payment record, activates the subscription for the selected period, updates the user's plan, and marks this request approved.</p>
+        <p class="muted">Approval creates a Payment record, activates the subscription for the selected period, and marks this request approved. Team approvals also create/activate the workspace and assign the requested seats.</p>
         <% if (request.status === 'pending') { %>
           <form method="POST" action="/admin/billing/requests/<%= request._id %>/approve" class="billing-action-form">
             <label>Payment/reference number (optional)<input name="reference" maxlength="200" placeholder="Transaction ID or internal reference" /></label>
-            <button class="btn-primary" type="submit" onclick="return confirm('Confirm payment verification and activate Pro?')">Approve &amp; activate Pro</button>
+            <button class="btn-primary" type="submit" onclick="return confirm('Confirm payment verification and activate Pro?')">Approve &amp; activate</button>
           </form>
           <form method="POST" action="/admin/billing/requests/<%= request._id %>/reject" class="billing-action-form">
             <label>Rejection reason (optional)<textarea name="reason" maxlength="500" rows="3" placeholder="Why the request was rejected"></textarea></label>

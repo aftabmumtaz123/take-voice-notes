@@ -31,11 +31,12 @@ import {
   formatLimit,
   findOrCreateGoogleUser,
   resetPasskey,
-  createSession
+  createSession,
+  getPlanDefinition
 } from './auth.js';
 import {
-  Subscription, UpgradeRequest, Payment, getEffectivePlan, getPendingUpgradeRequest,
-  createUpgradeRequest, activateSubscription, rejectUpgradeRequest, cancelUserSubscription
+  Subscription, UpgradeRequest, Payment, Workspace, WorkspaceMember, WorkspaceInvitation, getEffectivePlan, getPendingUpgradeRequest,
+  createUpgradeRequest, activateSubscription, rejectUpgradeRequest, cancelUserSubscription, scheduleSubscriptionCancellation, undoSubscriptionCancellation, getWorkspaceForUser, getUserWorkspaces, generateWorkspaceInviteToken, hashWorkspaceInviteToken
 } from './billing.js';
 import { EmailTemplate, seedEmailTemplates, sendEmail, sendTemplateToUser, createOtp, hashSecret, appBaseUrl } from './email.js';
 
@@ -108,6 +109,8 @@ const actionItemSchema = new mongoose.Schema({
 const meetingSchema = new mongoose.Schema({
   externalId: { type: String, required: true, unique: true, index: true },
   userId: { type: String, required: true, index: true },
+  workspaceId: { type: String, default: '', index: true },
+  visibility: { type: String, enum: ['private', 'shared'], default: 'private', index: true },
   title: { type: String, default: 'Untitled meeting' },
   platform: { type: String, default: 'Manual' },
   meetingUrl: { type: String, default: '' },
@@ -178,17 +181,11 @@ function sanitizeParticipantName(value) {
     'transcribing','connected','reconnecting','devices','more_vert'
   ]);
   if (ignored.has(normalized)) return '';
-  // Google Meet can concatenate multiple tile/accessibility labels, e.g.
-  // "Hassan RazaAdmit Hassan Raza" or "Rimsha AzharAdmit...".
-  // A real display name should not contain a camel-case word boundary.
-  if (/[a-z][A-Z]/.test(name)) return '';
-  if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications|mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|options|settings|leave|end meeting|hang up|share screen|present|presenting|raise hand|captions|chat|you can't|can't unmute|turn on|turn off|remove|pin|spotlight|hide|show|stop|start)\b/i.test(name)) return '';
   if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) return '';
+  if (/\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|options|settings|leave|end meeting|hang up|share screen|present|presenting|raise hand|captions|chat|you can't|can't unmute|turn on|turn off|remove|pin|spotlight|hide|show|stop|start)\b/i.test(name)) return '';
   if (/https?:\/\//i.test(name) || /[{}<>]/.test(name)) return '';
-  if (!/^[\p{L}\p{M}][\p{L}\p{M} .’'\-]{1,78}$/u.test(name)) return '';
   if (name.split(' ').filter(Boolean).length > 6) return '';
   if ((name.match(/[.!?]/g) || []).length > 1) return '';
-  if (name.length > 3 && !/\s/.test(name) && !/^[\p{L}\p{M}]+(?:[-’'][\p{L}\p{M}]+)+$/u.test(name)) return '';
   return name;
 }
 
@@ -751,7 +748,18 @@ app.get('/', optionalAuth, async (req, res) => {
 
 async function loadUserPlanContext(user) {
   const effective = await getEffectivePlan(user);
-  const plan = effective.plan;
+  let plan = effective.plan;
+  let subscription = effective.subscription;
+  let workspace = await getWorkspaceForUser(user.id).catch(() => null);
+  // Team is a workspace entitlement. Members can use Team features even when
+  // their personal account is Free; billing remains attached to the workspace.
+  if (workspace?.subscriptionId) {
+    const wsSub = await Subscription.findOne({ _id: workspace.subscriptionId, status: { $in: ['trialing','active'] } }).populate('planId').lean().catch(() => null);
+    if (wsSub?.planId?.slug === 'team' && (!subscription || String(subscription._id) !== String(wsSub._id))) {
+      plan = wsSub.planId;
+      subscription = wsSub;
+    }
+  }
   const account = await User.findById(user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null);
   const monthStart = new Date();
   monthStart.setDate(1);
@@ -762,16 +770,23 @@ async function loadUserPlanContext(user) {
     { $match: { userId: user.id, createdAt: { $gte: monthStart } } },
     { $group: { _id: null, total: { $sum: '$duration' } } }
   ]).then((r) => r[0]?.total || 0).catch(() => 0);
-  const maxMeetings = plan?.maxMeetingsPerMonth ?? 3;
-  const maxTranscriptionMinutes = plan?.maxTranscriptionMinutes ?? 30;
-  const maxAiQuestions = plan?.maxAiQuestions ?? 20;
+  const planSlug = String(plan?.slug || 'free').toLowerCase();
+  const definition = getPlanDefinition(planSlug);
+  // The plan slug is the canonical product identity. Merge the canonical
+  // definition over database feature flags so stale records cannot create
+  // contradictory UI/access behavior.
+  const effectivePlan = plan ? { ...plan, ...definition, _id: plan._id, slug: plan.slug } : definition;
+  const maxMeetings = effectivePlan.maxMeetingsPerMonth === undefined ? 3 : effectivePlan.maxMeetingsPerMonth;
+  const maxTranscriptionMinutes = effectivePlan.maxTranscriptionMinutes === undefined ? 30 : effectivePlan.maxTranscriptionMinutes;
+  const maxAiQuestions = effectivePlan.maxAiQuestions === undefined ? 20 : effectivePlan.maxAiQuestions;
   const remainingPct = isUnlimited(maxMeetings) ? 100 : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
   const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`;
   const askAiCount = account?.askAiUsageMonth === monthKey ? Number(account.askAiUsageCount || 0) : 0;
-  const paid = plan?.slug === 'pro' || (plan?.slug && plan.slug !== 'free');
+  const askAiAvailable = Boolean(effectivePlan.featureFlags?.askAi);
+  const paid = planSlug === 'pro' || planSlug === 'team' || (planSlug && planSlug !== 'free');
   return {
-    plan, subscription: effective.subscription,
-    usage: { meetingsUsed: usedThisMonth, meetingsMax: maxMeetings, aiNotes: aiThisMonth, transcriptionMinutes: Math.round(durationSec / 60), transcriptionMax: maxTranscriptionMinutes, aiQuestions: askAiCount, aiQuestionsMax: maxAiQuestions, remainingPct, isPaid: paid, badge: planBadgeLabel(plan?.slug || 'free') }
+    plan: effectivePlan, subscription, workspace,
+    usage: { meetingsUsed: usedThisMonth, meetingsMax: maxMeetings, aiNotes: aiThisMonth, transcriptionMinutes: Math.round(durationSec / 60), transcriptionMax: maxTranscriptionMinutes, aiQuestions: askAiCount, aiQuestionsMax: maxAiQuestions, remainingPct, isPaid: paid, askAiAvailable, badge: planBadgeLabel(planSlug) }
   };
 }
 
@@ -866,10 +881,14 @@ app.get('/app/meetings', requireAuth, async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
     const view = String(req.query.view || 'all');
+    const content = String(req.query.content || 'all');
     const filter = { userId: req.user.id };
     if (view === 'favorites') filter.isFavorite = true;
     else if (view === 'archived') filter.isArchived = true;
     else filter.isArchived = { $ne: true };
+    if (content === 'summary') filter['ai.summary'] = { $exists: true, $ne: '' };
+    else if (content === 'actions') filter['ai.actionItems.0'] = { $exists: true };
+    else if (content === 'insights') filter['ai.decisions.0'] = { $exists: true };
     if (q) {
       filter.$or = [
         { title: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
@@ -881,12 +900,12 @@ app.get('/app/meetings', requireAuth, async (req, res) => {
     const settings = await getSiteSettings().catch(() => null);
     const ctx = await loadUserPlanContext(req.user);
     res.render('home', {
-      user: req.user, meetings, q, view, error: null, success, settings,
+      user: req.user, meetings, q, view, content, error: null, success, settings,
       plan: ctx.plan, usage: ctx.usage
     });
   } catch (error) {
     res.status(500).render('home', {
-      user: req.user, meetings: [], q: '', view: 'all', error: error.message, success: null,
+      user: req.user, meetings: [], q: '', view: 'all', content: 'all', error: error.message, success: null,
       settings: null, plan: null, usage: { meetingsUsed: 0, meetingsMax: 5, remainingPct: 100, isPaid: false, badge: 'FREE' }
     });
   }
@@ -1009,7 +1028,7 @@ app.post('/api/insights/ask', requireAuth, async (req, res) => {
     const question = String(req.body?.question || '').trim();
     if (!question) return res.status(400).json({ ok: false, error: 'Question is required' });
     const ctx = await loadUserPlanContext(req.user);
-    if (!ctx.usage.isPaid) return res.status(403).json({ ok: false, error: 'AI Insights is a Pro feature.' });
+    if (!ctx.plan?.featureFlags?.aiInsights) return res.status(403).json({ ok: false, error: 'AI Insights is a Pro feature.' });
     const meetings = await Meeting.find({ userId: req.user.id }).sort({ startedAt: -1 }).limit(50).lean();
     if (!meetings.length) return res.json({ ok: true, answer: 'You do not have enough meeting data yet. Capture a few meetings and ask again.' });
     const source = meetings.map(m => ({ id: m.externalId, title: m.title, date: m.startedAt, platform: m.platform, participants: (m.participants || []).map(p => p.name).filter(Boolean), summary: m.ai?.summary || '', detailedSummary: m.ai?.detailedSummary || '', topics: m.ai?.topics || [], decisions: (m.ai?.decisionDetails || m.ai?.decisions || []).map(d => typeof d === 'object' ? (d.decision || d.text || '') : String(d || '')).filter(Boolean), actions: (m.ai?.actionItems || []).map(a => ({ task: a.task, owner: a.owner, deadline: a.deadline, completed: a.completed })), openQuestions: m.ai?.openQuestions || [], followUps: m.ai?.followUps || [] }));
@@ -1020,6 +1039,105 @@ app.post('/api/insights/ask', requireAuth, async (req, res) => {
     console.error('[api] insights ask failed:', error.message);
     res.status(500).json({ ok: false, error: error.message || 'Unable to answer question' });
   }
+});
+
+app.get('/app/subscription', requireAuth, async (req, res) => {
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const [plans, teamPlan, pendingRequest] = await Promise.all([
+      Plan.find({ isActive: true, slug: { $in: ['free', 'pro', 'team'] } }).sort({ sortOrder: 1 }).lean().catch(() => []),
+      Plan.findOne({ slug: 'team' }).lean().catch(() => null),
+      getPendingUpgradeRequest(req.user.id).catch(() => null)
+    ]);
+    const planSlug = String(ctx.plan?.slug || 'free').toLowerCase();
+    const isPro = planSlug === 'pro';
+    const isTeam = planSlug === 'team';
+    const teamWorkspace = isTeam ? await getWorkspaceForUser(req.user.id).catch(() => null) : null;
+    const isTeamOwner = !isTeam || teamWorkspace?.role === 'owner';
+    const currentPeriodEnd = ctx.subscription?.currentPeriodEnd ? new Date(ctx.subscription.currentPeriodEnd) : null;
+    const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    const currentPrice = (isPro || isTeam) ? Number(ctx.plan?.priceMonthly || 0) : 0;
+    res.render('subscription', { user: req.user, settings, plan: ctx.plan, subscription: ctx.subscription, plans, teamPlan, pendingRequest, isPro, isTeam, isTeamOwner, teamWorkspace, planSlug, currentPeriodEnd, currentPrice, usage: ctx.usage, formatDate, error: req.query.error || null, success: req.query.success || null });
+  } catch (error) {
+    console.error('[subscription] render failed:', error.message);
+    res.status(500).send('Unable to load subscription management.');
+  }
+});
+
+app.post('/billing/change-plan-request', requireAuth, async (req, res) => {
+  try {
+    const { planSlug, billingInterval, note, workspaceName, seats } = req.body || {};
+    const requestedSlug = String(planSlug || '').toLowerCase();
+    const requesterCtx = await loadUserPlanContext(req.user);
+    if (String(requesterCtx.plan?.slug || '').toLowerCase() === 'team' && requesterCtx.workspace?.role !== 'owner') return res.redirect('/app/subscription?error=' + encodeURIComponent('Only the Team workspace owner can request a plan change.'));
+    if (requestedSlug === 'free') return res.redirect('/app/subscription?error=' + encodeURIComponent('Switching to Free is handled through cancellation so you keep Pro until the end of your current period.'));
+    const created = await createUpgradeRequest({ userId: req.user.id, planSlug: requestedSlug, billingInterval, paymentMethod: 'manual', note, workspaceName, seats });
+    if (!created.duplicate) {
+      const r = created.request;
+      await sendTemplateToUser(req.user.id, 'upgrade-request-submitted', { planName: r.requestedPlanSlug === 'pro' ? 'Pro' : r.requestedPlanSlug, billingInterval: r.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount: Number(r.amount || 0).toFixed(2), currency: r.currency || 'USD', paymentMethod: 'Manual verification', requestId: String(r._id).slice(-8).toUpperCase(), appUrl: appBaseUrl() }, { transactional: true });
+    }
+    return res.redirect('/app/subscription?success=' + encodeURIComponent(created.duplicate ? 'You already have a pending plan-change request.' : `Your ${requestedSlug.toUpperCase()} plan-change request has been sent for review.`));
+  } catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/subscription/cancel', requireAuth, async (req, res) => {
+  try {
+    const sub = await scheduleSubscriptionCancellation(req.user.id, { reason: req.body?.reason, feedback: req.body?.feedback });
+    return res.redirect('/app/subscription?success=' + encodeURIComponent(`Cancellation scheduled. Your subscription remains active until ${new Date(sub.currentPeriodEnd).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}.`));
+  } catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/subscription/undo-cancellation', requireAuth, async (req, res) => {
+  try { await undoSubscriptionCancellation(req.user.id); return res.redirect('/app/subscription?success=' + encodeURIComponent('Cancellation removed. Your subscription will continue normally.')); }
+  catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.get('/app/team', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (String(ctx.plan?.slug || '').toLowerCase() !== 'team') return res.redirect('/app/subscription?error=' + encodeURIComponent('Team workspace access requires an active Team subscription.'));
+    const workspace = await getWorkspaceForUser(req.user.id, req.query.workspaceId).catch(() => null);
+    if (!workspace) return res.redirect('/app/subscription?error=' + encodeURIComponent('Your Team workspace is not ready yet.'));
+    const members = await WorkspaceMember.find({ workspaceId: workspace._id, status: 'active' }).populate('userId', 'displayName username email').sort({ role: 1, createdAt: 1 }).lean();
+    const pendingInvites = await WorkspaceInvitation.find({ workspaceId: workspace._id, status: 'pending', expiresAt: { $gt: new Date() } }).sort({ createdAt: -1 }).lean();
+    const sharedMeetings = await Meeting.find({ workspaceId: String(workspace._id), visibility: 'shared' }).sort({ startedAt: -1 }).limit(50).lean();
+    const analytics = { meetings: sharedMeetings.length, minutes: Math.round(sharedMeetings.reduce((n,m)=>n + Number(m.duration||0),0)/60), summaries: sharedMeetings.filter(m=>m.ai?.summary).length, actions: sharedMeetings.reduce((n,m)=>n+(m.ai?.actionItems?.length||0),0), decisions: sharedMeetings.reduce((n,m)=>n+(m.ai?.decisions?.length||m.ai?.decisionDetails?.length||0),0) };
+    res.render('team', { user:req.user, settings:await getSiteSettings().catch(()=>null), usage:ctx.usage, plan:ctx.plan, workspace, members, pendingInvites, sharedMeetings, analytics, activeNav:'team', error:req.query.error||null, success:req.query.success||null });
+  } catch (error) { console.error('[team] render failed:', error.message); res.status(500).send('Unable to load Team workspace.'); }
+});
+
+app.post('/billing/team/invite', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (String(ctx.plan?.slug||'') !== 'team') throw new Error('An active Team subscription is required.');
+    const workspace = await getWorkspaceForUser(req.user.id, req.body?.workspaceId);
+    if (!workspace || !['owner','admin'].includes(workspace.role)) throw new Error('You do not have permission to invite members.');
+    const email = String(req.body?.email||'').trim().toLowerCase();
+    const role = req.body?.role === 'admin' ? 'admin' : 'member';
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) throw new Error('Enter a valid email address.');
+    const activeCount = await WorkspaceMember.countDocuments({ workspaceId: workspace._id, status:'active' });
+    if (activeCount >= workspace.seatLimit) throw new Error(`All ${workspace.seatLimit} Team seats are currently in use.`);
+    const existingUser = await User.findOne({ email }).lean();
+    if (existingUser && await WorkspaceMember.exists({ workspaceId:workspace._id, userId:existingUser._id, status:'active' })) throw new Error('That user is already a workspace member.');
+    await WorkspaceInvitation.updateMany({ workspaceId:workspace._id, email, status:'pending' }, { $set:{ status:'revoked' } });
+    const token = generateWorkspaceInviteToken();
+    await WorkspaceInvitation.create({ workspaceId:workspace._id, email, role, invitedBy:req.user.id, tokenHash:hashWorkspaceInviteToken(token), expiresAt:new Date(Date.now()+7*86400000) });
+    const link = `${appBaseUrl()}/team/invite/${encodeURIComponent(token)}`;
+    const esc = (v) => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');
+    const safeWorkspaceName = esc(workspace.name);
+    const safeInviter = esc(req.user.displayName || req.user.username);
+    await sendEmail({ to:email, subject:`You're invited to ${workspace.name} · AI Note Taker`, html:`<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:32px"><h1>You're invited to join ${safeWorkspaceName}</h1><p>${safeInviter} invited you to join the Team workspace on AI Note Taker.</p><p><strong>Role:</strong> ${esc(role)}</p><p><a href="${link}" style="display:inline-block;padding:12px 18px;background:#6657ee;color:#fff;text-decoration:none;border-radius:8px">Accept invitation</a></p><p>This invitation expires in 7 days.</p></div>`, text:`You're invited to join ${workspace.name}. Accept: ${link}`, allowUnconfigured:true });
+    res.redirect('/app/team?success=' + encodeURIComponent(`Invitation sent to ${email}.`));
+  } catch (error) { res.redirect('/app/team?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/team/members/:id/remove', requireAuth, async (req,res)=>{
+  try { const ctx=await loadUserPlanContext(req.user); if(String(ctx.plan?.slug||'')!=='team') throw new Error('An active Team subscription is required.'); const workspace=await getWorkspaceForUser(req.user.id, req.body?.workspaceId); if(!workspace||!['owner','admin'].includes(workspace.role)) throw new Error('You do not have permission to manage members.'); const member=await WorkspaceMember.findOne({_id:req.params.id,workspaceId:workspace._id,status:'active'}); if(!member||String(member.userId)===String(workspace.ownerId)) throw new Error('The workspace owner cannot be removed.'); member.status='removed'; await member.save(); res.redirect('/app/team?success='+encodeURIComponent('Member removed from the workspace.')); } catch(e){res.redirect('/app/team?error='+encodeURIComponent(e.message));}
+});
+
+app.get('/team/invite/:token', optionalAuth, async (req,res)=>{
+  try { const inv=await WorkspaceInvitation.findOne({tokenHash:hashWorkspaceInviteToken(req.params.token),status:'pending'}).populate('workspaceId','name').lean(); if(!inv||new Date(inv.expiresAt)<=new Date()) return res.status(410).send('This invitation has expired or is no longer available.'); if(!req.user) return res.redirect('/login?next='+encodeURIComponent('/team/invite/'+req.params.token)); const existing=await User.findById(req.user.id).lean(); if(existing?.email && existing.email.toLowerCase()!==inv.email.toLowerCase()) return res.status(403).send('Please sign in with the invited email address.'); await WorkspaceMember.updateOne({workspaceId:inv.workspaceId._id,userId:req.user.id},{ $set:{role:inv.role,status:'active',joinedAt:new Date()}},{upsert:true}); await WorkspaceInvitation.updateOne({_id:inv._id},{ $set:{status:'accepted'} }); res.redirect('/app/team?success='+encodeURIComponent(`Welcome to ${inv.workspaceId.name}.`)); } catch(e){res.status(500).send('Unable to accept this invitation.');}
 });
 
 app.get('/app/usage', requireAuth, async (req, res) => {
@@ -1042,7 +1160,7 @@ app.get('/app/usage', requireAuth, async (req, res) => {
       historyStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       historyEnd = monthStart;
     }
-    const [historyMeetings, plans, aiActivityMeetings] = await Promise.all([
+    const [historyMeetings, plans, aiActivityMeetings, billingHistory] = await Promise.all([
       Meeting.find({ userId: req.user.id, createdAt: { $gte: historyStart, $lt: historyEnd } })
         .sort({ createdAt: -1 }).limit(50)
         .select('externalId title platform startedAt createdAt duration ai.summary ai.actionItems ai.decisions')
@@ -1050,7 +1168,9 @@ app.get('/app/usage', requireAuth, async (req, res) => {
       Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => []),
       Meeting.find({ userId: req.user.id, createdAt: { $gte: monthStart, $lt: monthEnd } })
         .select('ai.summary ai.actionItems ai.decisions')
-        .lean().catch(() => [])
+        .lean().catch(() => []),
+      Payment.find({ userId: req.user.id, status: { $in: ['paid', 'refunded', 'failed'] } })
+        .sort({ paidAt: -1, createdAt: -1 }).limit(12).lean().catch(() => [])
     ]);
     const usageHistory = historyMeetings.map((m) => ({
       id: m.externalId, title: m.title || 'Untitled meeting', platform: m.platform || 'Manual',
@@ -1064,11 +1184,11 @@ app.get('/app/usage', requireAuth, async (req, res) => {
     const periodEnd = monthEnd;
     const daysLeft = Math.max(1, Math.ceil((periodEnd - now) / 86400000));
     const periodLabel = range === 'today' ? 'Today' : range === '7d' ? 'Last 7 days' : range === 'last-month' ? 'Last month' : 'This month';
-    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug));
+    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug)).map((pl) => ({ ...pl, ...getPlanDefinition(pl.slug), _id: pl._id, slug: pl.slug }));
     const upgradeRequest = await getPendingUpgradeRequest(req.user.id).catch(() => null);
     res.render('usage', {
       user: req.user, settings, plan: ctx.plan, subscription: ctx.subscription, usage: ctx.usage, daysLeft, monthStart, monthEnd,
-      usageHistory, plans: comparisonPlans, aiActivity, upgradeRequest, range, periodLabel, error: null, success: req.query.success || null
+      usageHistory, plans: comparisonPlans, aiActivity, upgradeRequest, billingHistory, range, periodLabel, error: null, success: req.query.success || null
     });
   } catch (error) {
     console.error('[usage] render failed:', error.message);
@@ -1966,7 +2086,7 @@ app.post('/admin/billing/requests/:id/approve', requireAdmin, async (req, res) =
       await activateSubscription({
         userId: request.userId, planId: request.requestedPlanId, billingInterval: request.billingInterval,
         paymentMethod: request.paymentMethod || 'manual', adminId: req.user.id, upgradeRequestId: request._id,
-        amount: request.amount, currency: request.currency, reference: req.body.reference
+        amount: request.amount, currency: request.currency, reference: req.body.reference, workspaceName: request.workspaceName, seats: request.seats
       });
     } catch (activationError) {
       await UpgradeRequest.updateOne({ _id: request._id, status: 'processing' }, { $set: { status: 'pending' } }).catch(() => {});
@@ -2794,6 +2914,8 @@ app.get('/meetings/processing/:id', requireAuth, async (req, res) => {
 
 app.get('/meetings/:id/export.txt', requireAuth, async (req, res) => {
   try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.txtExport) return res.status(403).send('TXT export is available on the Pro plan.');
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
     const text = buildMeetingExportText(meeting);
@@ -2808,6 +2930,8 @@ app.get('/meetings/:id/export.txt', requireAuth, async (req, res) => {
 
 app.get('/meetings/:id/export.md', requireAuth, async (req, res) => {
   try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.markdownExport) return res.status(403).send('Markdown export is available on the Pro plan.');
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
     const ai = meeting.ai || {};
@@ -2847,6 +2971,8 @@ app.get('/meetings/:id/export.md', requireAuth, async (req, res) => {
 
 app.get('/meetings/:id/export.pdf', requireAuth, async (req, res) => {
   try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.pdfExport) return res.status(403).send('PDF export is available on the Pro plan.');
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
     res.render('export-print', { user: req.user, meeting, autoPrint: true });
@@ -2856,20 +2982,17 @@ app.get('/meetings/:id/export.pdf', requireAuth, async (req, res) => {
 });
 
 
+app.post('/billing/team/meetings/:id/share', requireAuth, async (req,res)=>{
+  try { const ctx=await loadUserPlanContext(req.user); if(String(ctx.plan?.slug||'')!=='team') throw new Error('An active Team subscription is required.'); const workspace=await getWorkspaceForUser(req.user.id); if(!workspace) throw new Error('Team workspace not found.'); const meeting=await Meeting.findOne({externalId:req.params.id,userId:req.user.id}); if(!meeting) throw new Error('Only the meeting owner can share this meeting.'); meeting.workspaceId=String(workspace._id); meeting.visibility='shared'; await meeting.save(); res.redirect('/meetings/'+req.params.id+'?success='+encodeURIComponent('Meeting shared with your Team workspace.')); } catch(e){res.redirect('/meetings/'+req.params.id+'?error='+encodeURIComponent(e.message));}
+});
+app.post('/billing/team/meetings/:id/unshare', requireAuth, async (req,res)=>{
+  try { const meeting=await Meeting.findOne({externalId:req.params.id,userId:req.user.id}); if(!meeting) throw new Error('Meeting not found.'); meeting.visibility='private'; await meeting.save(); res.redirect('/meetings/'+req.params.id+'?success='+encodeURIComponent('Meeting is private again.')); } catch(e){res.redirect('/meetings/'+req.params.id+'?error='+encodeURIComponent(e.message));}
+});
+
 app.get('/meetings/:id', requireAuth, async (req, res) => {
   try {
-    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
+    const meeting = await Meeting.findOne({ $or: [ { externalId: req.params.id, userId: req.user.id }, ...(await (async()=>{ const w=await getWorkspaceForUser(req.user.id).catch(()=>null); return w ? [{ externalId:req.params.id, workspaceId:String(w._id), visibility:'shared' }] : []; })()) ] }).lean();
     if (!meeting) return res.status(404).send('Meeting not found');
-    // Clean legacy participant records at read time too, so meetings saved
-    // before the stricter participant filter cannot display Meet UI labels.
-    const cleanedParticipants = sanitizeParticipants(meeting.participants);
-    if (JSON.stringify(cleanedParticipants) !== JSON.stringify(meeting.participants || [])) {
-      await Meeting.updateOne(
-        { _id: meeting._id, userId: req.user.id },
-        { $set: { participants: cleanedParticipants } }
-      ).catch(() => {});
-      meeting.participants = cleanedParticipants;
-    }
     const settings = await getSiteSettings().catch(() => null);
     const ctx = await loadUserPlanContext(req.user);
     res.render('meeting', { user: req.user, meeting, error: null, success: null, settings, plan: ctx.plan, usage: ctx.usage });
@@ -2894,6 +3017,8 @@ app.post('/meetings/:id/notes', requireAuth, async (req, res) => {
 
 app.post('/meetings/:id/analyze', requireAuth, async (req, res) => {
   try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.aiSummaries) return res.redirect('/meetings/' + req.params.id + '?error=' + encodeURIComponent('AI Summary is available on the Pro plan.'));
     const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id });
     if (!meeting) return res.status(404).send('Meeting not found');
     const generated = await analyzeTranscript(meeting);
@@ -3165,8 +3290,12 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
     const planCtx = await loadUserPlanContext(req.user);
     const maxMeetings = planCtx.usage.meetingsMax;
     if (!existingForExternal && !isUnlimited(maxMeetings) && planCtx.usage.meetingsUsed >= Number(maxMeetings)) {
-      return res.status(402).json({ ok: false, code: 'MEETING_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan allows ${maxMeetings} meetings per month. Upgrade to Pro to continue.` });
+      return res.status(402).json({ ok: false, code: 'MEETING_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan allows ${maxMeetings} meetings per month. upgrade your plan to continue.` });
     }
+    const teamWorkspace = String(planCtx.plan?.slug || '').toLowerCase() === 'team' ? await getWorkspaceForUser(req.user.id).catch(() => null) : null;
+    data.workspaceId = teamWorkspace ? String(teamWorkspace._id) : '';
+    data.visibility = String(req.body?.visibility || '').toLowerCase() === 'shared' && teamWorkspace ? 'shared' : 'private';
+
     const maxMinutes = planCtx.usage.transcriptionMax;
     const incomingMinutes = Math.ceil(Math.max(0, Number(data.duration || 0)) / 60);
     if (!existingForExternal && !isUnlimited(maxMinutes) && (planCtx.usage.transcriptionMinutes + incomingMinutes) > Number(maxMinutes)) {
@@ -3249,8 +3378,22 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
       });
 
       // The analysis is deliberately performed after the transcript is persisted.
+      // AI summaries/actions are a Pro benefit; Free still gets the transcript and limited Ask AI.
+      const completionPlan = await loadUserPlanContext(req.user);
       let analysis = meeting.ai || {};
-      let analysisReady = false;
+      let analysisReady = Boolean(analysis?.summary);
+      if (!completionPlan.plan?.featureFlags?.aiSummaries) {
+        meeting.ai = { ...(meeting.ai || {}), error: '', generatedAt: null };
+        await meeting.save();
+        meetingProcessingStates.set(processingId, {
+          status: 'completed', stage: 'ready', aliasId: data.externalId,
+          message: 'Your transcript is ready. AI meeting notes are available on Pro.', updatedAt: Date.now()
+        });
+        const freeResult = { ok: true, meeting: meeting.toObject(), analysisReady: false, analysisError: '' };
+        if (data.externalId !== processingId) meetingProcessingStates.set(data.externalId, { status: 'completed', stage: 'ready', aliasId: data.externalId, message: 'Your transcript is ready. AI meeting notes are available on Pro.', updatedAt: Date.now() });
+        setTimeout(() => { meetingProcessingStates.delete(processingId); if (data.externalId !== processingId) meetingProcessingStates.delete(data.externalId); }, 10 * 60 * 1000);
+        return freeResult;
+      }
       try {
         const generated = await analyzeTranscript(meeting);
         analysis = { ...generated, generatedAt: new Date(), error: '' };
@@ -3315,6 +3458,8 @@ app.post('/api/meetings/complete', requireAuth, async (req, res) => {
 
 app.post('/api/meetings/:id/analyze', requireAuth, async (req, res) => {
   try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.aiSummaries) return res.status(403).json({ ok: false, code: 'PRO_FEATURE', error: 'AI Summary is available on the Pro plan.' });
     const meeting = await Meeting.findOne({
       externalId: req.params.id,
       userId: req.user.id
@@ -3337,9 +3482,12 @@ app.post('/api/meetings/:id/analyze', requireAuth, async (req, res) => {
 
 app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
   try {
+    const memberWorkspace = await getWorkspaceForUser(req.user.id).catch(() => null);
     const meeting = await Meeting.findOne({
-      externalId: req.params.id,
-      userId: req.user.id
+      $or: [
+        { externalId: req.params.id, userId: req.user.id },
+        ...(memberWorkspace ? [{ externalId: req.params.id, workspaceId: String(memberWorkspace._id), visibility: 'shared' }] : [])
+      ]
     }).lean();
     if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
     const promptId = req.body.promptId ? String(req.body.promptId).trim() : null;
@@ -3351,7 +3499,7 @@ app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Unknown prompt template.' });
     }
     const chatCtx = await loadUserPlanContext(req.user);
-    if (!chatCtx.plan?.featureFlags?.askAi) {
+    if (!chatCtx.usage?.askAiAvailable) {
       return res.status(403).json({ ok: false, code: 'FEATURE_NOT_AVAILABLE', error: 'Ask AI is not included in your current plan. Upgrade to Pro to use Ask AI.' });
     }
     if (!isUnlimited(chatCtx.usage.aiQuestionsMax) && chatCtx.usage.aiQuestions >= Number(chatCtx.usage.aiQuestionsMax)) {
@@ -3422,9 +3570,11 @@ mongoose.connect(mongoUri)
       { slug: 'pro' },
       { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
     ).catch(() => {});
-    app.listen(port, () => {
-      console.log(`AI Note Taker API listening on http://localhost:${port}`);
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`AI Note Taker API listening on http://0.0.0.0:${port}`);
       console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
+      console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
+      console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
     });
   })
   .catch((error) => {

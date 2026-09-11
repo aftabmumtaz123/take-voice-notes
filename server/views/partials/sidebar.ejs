@@ -52,11 +52,23 @@
       <% if (!isPaid) { %><span class="nav-pro">PRO</span><% } %>
     </a>
 
+    <% const isTeam = String((_usage && _usage.badge) || (user && user.planSlug) || '').toLowerCase() === 'team'; %>
+    <% if (isTeam) { %>
+      <div class="nav-divider"></div>
+      <div class="nav-section-label">TEAM</div>
+      <a class="nav-item <%= activeNav === 'team' ? 'active' : '' %>" href="/app/team" title="Team workspace"><span class="nav-ico material-symbols-outlined">groups</span><span class="nav-label">Team workspace</span></a>
+      <a class="nav-item" href="/app/team#members" title="Team members"><span class="nav-ico material-symbols-outlined">group_add</span><span class="nav-label">Team members</span></a>
+      <a class="nav-item" href="/app/team#analytics" title="Team analytics"><span class="nav-ico material-symbols-outlined">query_stats</span><span class="nav-label">Team analytics</span></a>
+    <% } %>
+
     <div class="nav-divider"></div>
     <div class="nav-section-label">ACCOUNT</div>
 
     <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'usage' ? 'active' : '' %>" href="/app/usage" title="Usage &amp; Plan">
       <span class="nav-ico material-symbols-outlined">monitoring</span><span class="nav-label">Usage &amp; Plan</span>
+    </a>
+    <a class="nav-item nav-subitem <%= typeof activeNav !== 'undefined' && activeNav === 'subscription' ? 'active' : '' %>" href="/app/subscription" title="Subscription">
+      <span class="nav-ico material-symbols-outlined">manage_accounts</span><span class="nav-label">Subscription</span>
     </a>
     <a class="nav-item <%= typeof activeNav !== 'undefined' && activeNav === 'account' ? 'active' : '' %>" href="/account" title="Settings">
       <span class="nav-ico material-symbols-outlined">settings</span><span class="nav-label">Settings</span>

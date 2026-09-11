@@ -611,7 +611,7 @@ transcriptArea.addEventListener('input', () => { updateCounts(); saveEditedTrans
 
 btnOpenMeeting?.addEventListener('click', async () => {
   if (!lastCompletedMeetingId) return;
-  await chrome.tabs.create({ url: `http://localhost:4000/meetings/${encodeURIComponent(lastCompletedMeetingId)}` });
+  await chrome.tabs.create({ url: `http://192.168.1.5:4000/meetings/${encodeURIComponent(lastCompletedMeetingId)}` });
 });
 
 meetingDismiss.addEventListener('click', async () => {
@@ -623,7 +623,7 @@ meetingDismiss.addEventListener('click', async () => {
 dashboardLink.addEventListener('click', async (e) => {
   e.preventDefault();
   try {
-    await chrome.tabs.create({ url: 'http://localhost:4000/' });
+    await chrome.tabs.create({ url: 'http://192.168.1.5:4000/' });
   } catch (error) {
     showToast(error.message || String(error), { title: 'Could not open dashboard', type: 'error' });
   }
@@ -678,7 +678,7 @@ async function ensureMicrophonePermission() {
 
 btnSaveApiKey?.addEventListener('click', async () => {
   const apiKey = (authApiKey?.value || '').trim();
-  const serverUrl = (authServerUrl?.value || '').trim().replace(/\/$/, '') || 'http://localhost:4000';
+  const serverUrl = (authServerUrl?.value || '').trim().replace(/\/$/, '') || 'http://192.168.1.5:4000';
   if (!apiKey) {
     showAuthError('Paste your API key from the web account page.');
     return;
@@ -723,7 +723,7 @@ btnSaveApiKey?.addEventListener('click', async () => {
 btnOpenWebAuth?.addEventListener('click', async () => {
   const result = await send('OPEN_CLIENT_AUTH');
   if (!result?.ok) {
-    showAuthError(result?.error || 'Could not open http://localhost:4000 — is the server running?');
+    showAuthError(result?.error || 'Could not open http://192.168.1.5:4000 — is the server running?');
   }
 });
 logoutLink?.addEventListener('click', async (e) => {

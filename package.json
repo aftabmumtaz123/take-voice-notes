@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "clean": "node -e \"import('fs').then(fs=>fs.rmSync('dist',{recursive:true,force:true}))\""
+    "clean": "node -e \"import('fs').then(fs=>fs.rmSync('dist',{recursive:true,force:true}))\"",
+    "build:qa": "node build.mjs --env=qa",
+    "build:dev": "node build.mjs --env=development"
   }
 }

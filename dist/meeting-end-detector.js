@@ -78,8 +78,6 @@
 
     const normalized = name.toLowerCase();
     if (PARTICIPANT_IGNORE.has(normalized)) return '';
-    if (/[a-z][A-Z]/.test(name)) return '';
-    if (/\b(?:admit|allow|deny|join|waiting room|notification|notifications)\b/i.test(name)) return '';
     if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) return '';
     if (PARTICIPANT_UI_WORDS.test(name)) return '';
     if (/https?:\/\//i.test(name)) return '';

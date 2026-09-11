@@ -284,7 +284,29 @@ if (chatForm) {
     history.insertAdjacentHTML("beforeend", buildUserBubble(displayLabel));
     history.insertAdjacentHTML("beforeend", buildThinkingCard());
     const pending = history.lastElementChild;
-    requestAnimationFrame(() => { history.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" }); });
+
+    // The chat history is part of the normal meeting page flow. Scroll the
+    // page itself to the latest item instead of scrolling a nested chat box.
+    // This keeps the newly generated answer visible after every Ask AI request.
+    const scrollToChatItem = (element, behavior = "smooth") => {
+      if (!element) return;
+
+      // Scroll the actual document, not the chat-history element. We do this
+      // after layout has settled because AI cards can change height after
+      // rendering. Multiple passes make the behavior reliable even when the
+      // browser is still painting the newly inserted card.
+      const run = () => {
+        const rect = element.getBoundingClientRect();
+        const target = Math.max(0, rect.top + window.scrollY - 88);
+        window.scrollTo({ top: target, behavior });
+      };
+
+      requestAnimationFrame(() => {
+        run();
+        requestAnimationFrame(run);
+      });
+    };
+    scrollToChatItem(pending);
 
     try {
       const body = promptId ? { promptId, question: q || undefined } : { question: q };
@@ -306,7 +328,13 @@ if (chatForm) {
         isError: true
       });
     }
-    requestAnimationFrame(() => { history.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "center" }); });
+    // Scroll the document to the freshly rendered answer, not the nested
+    // history container. Run again after the browser has painted the full
+    // response so long answers cannot leave the newest card below the fold.
+    const latestAnswer = history.lastElementChild;
+    scrollToChatItem(latestAnswer);
+    setTimeout(() => scrollToChatItem(latestAnswer, "auto"), 180);
+    setTimeout(() => scrollToChatItem(latestAnswer, "auto"), 500);
   }
 
   chatForm.addEventListener("submit", (e) => {
