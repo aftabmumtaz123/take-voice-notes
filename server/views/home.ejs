@@ -27,14 +27,14 @@
     </header>
 
     <div class="toolbar">
-      <form method="GET" action="/app/meetings" class="search-bar wide">
+      <form method="GET" action="/app/meetings" class="search-bar wide" data-live-meeting-search-form>
         <input type="hidden" name="view" value="<%= currentView %>" />
-        <input type="search" name="q" value="<%= typeof q !== 'undefined' ? q : '' %>" placeholder="Search for keywords, titles, and more…" />
+        <input type="search" name="q" value="<%= typeof q !== 'undefined' ? q : '' %>" placeholder="Search for keywords, titles, and more…" autocomplete="off" data-live-meeting-search />
       </form>
     </div>
 
     <div class="filter-row">
-      <div class="view-tabs">
+      <div class="view-tabs" data-meeting-view-tabs>
         <a class="view-tab <%= currentView === 'all' ? 'active' : '' %>" href="/app/meetings?view=all<%= q ? '&q=' + encodeURIComponent(q) : '' %>">Timeline</a>
         <a class="view-tab <%= currentView === 'favorites' ? 'active' : '' %>" href="/app/meetings?view=favorites<%= q ? '&q=' + encodeURIComponent(q) : '' %>">★ Favourites</a>
         <a class="view-tab <%= currentView === 'archived' ? 'active' : '' %>" href="/app/meetings?view=archived<%= q ? '&q=' + encodeURIComponent(q) : '' %>">Archive</a>
@@ -45,6 +45,7 @@
     <% if (error) { %><div class="flash error"><%= error %></div><% } %>
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
 
+    <div class="live-meeting-results" data-live-meeting-results>
     <% if (!meetings || !meetings.length) { %>
       <%
         const emptyState = currentView === 'favorites'
@@ -120,6 +121,7 @@
         <% }) %>
       </div>
     <% } %>
+    </div>
   </div>
 </div>
 <%- include("partials/footer") %>

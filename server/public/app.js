@@ -52,6 +52,203 @@ document.getElementById("copyKey")?.addEventListener("click", async () => {
   } catch {}
 });
 
+
+
+// Live meeting search: update Meetings / Favourites / Archive results as the
+// user types instead of waiting for Enter or a full-page form submission.
+(() => {
+  const form = document.querySelector('[data-live-meeting-search-form]');
+  const input = document.querySelector('[data-live-meeting-search]');
+  const results = document.querySelector('[data-live-meeting-results]');
+  if (!form || !input || !results) return;
+
+  const viewInput = form.querySelector('input[name="view"]');
+  const getView = () => (viewInput?.value || 'all').toLowerCase();
+  let timer = null;
+  let requestId = 0;
+
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  })[char]);
+
+  const formatDate = (value) => {
+    if (!value) return 'Earlier';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Earlier';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const that = new Date(date);
+    that.setHours(0, 0, 0, 0);
+    const diff = (today - that) / 86400000;
+    if (diff < 1) return 'Today';
+    if (diff < 2) return 'Yesterday';
+    return date.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
+  const formatTime = (value) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  };
+
+  const renderEmpty = (view, query) => {
+    const states = {
+      favorites: {
+        icon: 'star',
+        title: 'No favourite meetings yet',
+        text: 'Star the meetings you want to keep close and they will appear here.',
+        primary: 'View meetings', primaryHref: '/app/meetings',
+        secondary: 'Start a meeting', secondaryHref: '/app/overview'
+      },
+      archived: {
+        icon: 'archive',
+        title: 'Your archive is empty',
+        text: 'Meetings you archive will be kept here so your main timeline stays focused.',
+        primary: 'View meetings', primaryHref: '/app/meetings',
+        secondary: 'Start a meeting', secondaryHref: '/app/overview'
+      },
+      all: query ? {
+        icon: 'search_off',
+        title: 'No meetings found',
+        text: 'Try a different keyword or clear the search to see your meeting history.',
+        primary: 'Clear search', primaryHref: '/app/meetings',
+        secondary: 'View favourites', secondaryHref: '/app/meetings?view=favorites'
+      } : {
+        icon: 'video_camera_front',
+        title: 'Your meeting workspace is ready',
+        text: 'Connect the Chrome extension, record a meeting, then search and summarize your notes.',
+        primary: 'Install extension', primaryHref: '/install',
+        secondary: 'Get API key', secondaryHref: '/account'
+      }
+    };
+    const state = states[view] || states.all;
+    return `<div class="empty-hero card empty-state-illustrated empty-state-${escapeHtml(view)}">
+      <div class="empty-icon"><span class="material-symbols-outlined">${escapeHtml(state.icon)}</span></div>
+      <h3>${escapeHtml(state.title)}</h3>
+      <p>${escapeHtml(state.text)}</p>
+      <div class="empty-actions">
+        <a class="btn-primary" href="${escapeHtml(state.primaryHref)}">${escapeHtml(state.primary)}</a>
+        <a class="btn-ghost" href="${escapeHtml(state.secondaryHref)}">${escapeHtml(state.secondary)}</a>
+      </div>
+    </div>`;
+  };
+
+  const renderMeetings = (meetings, view, query) => {
+    if (!meetings.length) {
+      results.innerHTML = renderEmpty(view, query);
+      return;
+    }
+
+    let lastLabel = '';
+    const rows = meetings.map((meeting) => {
+      const mins = Math.max(1, Math.round((Number(meeting.duration) || 0) / 60));
+      const label = formatDate(meeting.startedAt);
+      const title = meeting.title || 'Untitled meeting';
+      const platform = meeting.platform || 'Manual';
+      const externalId = encodeURIComponent(meeting.externalId || '');
+      const avatar = escapeHtml((title || platform || 'M').charAt(0).toUpperCase());
+      const favoriteMark = meeting.isFavorite ? '<span class="fav-mark">★</span> ' : '';
+      const archivedBadge = meeting.isArchived ? '<span class="badge-archived">Archived</span>' : '';
+      const aiReady = meeting.ai && meeting.ai.summary ? ' · <span class="ai-ready">✦ AI Summary ready</span>' : '';
+      const day = label !== lastLabel ? `<div class="day-label">${escapeHtml(label)}</div>` : '';
+      lastLabel = label;
+      const redirect = `/app/meetings?view=${encodeURIComponent(view)}${query ? `&q=${encodeURIComponent(query)}` : ''}`;
+      return `${day}
+        <div class="meeting-row-wrap">
+          <a class="meeting-row" href="/meetings/${externalId}">
+            <div class="meeting-dur">
+              <strong>${mins}m</strong>
+              <span>${escapeHtml(formatTime(meeting.startedAt))}</span>
+            </div>
+            <div class="meeting-avatar">${avatar}</div>
+            <div class="meeting-body">
+              <strong>${favoriteMark}${escapeHtml(title)} ${archivedBadge}</strong>
+              <span class="participants">${escapeHtml(platform)} · ${mins} min${aiReady}</span>
+            </div>
+          </a>
+          <div class="meeting-actions">
+            <form method="POST" action="/meetings/${externalId}/favorite">
+              <input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />
+              <button type="submit" class="icon-btn ${meeting.isFavorite ? 'is-on' : ''}" title="Favourite">${meeting.isFavorite ? '★' : '☆'}</button>
+            </form>
+            <form method="POST" action="/meetings/${externalId}/archive">
+              <input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />
+              <button type="submit" class="icon-btn" title="Archive">Archive</button>
+            </form>
+            <form method="POST" action="/meetings/${externalId}/delete" onsubmit="return confirm('Delete this meeting permanently?');">
+              <button type="submit" class="icon-btn danger" title="Delete">🗑</button>
+            </form>
+          </div>
+        </div>`;
+    }).join('');
+
+    results.innerHTML = `<div class="meeting-groups">${rows}</div>`;
+  };
+
+  const updateUrl = (query, view) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', view);
+    if (query) url.searchParams.set('q', query);
+    else url.searchParams.delete('q');
+    window.history.replaceState({}, '', url);
+  };
+
+  const search = async () => {
+    const query = input.value.trim();
+    const view = getView();
+    const id = ++requestId;
+    updateUrl(query, view);
+    results.classList.add('is-searching');
+    try {
+      const params = new URLSearchParams({ view, limit: '100' });
+      if (query) params.set('q', query);
+      const response = await fetch(`/api/meetings?${params.toString()}`, {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' }
+      });
+      const data = await response.json();
+      if (id !== requestId) return;
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Search failed.');
+      renderMeetings(Array.isArray(data.meetings) ? data.meetings : [], view, query);
+    } catch (error) {
+      if (id !== requestId) return;
+      results.innerHTML = `<div class="flash error">${escapeHtml(error.message || 'Unable to search meetings.')}</div>`;
+    } finally {
+      if (id === requestId) results.classList.remove('is-searching');
+    }
+  };
+
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(search, 120);
+  });
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    clearTimeout(timer);
+    search();
+  });
+
+  // Keep the live search behavior when switching between Timeline,
+  // Favourites, and Archive. The link navigation is intentionally replaced
+  // with an AJAX request so the current page does not reload.
+  document.querySelectorAll('[data-meeting-view-tabs] .view-tab').forEach((tab) => {
+    tab.addEventListener('click', (event) => {
+      const url = new URL(tab.href, window.location.origin);
+      const nextView = url.searchParams.get('view') || 'all';
+      const query = input.value.trim();
+      event.preventDefault();
+      viewInput.value = nextView;
+      document.querySelectorAll('[data-meeting-view-tabs] .view-tab').forEach((item) => item.classList.remove('active'));
+      tab.classList.add('active');
+      updateUrl(query, nextView);
+      clearTimeout(timer);
+      search();
+    });
+  });
+})();
+
 // Transcript search
 document.getElementById("transcriptSearch")?.addEventListener("input", (e) => {
   const q = e.target.value.toLowerCase();
