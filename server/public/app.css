@@ -3115,3 +3115,20 @@ body.sidebar-collapsed .sidebar-toggle:focus-visible {
   .meeting-actions { min-width: 102px; gap: 4px; }
   .meeting-actions .icon-btn { width: 32px; height: 32px; min-width: 32px; flex-basis: 32px; }
 }
+
+/* Consistent inline notification alignment */
+.flash {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  box-sizing: border-box;
+  line-height: 1.4;
+}
+.flash > .material-symbols-outlined {
+  flex: 0 0 auto;
+  font-size: 22px;
+  line-height: 1;
+}
+.flash.ok > .material-symbols-outlined { color: #059669; }
+.flash.error > .material-symbols-outlined { color: #e11d48; }
