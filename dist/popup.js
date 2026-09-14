@@ -504,7 +504,7 @@ btnNewNote.addEventListener('click', async () => {
   const result = await send('NEW_NOTE');
   if (result?.ok) {
     setTranscript(''); setInterim('');
-    sessionTitle.value = 'Untitled meeting';
+    sessionTitle.value = '';
     await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title: 'Untitled meeting' });
     currentState = {isRecording:false,isPaused:false,startTime:null,totalPausedMs:0,provider:null};
     completedState = false;
