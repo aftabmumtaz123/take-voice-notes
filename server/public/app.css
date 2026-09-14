@@ -2240,7 +2240,27 @@ body.sidebar-collapsed .shell { grid-template-columns: 76px minmax(0, 1fr); }
 body.sidebar-collapsed .sidebar {
   width: 76px; min-width: 76px; padding-left: 10px; padding-right: 10px;
 }
-body.sidebar-collapsed .sidebar-brand { justify-content: center; padding-left: 0; padding-right: 0; }
+body.sidebar-collapsed .sidebar-brand {
+  justify-content: space-between;
+  gap: 6px;
+  padding-left: 0;
+  padding-right: 0;
+}
+body.sidebar-collapsed .sidebar-brand .logo {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+}
+body.sidebar-collapsed .sidebar-toggle {
+  position: static;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  opacity: .85;
+  display: grid;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0,0,0,.10);
+}
 body.sidebar-collapsed .sidebar-brand-copy,
 body.sidebar-collapsed .sidebar-search form,
 body.sidebar-collapsed .nav-label,
@@ -2261,11 +2281,6 @@ body.sidebar-collapsed .nav-ico { width: 24px; flex: 0 0 24px; font-size: 22px; 
 body.sidebar-collapsed .nav-divider { margin: 8px 8px; }
 body.sidebar-collapsed .sidebar-user { justify-content: center; padding: 12px 0 4px; margin-top: auto; }
 body.sidebar-collapsed .avatar { width: 38px; height: 38px; }
-body.sidebar-collapsed .sidebar-toggle {
-  position: absolute; right: 3px; top: 3px; width: 28px; height: 28px;
-  opacity: .85; display: grid; background: #fff;
-  box-shadow: 0 1px 5px rgba(0,0,0,.10);
-}
 
 @media (max-width: 900px) {
   .shell { grid-template-columns: 76px minmax(0, 1fr); }
@@ -3066,4 +3081,37 @@ body.sidebar-collapsed .sidebar-toggle:focus-visible {
     right: 8px;
     transform: translateY(-50%);
   }
+}
+
+/* Meeting list action alignment */
+.meeting-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 108px;
+  padding: 0;
+}
+.meeting-actions form { flex: 0 0 auto; margin: 0; }
+.meeting-actions .icon-btn {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 34px;
+  line-height: 1;
+  box-sizing: border-box;
+}
+.meeting-actions .icon-btn .material-symbols-outlined {
+  font-size: 18px;
+  line-height: 1;
+}
+.meeting-actions .archive-action { overflow: hidden; }
+@media (max-width: 720px) {
+  .meeting-actions { min-width: 102px; gap: 4px; }
+  .meeting-actions .icon-btn { width: 32px; height: 32px; min-width: 32px; flex-basis: 32px; }
 }

@@ -174,7 +174,7 @@ document.getElementById("copyKey")?.addEventListener("click", async () => {
             </form>
             <form method="POST" action="/meetings/${externalId}/archive">
               <input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />
-              <button type="submit" class="icon-btn" title="Archive">Archive</button>
+              <button type="submit" class="icon-btn archive-action" title="${meeting.isArchived ? 'Unarchive' : 'Archive'}" aria-label="${meeting.isArchived ? 'Unarchive' : 'Archive'}"><span class="material-symbols-outlined">${meeting.isArchived ? 'unarchive' : 'archive'}</span></button>
             </form>
             <form method="POST" action="/meetings/${externalId}/delete" onsubmit="return confirm('Delete this meeting permanently?');">
               <button type="submit" class="icon-btn danger" title="Delete">🗑</button>
@@ -581,6 +581,71 @@ if (chatForm) {
   });
 }
 
+// Logout confirmation — intercept every /logout link (top bar, user sidebar, admin sidebar)
+// and require an explicit confirmation before following the logout route.
+(() => {
+  let modal = null;
+  let pendingHref = '/logout';
+
+  const close = () => {
+    if (!modal) return;
+    modal.hidden = true;
+    document.body.classList.remove('logout-modal-open');
+  };
+
+  const open = (href) => {
+    pendingHref = href || '/logout';
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.className = 'logout-confirm';
+      modal.hidden = true;
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+      modal.setAttribute('aria-labelledby', 'logout-confirm-title');
+      modal.innerHTML = `
+        <div class="logout-confirm-backdrop" data-logout-close></div>
+        <section class="logout-confirm-card" role="document">
+          <button type="button" class="logout-confirm-close" aria-label="Close" data-logout-close>
+            <span class="material-symbols-outlined">close</span>
+          </button>
+          <div class="logout-confirm-icon">
+            <span class="material-symbols-outlined">logout</span>
+          </div>
+          <h2 id="logout-confirm-title">Do you really want to log out?</h2>
+          <p>You will be signed out of AI Note Taker and returned to the home page.</p>
+          <div class="logout-confirm-actions">
+            <button type="button" class="btn-ghost" data-logout-cancel>Cancel</button>
+            <button type="button" class="btn-primary" data-logout-confirm>Log out</button>
+          </div>
+        </section>`;
+      document.body.appendChild(modal);
+
+      modal.addEventListener('click', (event) => {
+        if (event.target.closest('[data-logout-close], [data-logout-cancel]')) close();
+      });
+      modal.querySelector('[data-logout-confirm]')?.addEventListener('click', () => {
+        window.location.assign(pendingHref);
+      });
+    }
+
+    modal.hidden = false;
+    document.body.classList.add('logout-modal-open');
+    requestAnimationFrame(() => modal.querySelector('[data-logout-cancel]')?.focus());
+  };
+
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest('a[href="/logout"], a[href^="/logout?"]');
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    open(link.href);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && modal && !modal.hidden) close();
+  });
+})();
+
 // Sidebar expand/compact state — initialized on every app page, not only meeting pages.
 const sidebar = document.querySelector("[data-sidebar]");
 const sidebarToggle = document.querySelector("[data-sidebar-toggle]");
@@ -683,8 +748,9 @@ if (sidebar && sidebarToggle) {
           button.textContent = data.isFavorite ? '★' : '☆';
           button.title = data.isFavorite ? 'Unfavourite' : 'Favourite';
         } else if (action.includes('/archive')) {
-          button.textContent = data.isArchived ? '↩ Unarchive' : 'Archive';
+          button.innerHTML = `<span class="material-symbols-outlined">${data.isArchived ? 'unarchive' : 'archive'}</span>`;
           button.title = data.isArchived ? 'Unarchive' : 'Archive';
+          button.setAttribute('aria-label', data.isArchived ? 'Unarchive' : 'Archive');
         }
       }
     } catch (error) {
