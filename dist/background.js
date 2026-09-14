@@ -12,8 +12,8 @@ globalThis.AI_NOTE_CONFIG = {
   ],
   "keys": {
     "deepgram": "",
-    "assemblyai": "",
-    "openai": ""
+    "assemblyai": "f4d7a677c14b49dfa5166085c731e8a7",
+    "openai": "AQ.Ab8RN6LAU6Tth6WoAErW5Ye0s65XmyBvs3PGRKHodyAVufsh6Q"
   },
   "deepgramModel": "nova-3",
   "assemblyaiModel": "universal-3-5-pro",

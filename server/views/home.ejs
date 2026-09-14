@@ -46,13 +46,22 @@
     <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
 
     <% if (!meetings || !meetings.length) { %>
-      <div class="empty-hero card">
-        <div class="empty-icon">▣</div>
-        <h3>Unlock AI insights across your meeting history</h3>
-        <p>Connect the Chrome extension, record a meeting, then search and summarize your notes.</p>
+      <%
+        const emptyState = currentView === 'favorites'
+          ? { title: 'No favourite meetings yet', text: 'Star the meetings you want to keep close and they will appear here.', primary: 'View meetings', primaryHref: '/app/meetings', secondary: 'Start a meeting', secondaryHref: '/app/overview' }
+          : currentView === 'archived'
+            ? { title: 'Your archive is empty', text: 'Meetings you archive will be kept here so your main timeline stays focused.', primary: 'View meetings', primaryHref: '/app/meetings', secondary: 'Start a meeting', secondaryHref: '/app/overview' }
+            : q
+              ? { title: 'No meetings found', text: 'Try a different keyword or clear the search to see your meeting history.', primary: 'Clear search', primaryHref: '/app/meetings', secondary: 'View favourites', secondaryHref: '/app/meetings?view=favorites' }
+              : { title: 'Your meeting workspace is ready', text: 'Connect the Chrome extension, record a meeting, then search and summarize your notes.', primary: 'Install extension', primaryHref: '/install', secondary: 'Get API key', secondaryHref: '/account' };
+      %>
+      <div class="empty-hero card empty-state-illustrated empty-state-<%= currentView %>">
+        <div class="empty-icon"><span class="material-symbols-outlined"><%= currentView === 'favorites' ? 'star' : (currentView === 'archived' ? 'archive' : 'video_camera_front') %></span></div>
+        <h3><%= emptyState.title %></h3>
+        <p><%= emptyState.text %></p>
         <div class="empty-actions">
-          <a class="btn-primary" href="/install">Install extension</a>
-          <a class="btn-ghost" href="/account">Get API key</a>
+          <a class="btn-primary" href="<%= emptyState.primaryHref %>"><%= emptyState.primary %></a>
+          <a class="btn-ghost" href="<%= emptyState.secondaryHref %>"><%= emptyState.secondary %></a>
         </div>
       </div>
     <% } else { %>

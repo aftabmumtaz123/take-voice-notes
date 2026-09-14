@@ -50,7 +50,7 @@
       <div class="section-head"><div><span class="eyebrow">YOUR LATEST</span><h2>Recent meetings</h2></div><a href="/app/meetings">View all →</a></div>
       <div class="quick-filters"><a class="active" href="/app/meetings">All</a><a href="/app/meetings?view=today">Today</a><a href="/app/meetings?view=week">This week</a></div>
       <% if (!recent || !recent.length) { %>
-        <div class="empty-hero overview-empty"><div class="empty-icon"><span class="material-symbols-outlined">mic</span></div><h3>Your meeting workspace is ready</h3><p>Start your first meeting and AI Note Taker will create your transcript, summary, action items, and insights.</p><div class="empty-actions"><button class="btn-primary" type="button" data-new-meeting><span class="material-symbols-outlined">add</span> Start your first meeting</button></div></div>
+        <div class="empty-hero overview-empty empty-state-illustrated"><div class="empty-icon"><span class="material-symbols-outlined">mic</span></div><h3>Your meeting workspace is ready</h3><p>Start your first meeting and AI Note Taker will create your transcript, summary, action items, and insights.</p><div class="empty-actions"><button class="btn-primary" type="button" data-new-meeting><span class="material-symbols-outlined">add</span> Start your first meeting</button></div></div>
       <% } else { %>
         <div class="overview-meeting-list">
           <% recent.forEach(function(m) { 

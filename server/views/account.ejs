@@ -183,7 +183,42 @@
   copy?.addEventListener('click', async () => { try { cached = cached || await api(); await navigator.clipboard.writeText(cached); copy.innerHTML = '<span class="material-symbols-outlined">check</span> Copied'; setTimeout(() => copy.innerHTML = '<span class="material-symbols-outlined">content_copy</span> Copy', 1400); } catch (e) { alert(e.message); } });
   document.querySelectorAll('[data-open-dialog]').forEach(b => b.addEventListener('click', () => document.getElementById(b.dataset.openDialog)?.showModal()));
   document.querySelectorAll('[data-close-dialog]').forEach(b => b.addEventListener('click', () => b.closest('dialog')?.close()));
-  document.querySelectorAll('.settings-nav a').forEach(a => a.addEventListener('click', () => document.querySelectorAll('.settings-nav a').forEach(x => x.classList.remove('active')) || a.classList.add('active')));
+  const settingsLinks = Array.from(document.querySelectorAll('.settings-nav a[href^="#"]'));
+  const settingsSections = settingsLinks
+    .map(link => document.getElementById(link.getAttribute('href').slice(1)))
+    .filter(Boolean);
+
+  const setActiveSetting = (id, updateHash = false) => {
+    settingsLinks.forEach(link => {
+      const active = link.getAttribute('href') === `#${id}`;
+      link.classList.toggle('active', active);
+      link.setAttribute('aria-current', active ? 'location' : 'false');
+    });
+    if (updateHash && history.replaceState) history.replaceState(null, '', `#${id}`);
+  };
+
+  settingsLinks.forEach(link => link.addEventListener('click', (event) => {
+    const id = link.getAttribute('href').slice(1);
+    const section = document.getElementById(id);
+    if (!section) return;
+    event.preventDefault();
+    setActiveSetting(id, true);
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
+
+  const initialId = window.location.hash ? window.location.hash.slice(1) : 'profile';
+  setActiveSetting(settingsSections.some(section => section.id === initialId) ? initialId : 'profile');
+
+  if ('IntersectionObserver' in window && settingsSections.length) {
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible) setActiveSetting(visible.target.id);
+    }, { root: null, rootMargin: '-18% 0px -65% 0px', threshold: [0, 0.15, 0.4, 0.75] });
+    settingsSections.forEach(section => observer.observe(section));
+  }
+
   const appearance = '<%= p.appearance === "dark" ? "dark" : (p.appearance === "system" ? "light" : "light") %>';
   const applyTheme = (value) => {
     const resolved = value === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : value;
