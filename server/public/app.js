@@ -174,7 +174,7 @@ document.getElementById("copyKey")?.addEventListener("click", async () => {
             </form>
             <form method="POST" action="/meetings/${externalId}/archive">
               <input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />
-              <button type="submit" class="icon-btn archive-action" title="Archive" aria-label="Archive"><span class="material-symbols-outlined">archive</span></button>
+              <button type="submit" class="icon-btn" title="Archive">Archive</button>
             </form>
             <form method="POST" action="/meetings/${externalId}/delete" onsubmit="return confirm('Delete this meeting permanently?');">
               <button type="submit" class="icon-btn danger" title="Delete">🗑</button>
@@ -683,9 +683,8 @@ if (sidebar && sidebarToggle) {
           button.textContent = data.isFavorite ? '★' : '☆';
           button.title = data.isFavorite ? 'Unfavourite' : 'Favourite';
         } else if (action.includes('/archive')) {
-          button.innerHTML = `<span class="material-symbols-outlined">${data.isArchived ? 'unarchive' : 'archive'}</span>`;
+          button.textContent = data.isArchived ? '↩ Unarchive' : 'Archive';
           button.title = data.isArchived ? 'Unarchive' : 'Archive';
-          button.setAttribute('aria-label', button.title);
         }
       }
     } catch (error) {

@@ -400,42 +400,14 @@ body.app-shell { background: var(--bg); }
   border: 0; background: transparent; box-shadow: none; padding: 10px 8px;
 }
 .meeting-row:hover { box-shadow: none; background: #faf9fc; border-radius: 10px; }
-.meeting-actions {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 114px;
-  flex-shrink: 0;
-  padding: 0 2px;
+.meeting-actions { flex-direction: row; align-items: center; gap: 4px; }
+.icon-btn {
+  border: 0; background: transparent; color: #9ca3af;
+  padding: 6px 8px; border-radius: 8px;
 }
-.meeting-actions form { flex: 0 0 auto; }
-.meeting-actions .icon-btn {
-  width: 34px;
-  height: 34px;
-  min-width: 34px;
-  padding: 0;
-  border: 1px solid var(--border);
-  background: var(--card, #fff);
-  color: #9ca3af;
-  border-radius: 9px;
-  display: inline-grid;
-  place-items: center;
-  line-height: 1;
-  box-sizing: border-box;
-}
-.meeting-actions .icon-btn .material-symbols-outlined { font-size: 18px; line-height: 1; }
-.meeting-actions .icon-btn:hover { background: #f3f0ff; border-color: #d8d2ff; color: #5b4df0; }
-.meeting-actions .icon-btn.is-on { color: #b45309; border-color: #fcd34d; background: #fffbeb; }
-.meeting-actions .icon-btn.danger { color: var(--danger); }
-.meeting-actions .icon-btn.danger:hover { background: #fff1f2; border-color: #fecdd3; color: #e11d48; }
-
-@media (max-width: 560px) {
-  .meeting-row-wrap { grid-template-columns: minmax(0, 1fr) auto; gap: 4px; }
-  .meeting-actions { min-width: 108px; gap: 4px; }
-  .meeting-actions .icon-btn { width: 32px; height: 32px; min-width: 32px; }
-}
+.icon-btn:hover { background: #f3f0ff; color: #5b4df0; }
+.icon-btn.is-on { color: #b45309; background: #fffbeb; }
+.icon-btn.danger:hover { background: #fff1f2; color: #e11d48; }
 
 .empty-hero {
   margin: 24px 28px; padding: 48px 28px; text-align: center;
@@ -3008,4 +2980,90 @@ html[data-theme="dark"] .app-toast { background: rgba(31, 29, 42, .97); color: #
 @media (max-width: 640px) {
   .toast-root { right: 16px; bottom: 16px; left: 16px; align-items: stretch; }
   .app-toast { max-width: none; }
+}
+
+/* Logout confirmation */
+body.logout-modal-open { overflow: hidden; }
+.logout-confirm[hidden] { display: none !important; }
+.logout-confirm { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 20px; }
+.logout-confirm-backdrop { position: absolute; inset: 0; background: rgba(20, 17, 35, .38); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.logout-confirm-card { position: relative; width: min(430px, 100%); padding: 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--card); box-shadow: 0 24px 80px rgba(25, 20, 55, .22); text-align: center; }
+.logout-confirm-close { position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 9px; background: #fff; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.logout-confirm-close:hover { color: var(--text); background: #f7f7fa; }
+.logout-confirm-icon { width: 52px; height: 52px; margin: 2px auto 15px; border-radius: 15px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.logout-confirm-icon .material-symbols-outlined { font-size: 25px; }
+.logout-confirm-card h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.logout-confirm-card p { margin: 9px auto 22px; max-width: 350px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.logout-confirm-actions { display: flex; justify-content: center; gap: 9px; }
+.logout-confirm-actions .btn-primary, .logout-confirm-actions .btn-ghost { min-width: 96px; text-align: center; }
+@media (max-width: 480px) { .logout-confirm-card { padding: 24px 18px; } }
+
+/* ===== ISSUE #10: stable sidebar collapse control alignment ===== */
+.sidebar-brand {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  padding-right: 46px;
+}
+.sidebar-brand-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sidebar-toggle {
+  position: absolute !important;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  flex: 0 0 30px;
+  display: grid !important;
+  place-items: center;
+  margin: 0;
+  z-index: 10;
+}
+.sidebar-toggle .material-symbols-outlined {
+  display: block;
+  line-height: 1;
+}
+
+/* Keep the control anchored to the sidebar when it is collapsed. */
+body.sidebar-collapsed .sidebar-brand {
+  padding-left: 0;
+  padding-right: 0;
+  justify-content: center;
+}
+body.sidebar-collapsed .sidebar-toggle {
+  top: 6px;
+  right: 4px;
+  transform: none;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 7px;
+  opacity: .9;
+  background: rgba(255,255,255,.96);
+  box-shadow: 0 1px 5px rgba(0,0,0,.08);
+}
+body.sidebar-collapsed .sidebar-toggle .material-symbols-outlined {
+  font-size: 17px;
+}
+body.sidebar-collapsed .sidebar-toggle:hover,
+body.sidebar-collapsed .sidebar-toggle:focus-visible {
+  opacity: 1;
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(0,0,0,.12);
+}
+
+@media (max-width: 900px) {
+  .sidebar-brand {
+    padding-right: 0;
+  }
+  body:not(.sidebar-collapsed) .sidebar-toggle {
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+  }
 }

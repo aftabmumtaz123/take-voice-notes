@@ -111,7 +111,7 @@
               </form>
               <form method="POST" action="/meetings/<%= m.externalId %>/archive">
                 <input type="hidden" name="redirect" value="<%= redir %>" />
-                <button type="submit" class="icon-btn archive-action" title="Archive" aria-label="Archive"><span class="material-symbols-outlined">archive</span></button>
+                <button type="submit" class="icon-btn" title="Archive">Archive</button>
               </form>
               <form method="POST" action="/meetings/<%= m.externalId %>/delete" onsubmit="return confirm('Delete this meeting permanently?');">
                 <button type="submit" class="icon-btn danger" title="Delete">🗑</button>
