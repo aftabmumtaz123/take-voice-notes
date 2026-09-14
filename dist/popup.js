@@ -296,7 +296,7 @@ function applySnapshot(snapshot) {
   if (!snapshot?.isLoggedIn) return;
   if (!userIsEditing) setTranscript(snapshot.transcript || '');
   if (snapshot.noteTitle !== undefined && document.activeElement !== sessionTitle) {
-    sessionTitle.value = snapshot.noteTitle || 'Untitled meeting';
+    sessionTitle.value = snapshot.noteTitle || '';
   }
   setInterim(snapshot.interim || '');
   currentState = snapshot.recordingState || currentState;
@@ -505,7 +505,7 @@ btnNewNote.addEventListener('click', async () => {
   if (result?.ok) {
     setTranscript(''); setInterim('');
     sessionTitle.value = '';
-    await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title: 'Untitled meeting' });
+    await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title: '' });
     currentState = {isRecording:false,isPaused:false,startTime:null,totalPausedMs:0,provider:null};
     completedState = false;
     activeMeetingId = null;
@@ -550,8 +550,8 @@ btnCopy.addEventListener('click', async () => {
 
 btnDownload.addEventListener('click', () => {
   const text = transcriptArea.value.trim();
-  const title = sessionTitle.value.trim() || 'Untitled meeting';
-  if (!text && title === 'Untitled meeting') {
+  const title = sessionTitle.value.trim() || '';
+  if (!text && title === '') {
     showToast('Add some notes before exporting.', { type: 'info', duration: 2500 });
     return;
   }
@@ -570,7 +570,7 @@ btnDownload.addEventListener('click', () => {
 
 btnSaveAnalyze.addEventListener('click', async () => {
   const text = transcriptArea.value.trim();
-  const title = sessionTitle.value.trim() || 'Untitled meeting';
+  const title = sessionTitle.value.trim() || '';
   if (!text) {
     showToast('Add some transcript text before saving.', { title: 'Nothing to save', type: 'info', duration: 3200 });
     return;
@@ -643,7 +643,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (area !== 'local') return;
   if (changes.currentTranscript && !userIsEditing) setTranscript(changes.currentTranscript.newValue || '');
-  if (changes.noteTitle && document.activeElement !== sessionTitle) sessionTitle.value = changes.noteTitle.newValue || 'Untitled meeting';
+  if (changes.noteTitle && document.activeElement !== sessionTitle) sessionTitle.value = changes.noteTitle.newValue || '';
   if (changes.interimTranscript) setInterim(changes.interimTranscript.newValue || '');
   if (changes.recordingState) {
     currentState = changes.recordingState.newValue || currentState;

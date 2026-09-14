@@ -138,6 +138,8 @@ const userSchema = new mongoose.Schema({
   passwordResetTokenHash: { type: String, default: "" },
   passwordResetExpiresAt: { type: Date, default: null },
   avatarUrl: { type: String, default: "" },
+  avatarPublicId: { type: String, default: "" },
+  avatarSource: { type: String, enum: ["", "google", "cloudinary"], default: "" },
   googleId: { type: String, default: "", index: true, sparse: true },
   googleTokens: {
     accessToken: { type: String, default: "" },
@@ -250,6 +252,8 @@ export function publicUser(user) {
     email: user.email || "",
     emailVerified: Boolean(user.emailVerified),
     avatarUrl: user.avatarUrl || "",
+    avatarPublicId: user.avatarPublicId || "",
+    avatarSource: user.avatarSource || "",
     googleId: user.googleId || "",
     role: user.role || "user",
     planSlug: user.planSlug || "free",
@@ -391,6 +395,7 @@ export async function findOrCreateGoogleUser({
       email: String(email || "").toLowerCase().slice(0, 200),
       emailVerified: true,
       avatarUrl: String(avatarUrl || "").slice(0, 500),
+      avatarSource: avatarUrl ? "google" : "",
       googleId: String(googleId),
       googleTokens: {
         accessToken: tokens.accessToken || "",
@@ -408,7 +413,10 @@ export async function findOrCreateGoogleUser({
     user.googleId = String(googleId);
     if (email) { user.email = String(email).toLowerCase().slice(0, 200); user.emailVerified = true; }
     if (displayName) user.displayName = String(displayName).slice(0, 80);
-    if (avatarUrl) user.avatarUrl = String(avatarUrl).slice(0, 500);
+    if (avatarUrl && user.avatarSource !== "cloudinary") {
+      user.avatarUrl = String(avatarUrl).slice(0, 500);
+      user.avatarSource = "google";
+    }
     if (tokens.accessToken) {
       user.googleTokens = {
         accessToken: tokens.accessToken || user.googleTokens?.accessToken || "",

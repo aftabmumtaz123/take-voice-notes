@@ -174,7 +174,7 @@ document.getElementById("copyKey")?.addEventListener("click", async () => {
             </form>
             <form method="POST" action="/meetings/${externalId}/archive">
               <input type="hidden" name="redirect" value="${escapeHtml(redirect)}" />
-              <button type="submit" class="icon-btn" title="Archive">Archive</button>
+              <button type="submit" class="icon-btn archive-action" title="Archive" aria-label="Archive"><span class="material-symbols-outlined">archive</span></button>
             </form>
             <form method="POST" action="/meetings/${externalId}/delete" onsubmit="return confirm('Delete this meeting permanently?');">
               <button type="submit" class="icon-btn danger" title="Delete">🗑</button>
@@ -615,3 +615,88 @@ if (sidebar && sidebarToggle) {
 }
 
 
+
+// Favourite / archive actions: submit in-place and show a toast instead of
+// navigating away from the current meeting list/detail page.
+(() => {
+  const ensureToast = () => {
+    let root = document.getElementById('toast-root');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'toast-root';
+      root.className = 'toast-root';
+      root.setAttribute('aria-live', 'polite');
+      root.setAttribute('aria-atomic', 'true');
+      document.body.appendChild(root);
+    }
+    return root;
+  };
+
+  const showToast = (message, type = 'success') => {
+    const root = ensureToast();
+    const toast = document.createElement('div');
+    toast.className = `app-toast ${type === 'error' ? 'error' : 'success'}`;
+    toast.innerHTML = `<span class="material-symbols-outlined">${type === 'error' ? 'error' : 'check_circle'}</span><span>${escapeHtml(message)}</span>`;
+    root.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 220);
+    }, 2600);
+  };
+
+  document.addEventListener('submit', async (event) => {
+    const form = event.target.closest('form[action*="/favorite"], form[action*="/archive"]');
+    if (!form || form.dataset.toastSubmitting === '1') return;
+    event.preventDefault();
+    form.dataset.toastSubmitting = '1';
+
+    const button = form.querySelector('button[type="submit"]');
+    const original = button?.innerHTML;
+    if (button) {
+      button.disabled = true;
+      button.classList.add('is-loading');
+    }
+
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: new FormData(form)
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Unable to update the meeting.');
+
+      showToast(data.message || (data.isFavorite ? 'Added to favourites' : data.isArchived ? 'Added to archive' : 'Updated successfully'));
+
+      // On the meetings list, refresh the current view so a meeting moves out
+      // of Favourites/Archive immediately when appropriate.
+      const liveSearch = document.querySelector('[data-live-meeting-search]');
+      const liveForm = document.querySelector('[data-live-meeting-search-form]');
+      if (liveSearch && liveForm) {
+        liveSearch.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if (button) {
+        const action = form.action;
+        if (action.includes('/favorite')) {
+          button.classList.toggle('is-on', Boolean(data.isFavorite));
+          button.textContent = data.isFavorite ? '★' : '☆';
+          button.title = data.isFavorite ? 'Unfavourite' : 'Favourite';
+        } else if (action.includes('/archive')) {
+          button.innerHTML = `<span class="material-symbols-outlined">${data.isArchived ? 'unarchive' : 'archive'}</span>`;
+          button.title = data.isArchived ? 'Unarchive' : 'Archive';
+          button.setAttribute('aria-label', button.title);
+        }
+      }
+    } catch (error) {
+      showToast(error.message || 'Unable to update the meeting.', 'error');
+      if (button) button.innerHTML = original;
+    } finally {
+      delete form.dataset.toastSubmitting;
+      if (button) {
+        button.disabled = false;
+        button.classList.remove('is-loading');
+      }
+    }
+  });
+})();

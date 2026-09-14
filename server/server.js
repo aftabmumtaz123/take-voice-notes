@@ -49,6 +49,11 @@ const geminiKey = process.env.GEMINI_API_KEY || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${port}/api/google/callback`;
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+const CLOUDINARY_AVATAR_FOLDER = 'ai-note-taker/avatars';
+
 const GOOGLE_SCOPES = [
   'openid',
   'email',
@@ -68,6 +73,8 @@ const GEMINI_FALLBACKS = [
 ].filter((v, i, a) => v && a.indexOf(v) === i);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: false }));
+// Avatar uploads are sent as a data URI so the server can validate and forward them to Cloudinary.
+app.use('/api/account/avatar', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.set('view engine', 'ejs');
@@ -2876,6 +2883,99 @@ app.post('/account/delete', requireAuth, async (req, res) => {
   } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, 400); }
 });
 
+function cloudinarySignature(params) {
+  const canonical = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('&');
+  return crypto.createHash('sha1').update(canonical + CLOUDINARY_API_SECRET).digest('hex');
+}
+
+async function deleteCloudinaryAvatar(publicId) {
+  if (!publicId || !CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) return;
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = cloudinarySignature({ public_id: publicId, timestamp });
+  const body = new URLSearchParams({ public_id: publicId, timestamp: String(timestamp), api_key: CLOUDINARY_API_KEY, signature });
+  try {
+    await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(CLOUDINARY_CLOUD_NAME)}/image/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+  } catch (error) {
+    console.warn('Cloudinary avatar cleanup failed:', error.message);
+  }
+}
+
+app.post('/api/account/avatar', requireAuth, async (req, res) => {
+  try {
+    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+      return res.status(503).json({ ok: false, error: 'Profile photo upload is not configured.' });
+    }
+    const dataUri = String(req.body?.image || '');
+    const match = dataUri.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/i);
+    if (!match) return res.status(400).json({ ok: false, error: 'Please upload a JPG, PNG, WEBP, or GIF image.' });
+    const mime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], 'base64');
+    if (!buffer.length || buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ ok: false, error: 'Profile photo must be smaller than 5 MB.' });
+    }
+    const normalizedDataUri = `data:${mime};base64,${buffer.toString('base64')}`;
+    const timestamp = Math.floor(Date.now() / 1000);
+    const params = { folder: CLOUDINARY_AVATAR_FOLDER, timestamp };
+    const signature = cloudinarySignature(params);
+    const body = new URLSearchParams({
+      file: normalizedDataUri,
+      folder: CLOUDINARY_AVATAR_FOLDER,
+      timestamp: String(timestamp),
+      api_key: CLOUDINARY_API_KEY,
+      signature
+    });
+    const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(CLOUDINARY_CLOUD_NAME)}/image/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    const uploaded = await uploadRes.json().catch(() => ({}));
+    if (!uploadRes.ok || !uploaded.secure_url || !uploaded.public_id) {
+      console.error('Cloudinary avatar upload failed:', uploaded);
+      return res.status(502).json({ ok: false, error: 'Could not upload the profile photo. Please try again.' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found.' });
+    const previousPublicId = user.avatarPublicId || '';
+    user.avatarUrl = String(uploaded.secure_url).slice(0, 500);
+    user.avatarPublicId = String(uploaded.public_id).slice(0, 500);
+    user.avatarSource = 'cloudinary';
+    await user.save();
+
+    if (previousPublicId && previousPublicId !== user.avatarPublicId) await deleteCloudinaryAvatar(previousPublicId);
+    return res.json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    console.error('Profile photo upload error:', error);
+    return res.status(error.status || 500).json({ ok: false, error: 'Could not update profile photo.' });
+  }
+});
+
+app.delete('/api/account/avatar', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found.' });
+    const previousPublicId = user.avatarPublicId || '';
+    user.avatarUrl = '';
+    user.avatarPublicId = '';
+    user.avatarSource = '';
+    await user.save();
+    if (previousPublicId) await deleteCloudinaryAvatar(previousPublicId);
+    return res.json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    console.error('Profile photo removal error:', error);
+    return res.status(500).json({ ok: false, error: 'Could not remove profile photo.' });
+  }
+});
+
 app.get('/api/account/api-key', requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -3038,9 +3138,13 @@ app.post('/meetings/:id/favorite', requireAuth, async (req, res) => {
     if (!meeting) return res.status(404).send('Meeting not found');
     meeting.isFavorite = !meeting.isFavorite;
     await meeting.save();
-    const back = req.body.redirect || req.get('Referer') || '/app';
+    const back = req.body?.redirect || req.get('Referer') || '/app';
+    if (req.get('Accept')?.includes('application/json')) {
+      return res.json({ ok: true, isFavorite: meeting.isFavorite, message: meeting.isFavorite ? 'Added to favourites' : 'Removed from favourites' });
+    }
     res.redirect(back);
   } catch (error) {
+    if (req.get('Accept')?.includes('application/json')) return res.status(500).json({ ok: false, error: error.message });
     res.status(500).send(error.message);
   }
 });
@@ -3060,9 +3164,13 @@ app.post('/meetings/:id/archive', requireAuth, async (req, res) => {
     if (!meeting) return res.status(404).send('Meeting not found');
     meeting.isArchived = !meeting.isArchived;
     await meeting.save();
-    const back = req.body.redirect || (meeting.isArchived ? '/app/meetings?view=archived' : '/app/meetings');
+    const back = req.body?.redirect || (meeting.isArchived ? '/app/meetings?view=archived' : '/app/meetings');
+    if (req.get('Accept')?.includes('application/json')) {
+      return res.json({ ok: true, isArchived: meeting.isArchived, message: meeting.isArchived ? 'Added to archive' : 'Removed from archive' });
+    }
     res.redirect(back);
   } catch (error) {
+    if (req.get('Accept')?.includes('application/json')) return res.status(500).json({ ok: false, error: error.message });
     res.status(500).send(error.message);
   }
 });

@@ -38,8 +38,12 @@
           <div class="settings-title"><div><h2>Profile</h2><p>Personal information used for your account and meeting workspace.</p></div></div>
           <form method="POST" action="/account/profile">
             <div class="profile-head">
-              <% if (au.avatarUrl) { %><img class="profile-photo" src="<%= au.avatarUrl %>" alt="Profile photo" /><% } else { %><div class="profile-photo avatar-fallback"><%= (au.displayName || au.username || '?').charAt(0).toUpperCase() %></div><% } %>
-              <div><strong><%= au.displayName || au.username %></strong><div class="muted">@<%= au.username %></div><span class="user-plan-badge <%= isPaid ? 'paid' : 'free' %>"><%= planName %></span></div>
+              <div class="profile-photo-wrap" data-avatar-uploader>
+                <% if (au.avatarUrl) { %><img class="profile-photo" data-profile-photo src="<%= au.avatarUrl %>" alt="Profile photo" /><% } else { %><div class="profile-photo avatar-fallback" data-profile-photo><%= (au.displayName || au.username || '?').charAt(0).toUpperCase() %></div><% } %>
+                <button class="profile-photo-camera" type="button" data-avatar-trigger aria-label="Change profile photo" title="Change profile photo"><span class="material-symbols-outlined">photo_camera</span></button>
+                <input type="file" data-avatar-input accept="image/jpeg,image/png,image/webp,image/gif" hidden />
+              </div>
+              <div><strong><%= au.displayName || au.username %></strong><div class="muted">@<%= au.username %></div><span class="user-plan-badge <%= isPaid ? 'paid' : 'free' %>"><%= planName %></span><small class="profile-photo-help">Hover the photo to change it · JPG, PNG, WEBP or GIF up to 5 MB</small></div>
             </div>
             <div class="form-grid-2">
               <label>Full name<input name="displayName" value="<%= au.displayName || '' %>" maxlength="80" required /></label>
@@ -183,6 +187,46 @@
   copy?.addEventListener('click', async () => { try { cached = cached || await api(); await navigator.clipboard.writeText(cached); copy.innerHTML = '<span class="material-symbols-outlined">check</span> Copied'; setTimeout(() => copy.innerHTML = '<span class="material-symbols-outlined">content_copy</span> Copy', 1400); } catch (e) { alert(e.message); } });
   document.querySelectorAll('[data-open-dialog]').forEach(b => b.addEventListener('click', () => document.getElementById(b.dataset.openDialog)?.showModal()));
   document.querySelectorAll('[data-close-dialog]').forEach(b => b.addEventListener('click', () => b.closest('dialog')?.close()));
+  const avatarInput = document.querySelector('[data-avatar-input]');
+  const avatarTrigger = document.querySelector('[data-avatar-trigger]');
+  const avatarPhoto = document.querySelector('[data-profile-photo]');
+  avatarTrigger?.addEventListener('click', () => avatarInput?.click());
+  avatarInput?.addEventListener('change', async () => {
+    const file = avatarInput.files?.[0];
+    if (!file) return;
+    if (!['image/jpeg','image/png','image/webp','image/gif'].includes(file.type)) {
+      alert('Please choose a JPG, PNG, WEBP, or GIF image.'); avatarInput.value = ''; return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Profile photo must be smaller than 5 MB.'); avatarInput.value = ''; return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        avatarTrigger.disabled = true;
+        avatarTrigger.innerHTML = '<span class="material-symbols-outlined">progress_activity</span>';
+        const response = await fetch('/api/account/avatar', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: reader.result })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Could not update profile photo.');
+        const url = data.user.avatarUrl;
+        if (avatarPhoto?.tagName === 'IMG') avatarPhoto.src = url;
+        else if (avatarPhoto) {
+          const img = document.createElement('img'); img.className = 'profile-photo'; img.dataset.profilePhoto = ''; img.src = url; img.alt = 'Profile photo';
+          avatarPhoto.replaceWith(img);
+        }
+        document.querySelectorAll('[data-sidebar-avatar]').forEach(el => {
+          if (el.tagName === 'IMG') el.src = url;
+          else { const img = document.createElement('img'); img.className = el.className; img.dataset.sidebarAvatar = ''; img.src = url; img.alt = 'Profile photo'; el.replaceWith(img); }
+        });
+      } catch (error) { alert(error.message); }
+      finally { avatarTrigger.disabled = false; avatarTrigger.innerHTML = '<span class="material-symbols-outlined">photo_camera</span>'; avatarInput.value = ''; }
+    };
+    reader.readAsDataURL(file);
+  });
+
   const settingsLinks = Array.from(document.querySelectorAll('.settings-nav a[href^="#"]'));
   const settingsSections = settingsLinks
     .map(link => document.getElementById(link.getAttribute('href').slice(1)))

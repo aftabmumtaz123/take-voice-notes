@@ -96,7 +96,7 @@
 
   <% if (typeof user !== "undefined" && user) { %>
   <div class="sidebar-user">
-    <div class="avatar"><%= (user.displayName || user.username || "?").charAt(0).toUpperCase() %></div>
+    <% if (user.avatarUrl) { %><img class="avatar avatar-image" data-sidebar-avatar src="<%= user.avatarUrl %>" alt="Profile photo" /><% } else { %><div class="avatar" data-sidebar-avatar><%= (user.displayName || user.username || "?").charAt(0).toUpperCase() %></div><% } %>
     <div class="sidebar-user-meta">
       <strong><%= user.displayName || user.username %></strong>
       <small><%= user.username %></small>
