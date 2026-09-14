@@ -326,7 +326,7 @@ let titleSaveTimer = null;
 function saveTitle() {
   clearTimeout(titleSaveTimer);
   titleSaveTimer = setTimeout(async () => {
-    const title = sessionTitle.value.trim() || 'Untitled meeting';
+    const title = sessionTitle.value.trim() || '';
     sessionTitle.value = title;
     await chrome.runtime.sendMessage({ target: 'background', type: 'SET_TITLE', title });
   }, 250);
