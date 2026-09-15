@@ -83,7 +83,6 @@
   <div class="sidebar-plan">
     <div class="plan-head">
       <strong><% if (isPaid) { %>✦ <% } %><%= badge %> PLAN</strong>
-      <span class="plan-help material-symbols-outlined" title="Plan usage">help</span>
     </div>
     <p class="plan-line"><% if (isPaid) { %>Unlimited meetings<% } else { %><%= used %> / <%= maxM >= 9999 ? '∞' : maxM %> meetings used<% } %></p>
     <% if (!isPaid) { %><div class="plan-bar"><div style="width:<%= pctUsed %>%"></div></div><% } %>

@@ -2346,8 +2346,8 @@ body.sidebar-collapsed .avatar { width: 38px; height: 38px; }
 .overview-meeting-main .meeting-body > strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
 .overview-meeting-main .meeting-body > span { display:block; color:#858091; font-size:11px; margin-top:3px; }
 .meeting-meta { display:flex; align-items:center; gap:10px; margin-top:6px; font-size:10px; color:#858091; }
-.status-pill { display:inline-flex; align-items:center; gap:4px; font-weight:700; }
-.status-pill .material-symbols-outlined { font-size:14px; }
+.status-pill { display:inline-flex; align-items:center; gap:5px; font-weight:700; line-height:1; vertical-align:middle; }
+.status-pill .material-symbols-outlined { display:inline-flex; align-items:center; justify-content:center; flex:0 0 14px; width:14px; height:14px; font-size:14px; line-height:14px; vertical-align:middle; }
 .status-pill.ready { color:#047857; }.status-pill.processing { color:#6d5efc; }
 .overview-meeting-actions { display:flex; gap:2px; }
 .overview-meeting-actions .icon-btn { display:grid; place-items:center; }
