@@ -47,6 +47,9 @@ const app = express();
 // Vercel serverless requests must not rely on Mongoose's query buffer.
 // Database-backed routes are guarded by ensureMongoConnection() below.
 mongoose.set('bufferCommands', false);
+// Fail database connections quickly in serverless environments instead of
+// allowing requests to wait for Mongoose's query buffer timeout.
+mongoose.set('bufferTimeoutMS', 0);
 
 const port = Number(process.env.PORT || 4000);
 const isVercel = Boolean(process.env.VERCEL);
@@ -73,8 +76,11 @@ async function ensureMongoConnection() {
   // create multiple MongoDB connections.
   if (!mongoConnectionPromise) {
     mongoConnectionPromise = mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 10000,
-      maxPoolSize: 10
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 8000,
+      socketTimeoutMS: 20000,
+      maxPoolSize: 10,
+      maxIdleTimeMS: 10000
     }).catch((error) => {
       mongoConnectionPromise = null;
       throw error;
@@ -109,6 +115,18 @@ async function initializeMongoOnce() {
 
   await initializationPromise;
 }
+
+// A warm Vercel instance can lose its MongoDB connection. Clear the cached
+// promise so the next request can establish a fresh connection.
+mongoose.connection.on('disconnected', () => {
+  mongoConnectionPromise = null;
+  initializationPromise = null;
+  console.warn('[mongo] connection disconnected; next request will reconnect.');
+});
+
+mongoose.connection.on('error', (error) => {
+  console.error('[mongo] connection error:', error.message);
+});
 
 const geminiKey = process.env.GEMINI_API_KEY || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -3274,14 +3292,19 @@ app.get('/api/health', async (_req, res) => {
     mongo = true;
   } catch (error) {
     mongo = false;
-    mongoError = error.message;
+    mongoError = error?.message || String(error);
+    console.error('[health] MongoDB check failed:', error);
   }
 
   res.status(mongo ? 200 : 503).json({
     ok: mongo,
     mongo,
+    mongoState: mongoose.connection.readyState,
     mongoError,
     vercel: isVercel,
+    node: process.version,
+    deploymentVersion: '2026-09-16-vercel-mongo-auth-fix-01',
+    timestamp: new Date().toISOString(),
     gemini: Boolean(geminiKey),
     geminiModel,
     geminiFallbacks: GEMINI_FALLBACKS,

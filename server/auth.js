@@ -117,13 +117,17 @@ export async function updateSiteSettings(payload = {}) {
 }
 
 const userSchema = new mongoose.Schema({
+  // Keep the unique username index on the field itself. Do not also call
+  // userSchema.index({ username: 1 }), because that registers the same
+  // MongoDB index twice and causes Mongoose's duplicate schema-index warning.
   username: {
     type: String,
     required: true,
     lowercase: true,
     trim: true,
     minlength: 3,
-    maxlength: 32
+    maxlength: 32,
+    unique: true
   },
   // Optional for Google-only accounts
   passkeyHash: { type: String, default: "" },
@@ -208,10 +212,8 @@ const userSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
-// Keep the unique username constraint as one explicit schema index.
-// Do not also set `unique: true` on the field, which can make Mongoose
-// register the same `{ username: 1 }` index twice in some environments.
-userSchema.index({ username: 1 }, { unique: true });
+// Username uniqueness is declared on the field above. Keep other indexes
+// explicit and make sure username is NOT declared a second time here.
 userSchema.index({ "sessions.tokenHash": 1 });
 
 export const User = mongoose.models.User || mongoose.model("User", userSchema);
