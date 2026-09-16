@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "build": "node --check server.js && node --check auth.js && node --check billing.js && node --check email.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -13,5 +14,8 @@
     "ejs": "^3.1.10",
     "express": "^5.1.0",
     "mongoose": "^8.18.0"
+  },
+  "engines": {
+    "node": "24.x"
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Auth: username + passkey, session cookies for web, API keys for the extension.
+ * Auth: username/email + passkey, session cookies for web, API keys for the extension.
  * Roles: user | admin. Plans: free / paid SaaS tiers.
  */
 import crypto from "node:crypto";
@@ -117,14 +117,17 @@ export async function updateSiteSettings(payload = {}) {
 }
 
 const userSchema = new mongoose.Schema({
+  // Keep the unique username index on the field itself. Do not also call
+  // userSchema.index({ username: 1 }), because that registers the same
+  // MongoDB index twice and causes Mongoose's duplicate schema-index warning.
   username: {
     type: String,
     required: true,
-    unique: true,
     lowercase: true,
     trim: true,
     minlength: 3,
-    maxlength: 32
+    maxlength: 32,
+    unique: true
   },
   // Optional for Google-only accounts
   passkeyHash: { type: String, default: "" },
@@ -152,7 +155,7 @@ const userSchema = new mongoose.Schema({
   planSlug: { type: String, default: "free" },
   askAiUsageMonth: { type: String, default: "" },
   askAiUsageCount: { type: Number, default: 0 },
-  apiKey: { type: String, unique: true, sparse: true, index: true },
+  apiKey: { type: String, unique: true, sparse: true },
   isActive: { type: Boolean, default: true },
   onboardingCompleted: { type: Boolean, default: false },
   onboarding: {
@@ -209,7 +212,8 @@ const userSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
-userSchema.index({ username: 1 });
+// Username uniqueness is declared on the field above. Keep other indexes
+// explicit and make sure username is NOT declared a second time here.
 userSchema.index({ "sessions.tokenHash": 1 });
 
 export const User = mongoose.models.User || mongoose.model("User", userSchema);
@@ -328,11 +332,31 @@ export async function registerUser({ username, passkey, displayName = "", email 
   return { user: publicUser(user) };
 }
 
-export async function loginUser({ username, passkey, label = "web" }) {
-  const err = validateCredentials(username, passkey);
-  if (err) throw Object.assign(new Error(err), { status: 400 });
-  const user = await User.findOne({ username: normalizeUsername(username) });
-  if (!user) throw Object.assign(new Error("Email is wrong."), { status: 401 });
+export async function loginUser({ username, email, identifier, passkey, label = "web" }) {
+  // Login accepts either a username or the account email. Keep `username`
+  // for backwards compatibility with the existing login form/API caller.
+  const loginIdentifier = String(identifier ?? username ?? email ?? "").trim();
+  const password = String(passkey || "");
+
+  if (!loginIdentifier) {
+    throw Object.assign(new Error("Enter your username or email."), { status: 400 });
+  }
+  if (password.length < 6) {
+    throw Object.assign(new Error("Password must be at least 6 characters."), { status: 400 });
+  }
+  if (password.length > 128) {
+    throw Object.assign(new Error("Password is too long."), { status: 400 });
+  }
+
+  const normalizedIdentifier = loginIdentifier.toLowerCase();
+  const isEmail = normalizedIdentifier.includes("@");
+  const user = await User.findOne(
+    isEmail
+      ? { email: normalizedIdentifier }
+      : { username: normalizeUsername(normalizedIdentifier) }
+  );
+
+  if (!user) throw Object.assign(new Error("Username or email is wrong."), { status: 401 });
   if (user.isActive === false) throw Object.assign(new Error("Account is disabled."), { status: 403 });
   if (user.email && user.emailVerified === false) {
     throw Object.assign(new Error("Please verify your email before logging in."), { status: 403, code: "EMAIL_NOT_VERIFIED", username: user.username });
