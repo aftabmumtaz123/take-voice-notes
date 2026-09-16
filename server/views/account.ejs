@@ -123,7 +123,7 @@
             <div class="key-actions"><button type="button" class="btn-ghost" id="showKey"><span class="material-symbols-outlined">visibility</span> Show</button><button type="button" class="btn-ghost" id="copyKey"><span class="material-symbols-outlined">content_copy</span> Copy</button></div>
           </div>
           <div class="security-meta"><span>Created: <strong><%= au.apiKeyCreatedAt ? new Date(au.apiKeyCreatedAt).toLocaleDateString() : 'Unknown' %></strong></span><span>Last used: <strong id="keyLastUsed"><%= au.apiKeyLastUsedAt ? new Date(au.apiKeyLastUsedAt).toLocaleString() : 'Not yet used' %></strong></span><span>Status: <strong class="status-text">● Active</strong></span></div>
-          <form method="POST" action="/account/rotate-key" class="rotate-form" onsubmit="return confirm('Rotate API key? Any extension using the old key will stop working until the new key is configured. Continue?');"><button type="submit" class="btn-danger"><span class="material-symbols-outlined">key</span> Rotate key</button></form>
+          <form method="POST" action="/account/rotate-key" class="rotate-form" id="rotateKeyForm"><button type="button" class="btn-danger" id="openRotateKeyModal"><span class="material-symbols-outlined">key</span> Rotate key</button></form>
           <div class="advanced-setup"><details><summary>Advanced setup</summary><ol><li>Server URL: <code><%= process.env.PUBLIC_APP_URL || 'http://localhost:4000' %></code></li><li>Use <strong>Show</strong> or <strong>Copy</strong> above only when connecting the extension.</li><li>Open the extension popup and choose <strong>Connect account</strong>.</li></ol></details></div>
         </section>
 
@@ -178,8 +178,49 @@
 
 <dialog id="passwordDialog" class="settings-dialog"><form method="POST" action="/account/change-passkey"><button type="button" class="dialog-close" data-close-dialog>×</button><h2>Change passkey</h2><p class="muted">Your new passkey must be at least 6 characters.</p><label>Current passkey<input type="password" name="currentPasskey" required autocomplete="current-password" /></label><label>New passkey<input type="password" name="newPasskey" required minlength="6" autocomplete="new-password" /></label><button class="btn-primary" type="submit">Change passkey</button></form></dialog>
 
+<div class="rotate-key-modal" id="rotateKeyModal" hidden aria-hidden="true">
+  <div class="rotate-key-backdrop" data-close-rotate-key></div>
+  <div class="rotate-key-card" role="dialog" aria-modal="true" aria-labelledby="rotateKeyTitle" aria-describedby="rotateKeyMessage">
+    <button type="button" class="rotate-key-close" data-close-rotate-key aria-label="Close">×</button>
+    <div class="rotate-key-icon"><span class="material-symbols-outlined">key</span></div>
+    <h2 id="rotateKeyTitle">Rotate API key?</h2>
+    <p id="rotateKeyMessage">Any extension using the old key will stop working until the new key is configured. Continue?</p>
+    <div class="rotate-key-actions">
+      <button type="button" class="btn-ghost" data-close-rotate-key>Cancel</button>
+      <button type="button" class="btn-danger" id="confirmRotateKey">Rotate key</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {
+  const rotateForm = document.getElementById('rotateKeyForm');
+  const rotateModal = document.getElementById('rotateKeyModal');
+  const openRotateKeyModal = document.getElementById('openRotateKeyModal');
+  const confirmRotateKey = document.getElementById('confirmRotateKey');
+  const closeRotateKeyModal = () => {
+    if (!rotateModal) return;
+    rotateModal.hidden = true;
+    rotateModal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('rotate-key-modal-open');
+  };
+  const showRotateKeyModal = () => {
+    if (!rotateModal) return;
+    rotateModal.hidden = false;
+    rotateModal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('rotate-key-modal-open');
+    requestAnimationFrame(() => confirmRotateKey?.focus());
+  };
+  openRotateKeyModal?.addEventListener('click', showRotateKeyModal);
+  rotateModal?.querySelectorAll('[data-close-rotate-key]').forEach((el) => el.addEventListener('click', closeRotateKeyModal));
+  confirmRotateKey?.addEventListener('click', () => {
+    closeRotateKeyModal();
+    rotateForm?.submit();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && rotateModal && !rotateModal.hidden) closeRotateKeyModal();
+  });
+
   const api = async () => { const r = await fetch('/api/account/api-key', { headers: { Accept: 'application/json' } }); const d = await r.json(); if (!r.ok || !d.ok) throw new Error(d.error || 'Unable to retrieve API key.'); return d.apiKey; };
   const show = document.getElementById('showKey'), copy = document.getElementById('copyKey'), masked = document.getElementById('maskedKey'); let cached = '';
   show?.addEventListener('click', async () => { try { cached = cached || await api(); masked.textContent = cached; show.innerHTML = '<span class="material-symbols-outlined">visibility_off</span> Hide'; show.dataset.shown = '1'; } catch (e) { alert(e.message); } });

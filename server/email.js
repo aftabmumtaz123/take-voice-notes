@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import mongoose from 'mongoose';
 import { User } from './auth.js';
 
-const EMAIL_LOGO_DATA_URI = `data:image/png;base64,${readFileSync(new URL('./public/assets/app-logo-email.png', import.meta.url)).toString('base64')}`;
+const EMAIL_LOGO_BUFFER = readFileSync(new URL('./public/assets/app-logo-email.png', import.meta.url));
 
 const emailTemplateSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true, lowercase: true, trim: true, index: true },
@@ -114,7 +114,7 @@ function renderTokens(input, vars = {}) {
 }
 function wrapHtml(content, preheader = '', siteName = 'AI Note Taker') {
   const css = `body{margin:0;background:#f4f6f8;color:#17202a;font-family:Inter,Arial,sans-serif} .email-wrap{padding:36px 16px}.email-shell{max-width:620px;margin:auto;background:#fff;border:1px solid #e5e7eb;border-radius:18px;overflow:hidden;box-shadow:0 8px 30px rgba(15,23,42,.06)}.email-brand{padding:22px 26px;border-bottom:1px solid #eef0f3;font-weight:800;font-size:16px;display:flex;align-items:center}.email-brand img{display:block;width:32px;height:32px;border-radius:9px;margin-right:10px}.email-card{padding:30px 30px 34px}.email-card h1{font-size:28px;line-height:1.18;margin:8px 0 16px}.email-card p{font-size:15px;line-height:1.7;color:#46515d}.email-kicker{font-size:11px;letter-spacing:.12em;font-weight:800;color:#687382}.email-code{font-size:34px;letter-spacing:.28em;font-weight:800;text-align:center;padding:20px;background:#f5f7fa;border:1px dashed #cfd5dc;border-radius:14px;margin:22px 0}.email-button{display:inline-block;background:#111;color:#fff!important;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:800}.email-button.secondary{background:#eef1f4;color:#111!important}.email-detail{display:grid;grid-template-columns:140px 1fr;gap:10px;padding:16px;background:#f7f8fa;border-radius:12px;margin:18px 0}.email-detail strong{color:#687382;font-size:12px}.email-detail span{font-size:13px}.email-callout{background:#f7f8fa;border-left:3px solid #111;padding:15px;border-radius:8px;font-size:14px;line-height:1.6;white-space:pre-line}.muted{color:#7a8491!important;font-size:12px!important}`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(siteName)}</title><style>${css}</style></head><body><div class="email-wrap"><div class="email-shell"><div class="email-brand"><img src="${EMAIL_LOGO_DATA_URI}" width="32" height="32" alt="AI Note Taker">${escapeHtml(siteName)}</div>${content}</div>${preheader ? `<div style="display:none;max-height:0;overflow:hidden">${escapeHtml(preheader)}</div>` : ''}</div></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(siteName)}</title><style>${css}</style></head><body><div class="email-wrap"><div class="email-shell"><div class="email-brand"><img src="cid:ai-note-taker-logo" width="32" height="32" alt="AI Note Taker">${escapeHtml(siteName)}</div>${content}</div>${preheader ? `<div style="display:none;max-height:0;overflow:hidden">${escapeHtml(preheader)}</div>` : ''}</div></body></html>`;
 }
 
 function smtpConfig() {
@@ -163,8 +163,41 @@ function smtpSend({ to, subject, html, text, from }) {
         socket.write(`RCPT TO:<${to}>\r\n`); resp = await readResponse();
         socket.write('DATA\r\n'); await readResponse();
         const safeSubject = String(subject).replace(/[\r\n]+/g, ' ').slice(0, 998);
+        const imageBase64 = EMAIL_LOGO_BUFFER.toString('base64').match(/.{1,76}/g)?.join('\r\n') || '';
         const body = [
-          `From: ${from || cfg.fromName} <${cfg.user}>`, `To: ${to}`, `Subject: ${safeSubject}`, 'MIME-Version: 1.0', 'Content-Type: multipart/alternative; boundary="AI_NOTE_BOUNDARY"', '', '--AI_NOTE_BOUNDARY', 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: 8bit', '', text || '', '', '--AI_NOTE_BOUNDARY', 'Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: 8bit', '', html, '', '--AI_NOTE_BOUNDARY--', ''
+          `From: ${from || cfg.fromName} <${cfg.user}>`,
+          `To: ${to}`,
+          `Subject: ${safeSubject}`,
+          'MIME-Version: 1.0',
+          'Content-Type: multipart/related; boundary="AI_NOTE_RELATED"',
+          '',
+          '--AI_NOTE_RELATED',
+          'Content-Type: multipart/alternative; boundary="AI_NOTE_ALTERNATIVE"',
+          '',
+          '--AI_NOTE_ALTERNATIVE',
+          'Content-Type: text/plain; charset=UTF-8',
+          'Content-Transfer-Encoding: 8bit',
+          '',
+          text || '',
+          '',
+          '--AI_NOTE_ALTERNATIVE',
+          'Content-Type: text/html; charset=UTF-8',
+          'Content-Transfer-Encoding: 8bit',
+          '',
+          html,
+          '',
+          '--AI_NOTE_ALTERNATIVE--',
+          '',
+          '--AI_NOTE_RELATED',
+          'Content-Type: image/png; name="app-logo-email.png"',
+          'Content-Transfer-Encoding: base64',
+          'Content-ID: <ai-note-taker-logo>',
+          'Content-Disposition: inline; filename="app-logo-email.png"',
+          '',
+          imageBase64,
+          '',
+          '--AI_NOTE_RELATED--',
+          ''
         ].join('\r\n');
         socket.write(body.replace(/^\./gm, '..') + '\r\n.\r\n'); resp = await readResponse();
         if (!/^250 /.test(resp.split('\n').pop())) throw new Error('Gmail SMTP rejected the message.');

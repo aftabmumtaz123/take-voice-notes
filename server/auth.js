@@ -332,7 +332,7 @@ export async function loginUser({ username, passkey, label = "web" }) {
   const err = validateCredentials(username, passkey);
   if (err) throw Object.assign(new Error(err), { status: 400 });
   const user = await User.findOne({ username: normalizeUsername(username) });
-  if (!user) throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
+  if (!user) throw Object.assign(new Error("Email is wrong."), { status: 401 });
   if (user.isActive === false) throw Object.assign(new Error("Account is disabled."), { status: 403 });
   if (user.email && user.emailVerified === false) {
     throw Object.assign(new Error("Please verify your email before logging in."), { status: 403, code: "EMAIL_NOT_VERIFIED", username: user.username });
@@ -345,7 +345,7 @@ export async function loginUser({ username, passkey, label = "web" }) {
   const a = Buffer.from(attempt, "hex");
   const b = Buffer.from(user.passkeyHash, "hex");
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    throw Object.assign(new Error("Invalid username or passkey."), { status: 401 });
+    throw Object.assign(new Error("Password is wrong."), { status: 401 });
   }
   ensureApiKey(user);
   await user.save();

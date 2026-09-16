@@ -2997,6 +2997,27 @@ html[data-theme="dark"] .app-toast { background: rgba(31, 29, 42, .97); color: #
   .app-toast { max-width: none; }
 }
 
+
+
+/* API key rotation confirmation */
+body.rotate-key-modal-open { overflow: hidden; }
+.rotate-key-modal[hidden] { display: none !important; }
+.rotate-key-modal { position: fixed; inset: 0; z-index: 11000; display: grid; place-items: center; padding: 20px; }
+.rotate-key-backdrop { position: absolute; inset: 0; background: rgba(20, 17, 35, .42); backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px); animation: rotateKeyBackdropIn .16s ease-out; }
+.rotate-key-card { position: relative; width: min(440px, 100%); padding: 30px; border: 1px solid var(--border); border-radius: 20px; background: var(--card); color: var(--text); box-shadow: 0 28px 90px rgba(25, 20, 55, .28); text-align: center; animation: rotateKeyModalIn .18s ease-out; }
+.rotate-key-close { position: absolute; top: 13px; right: 13px; width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2, #f7f5fa); color: var(--muted); display: grid; place-items: center; cursor: pointer; font-size: 22px; line-height: 1; }
+.rotate-key-close:hover { color: var(--text); background: var(--surface, #fff); }
+.rotate-key-icon { width: 54px; height: 54px; margin: 2px auto 16px; border-radius: 16px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.rotate-key-icon .material-symbols-outlined { font-size: 27px; }
+.rotate-key-card h2 { margin: 0; font-size: 21px; letter-spacing: -.025em; }
+.rotate-key-card p { margin: 10px auto 24px; max-width: 365px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.rotate-key-actions { display: flex; justify-content: center; gap: 9px; }
+.rotate-key-actions button { min-width: 105px; }
+@keyframes rotateKeyModalIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes rotateKeyBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+html[data-theme="dark"] .rotate-key-close { background: var(--surface-2); }
+@media (max-width: 480px) { .rotate-key-card { padding: 26px 20px; } }
+
 /* Logout confirmation */
 body.logout-modal-open { overflow: hidden; }
 .logout-confirm[hidden] { display: none !important; }
