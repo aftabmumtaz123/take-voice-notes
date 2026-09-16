@@ -13,14 +13,14 @@ globalThis.AI_NOTE_CONFIG = {
   "keys": {
     "deepgram": "",
     "assemblyai": "f4d7a677c14b49dfa5166085c731e8a7",
-    "openai": "AQ.Ab8RN6LAU6Tth6WoAErW5Ye0s65XmyBvs3PGRKHodyAVufsh6Q"
+    "openai": ""
   },
   "deepgramModel": "nova-3",
   "assemblyaiModel": "universal-3-5-pro",
   "openaiModel": "gpt-4o-mini-transcribe",
-  "backendUrl": "http://192.168.1.5:4000",
-  "clientUrl": "http://192.168.1.5:3000",
-  "buildEnvironment": "qa"
+  "backendUrl": "http://localhost:4000",
+  "clientUrl": "http://localhost:3000",
+  "buildEnvironment": "development"
 };
 
 // Offline script normalization for multilingual transcripts.
