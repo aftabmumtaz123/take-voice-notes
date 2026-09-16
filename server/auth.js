@@ -209,7 +209,6 @@ const userSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
-userSchema.index({ username: 1 });
 userSchema.index({ "sessions.tokenHash": 1 });
 
 export const User = mongoose.models.User || mongoose.model("User", userSchema);

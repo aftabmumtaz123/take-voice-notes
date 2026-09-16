@@ -30,3 +30,7 @@ Allow the Vercel runtime to reach MongoDB Atlas. For initial testing, MongoDB At
 ## Important
 
 Do not upload `.env` or real API keys to GitHub or the Vercel source. This deployment package intentionally excludes the original `.env` file.
+
+
+## Important
+Do not add a `builds` entry using `@vercel/node` for this project. Vercel now detects the Express app from `server.js` and its package dependencies. The app exports `default app`.
