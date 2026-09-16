@@ -30,7 +30,7 @@
           </span>
           Continue with Google
         </a>
-        <div class="auth-divider"><span>Or use username</span></div>
+        <div class="auth-divider"><span>Or use username or email</span></div>
       <% } %>
 
       <form method="POST" action="/login" class="auth-form">
@@ -40,9 +40,9 @@
             name="username"
             required
             minlength="3"
-            maxlength="32"
-            pattern="[a-zA-Z0-9_]+"
-            placeholder="username"
+            maxlength="254"
+            type="text"
+            placeholder="username or email"
             autocomplete="username"
             value="<%= typeof formUsername !== 'undefined' ? formUsername : '' %>"
           />

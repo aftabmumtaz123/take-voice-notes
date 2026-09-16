@@ -47,9 +47,9 @@ const port = Number(process.env.PORT || 4000);
 const isVercel = Boolean(process.env.VERCEL);
 const mongoUri = process.env.MONGODB_URI || (isVercel ? '' : 'mongodb://127.0.0.1:27017/ai_note_taker');
 
-// Vercel runs this Express app as a serverless function. Do not create a new
-// MongoDB connection for every request; reuse the connection/promise when a
-// warm function instance is reused. The same helper also works locally.
+// Vercel runs this Express app as a serverless function. Reuse a module-scoped
+// connection/promise when a warm function instance is reused, but reconnect if
+// a previously connected instance has been disconnected.
 let mongoConnectionPromise = null;
 let initializationPromise = null;
 
@@ -58,19 +58,42 @@ async function ensureMongoConnection() {
     throw new Error('MONGODB_URI is not configured. Add it in Vercel → Project Settings → Environment Variables.');
   }
 
-  if (mongoose.connection.readyState === 1) return mongoose.connection;
+  const state = mongoose.connection.readyState;
+  if (state === 1) return mongoose.connection;
 
-  if (!mongoConnectionPromise) {
+  // If another request in this warm Vercel instance is already connecting,
+  // wait for that same connection instead of opening a second one.
+  if (state === 2 && mongoConnectionPromise) {
+    await mongoConnectionPromise;
+  } else if (state !== 2) {
     mongoConnectionPromise = mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 10000,
-      maxPoolSize: 10
+      maxPoolSize: 10,
+      maxIdleTimeMS: 5000
     }).catch((error) => {
       mongoConnectionPromise = null;
       throw error;
     });
+    await mongoConnectionPromise;
+  } else if (state === 2) {
+    // Mongoose reports CONNECTING but the local promise is unavailable.
+    // Wait for the driver's connection event rather than allowing model
+    // operations to sit in Mongoose's query buffer.
+    await new Promise((resolve, reject) => {
+      const onConnected = () => { cleanup(); resolve(); };
+      const onError = (error) => { cleanup(); reject(error); };
+      const cleanup = () => {
+        mongoose.connection.off('connected', onConnected);
+        mongoose.connection.off('error', onError);
+      };
+      mongoose.connection.once('connected', onConnected);
+      mongoose.connection.once('error', onError);
+    });
   }
 
-  await mongoConnectionPromise;
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('MongoDB connection was not established.');
+  }
 
   // Seed only once per warm function instance. These operations are idempotent
   // in the existing application and are intentionally not run per request.
@@ -150,6 +173,30 @@ app.use((req, res, next) => {
     console.log(`<<< ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)\n`);
   });
   next();
+});
+
+// IMPORTANT: Express middleware only affects routes registered after it.
+// Keep MongoDB initialization here, before the application's database-backed
+// routes (including /verify-email, /login, /register, etc.). The old middleware
+// lived near /api/health, after those routes, which allowed Mongoose queries to
+// run before a Vercel function had connected and eventually time out in its
+// query buffer.
+app.use(async (req, res, next) => {
+  // /api/health intentionally handles its own connection attempt so it can
+  // report the actual MongoDB status instead of being intercepted here.
+  if (req.path === '/api/health') return next();
+
+  try {
+    await ensureMongoConnection();
+    next();
+  } catch (error) {
+    console.error('[mongo] request initialization failed:', error.message);
+    res.status(503).json({
+      ok: false,
+      error: 'Database is unavailable.',
+      details: isVercel ? 'Check MONGODB_URI and MongoDB Atlas network access.' : error.message
+    });
+  }
 });
 
 const actionItemSchema = new mongoose.Schema({
@@ -1266,7 +1313,7 @@ app.get('/login', optionalAuth, async (req, res) => {
 app.post('/login', async (req, res) => {
   try {
     const result = await loginUser({
-      username: req.body.username,
+      identifier: req.body.username || req.body.email || req.body.identifier,
       passkey: req.body.passkey || req.body.password,
       label: 'web'
     });
@@ -3245,23 +3292,6 @@ app.get('/api/health', async (_req, res) => {
     lastGeminiOkAt,
     lastGeminiError: lastGeminiError || null
   });
-});
-
-// All routes below the health endpoint may access MongoDB through auth/models.
-// On Vercel this middleware makes sure the DB is ready before those handlers
-// run, while keeping /api/health useful for diagnosing configuration issues.
-app.use(async (_req, res, next) => {
-  try {
-    await ensureMongoConnection();
-    next();
-  } catch (error) {
-    console.error('[mongo] request initialization failed:', error.message);
-    res.status(503).json({
-      ok: false,
-      error: 'Database is unavailable.',
-      details: isVercel ? 'Check MONGODB_URI and MongoDB Atlas network access.' : error.message
-    });
-  }
 });
 
 // ─── Auth ───────────────────────────────────────────────────────────

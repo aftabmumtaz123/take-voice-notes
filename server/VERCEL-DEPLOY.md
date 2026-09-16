@@ -34,3 +34,9 @@ Do not upload `.env` or real API keys to GitHub or the Vercel source. This deplo
 
 ## Important
 Do not add a `builds` entry using `@vercel/node` for this project. Vercel now detects the Express app from `server.js` and its package dependencies. The app exports `default app`.
+
+### MongoDB/Vercel connection fix
+
+The server now initializes MongoDB **before database-backed Express routes are executed**. This is important because Express middleware only applies to routes registered after the middleware. The previous connection middleware was located after routes such as `/verify-email`, which could allow a Mongoose query to run before the Vercel function had connected and produce `users.findOne() buffering timed out after 10000ms`.
+
+The connection helper also reuses an in-flight connection attempt and reconnects when a warm Vercel instance has lost its MongoDB connection.
