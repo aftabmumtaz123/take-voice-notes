@@ -120,7 +120,6 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    unique: true,
     lowercase: true,
     trim: true,
     minlength: 3,
@@ -152,7 +151,7 @@ const userSchema = new mongoose.Schema({
   planSlug: { type: String, default: "free" },
   askAiUsageMonth: { type: String, default: "" },
   askAiUsageCount: { type: Number, default: 0 },
-  apiKey: { type: String, unique: true, sparse: true, index: true },
+  apiKey: { type: String, unique: true, sparse: true },
   isActive: { type: Boolean, default: true },
   onboardingCompleted: { type: Boolean, default: false },
   onboarding: {
@@ -209,6 +208,10 @@ const userSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
+// Keep the unique username constraint as one explicit schema index.
+// Do not also set `unique: true` on the field, which can make Mongoose
+// register the same `{ username: 1 }` index twice in some environments.
+userSchema.index({ username: 1 }, { unique: true });
 userSchema.index({ "sessions.tokenHash": 1 });
 
 export const User = mongoose.models.User || mongoose.model("User", userSchema);

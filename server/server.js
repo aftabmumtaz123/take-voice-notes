@@ -43,6 +43,11 @@ import { EmailTemplate, seedEmailTemplates, sendEmail, sendTemplateToUser, creat
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+
+// Vercel serverless requests must not rely on Mongoose's query buffer.
+// Database-backed routes are guarded by ensureMongoConnection() below.
+mongoose.set('bufferCommands', false);
+
 const port = Number(process.env.PORT || 4000);
 const isVercel = Boolean(process.env.VERCEL);
 const mongoUri = process.env.MONGODB_URI || (isVercel ? '' : 'mongodb://127.0.0.1:27017/ai_note_taker');
@@ -58,45 +63,36 @@ async function ensureMongoConnection() {
     throw new Error('MONGODB_URI is not configured. Add it in Vercel → Project Settings → Environment Variables.');
   }
 
-  const state = mongoose.connection.readyState;
-  if (state === 1) return mongoose.connection;
+  // Reuse an already-open connection in a warm Vercel function.
+  if (mongoose.connection.readyState === 1) {
+    await initializeMongoOnce();
+    return mongoose.connection;
+  }
 
-  // If another request in this warm Vercel instance is already connecting,
-  // wait for that same connection instead of opening a second one.
-  if (state === 2 && mongoConnectionPromise) {
-    await mongoConnectionPromise;
-  } else if (state !== 2) {
+  // Reuse an in-flight connection attempt so concurrent requests do not
+  // create multiple MongoDB connections.
+  if (!mongoConnectionPromise) {
     mongoConnectionPromise = mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 10000,
-      maxPoolSize: 10,
-      maxIdleTimeMS: 5000
+      maxPoolSize: 10
     }).catch((error) => {
       mongoConnectionPromise = null;
       throw error;
     });
-    await mongoConnectionPromise;
-  } else if (state === 2) {
-    // Mongoose reports CONNECTING but the local promise is unavailable.
-    // Wait for the driver's connection event rather than allowing model
-    // operations to sit in Mongoose's query buffer.
-    await new Promise((resolve, reject) => {
-      const onConnected = () => { cleanup(); resolve(); };
-      const onError = (error) => { cleanup(); reject(error); };
-      const cleanup = () => {
-        mongoose.connection.off('connected', onConnected);
-        mongoose.connection.off('error', onError);
-      };
-      mongoose.connection.once('connected', onConnected);
-      mongoose.connection.once('error', onError);
-    });
   }
 
+  await mongoConnectionPromise;
+
   if (mongoose.connection.readyState !== 1) {
+    mongoConnectionPromise = null;
     throw new Error('MongoDB connection was not established.');
   }
 
-  // Seed only once per warm function instance. These operations are idempotent
-  // in the existing application and are intentionally not run per request.
+  await initializeMongoOnce();
+  return mongoose.connection;
+}
+
+async function initializeMongoOnce() {
   if (!initializationPromise) {
     initializationPromise = (async () => {
       await seedDefaults();
@@ -112,8 +108,8 @@ async function ensureMongoConnection() {
   }
 
   await initializationPromise;
-  return mongoose.connection;
 }
+
 const geminiKey = process.env.GEMINI_API_KEY || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -207,7 +203,7 @@ const actionItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const meetingSchema = new mongoose.Schema({
-  externalId: { type: String, required: true, unique: true, index: true },
+  externalId: { type: String, required: true, unique: true },
   userId: { type: String, required: true, index: true },
   workspaceId: { type: String, default: '', index: true },
   visibility: { type: String, enum: ['private', 'shared'], default: 'private', index: true },
