@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meeting detected</title>
+  <link rel="stylesheet" href="meeting-detected.css">
+</head>
+<body>
+  <main class="meeting-app">
+    <div class="glow"></div>
+    <header class="header">
+      <div class="logo">✦</div>
+      <div class="live-badge"><span></span> DETECTED</div>
+    </header>
+
+    <section class="hero">
+      <div id="platformIcon" class="platform-icon">M</div>
+      <p class="eyebrow">MEETING DETECTED</p>
+      <h1 id="meetingTitle">Ready to capture?</h1>
+      <p id="meetingDescription">AI Note Taker found a meeting in this browser tab.</p>
+    </section>
+
+    <section class="meeting-card">
+      <div class="meeting-card-top">
+        <div>
+          <span class="label">PLATFORM</span>
+          <strong id="platformName">Meeting</strong>
+        </div>
+        <div class="check">✓</div>
+      </div>
+      <div class="url-row">
+        <span class="url-dot"></span>
+        <span id="meetingUrl">Meeting link detected</span>
+      </div>
+    </section>
+
+    <div id="permissionNote" class="permission-note">
+      <span class="mic">⌁</span>
+      <div>
+        <strong>Microphone access</strong>
+        <p>You'll be asked by Chrome to allow microphone access when you start.</p>
+      </div>
+    </div>
+
+    <div id="error" class="error hidden" role="alert"></div>
+
+    <div class="actions">
+      <button id="startBtn" class="start-btn"><span>●</span> Start transcription</button>
+      <button id="laterBtn" class="later-btn">Not now</button>
+    </div>
+
+    <p class="privacy">Your developer-configured transcription provider is used. No API key is requested from you.</p>
+  </main>
+  <script type="module" src="meeting-detected.js"></script>
+</body>
+</html>

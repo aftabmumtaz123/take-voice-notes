@@ -27,7 +27,7 @@ const workspaceInvitationSchema = new mongoose.Schema({
   email: { type: String, required: true, lowercase: true, trim: true, maxlength: 200, index: true },
   role: { type: String, enum: ['admin', 'member'], default: 'member' },
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  tokenHash: { type: String, required: true, unique: true },
+  tokenHash: { type: String, required: true, unique: true, index: true },
   expiresAt: { type: Date, required: true, index: true },
   status: { type: String, enum: ['pending', 'accepted', 'expired', 'revoked'], default: 'pending', index: true }
 }, { timestamps: true });

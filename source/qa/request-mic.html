@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Allow Microphone – AI Note Taker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0f1117;
+      color: #e8eaed;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2a2f3d;
+      border-radius: 16px;
+      padding: 32px 28px;
+      max-width: 380px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,.45);
+    }
+    .icon {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 18px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 26px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    p {
+      font-size: 13.5px;
+      color: #9aa0b0;
+      line-height: 1.5;
+      margin-bottom: 22px;
+    }
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      transition: opacity .15s;
+    }
+    button:hover { opacity: .92; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .primary {
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      color: white;
+      margin-bottom: 10px;
+    }
+    .secondary {
+      background: transparent;
+      color: #9aa0b0;
+      border: 1px solid #2a2f3d;
+    }
+    .status {
+      margin-top: 16px;
+      font-size: 13px;
+      min-height: 20px;
+    }
+    .status.ok { color: #34d399; }
+    .status.err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🎤</div>
+    <h1>Allow microphone access</h1>
+    <p>
+      Chrome needs your permission so AI Note Taker can capture meeting audio.
+      Click the button below — the system dialog will appear.
+    </p>
+    <button id="allowBtn" class="primary">Allow microphone</button>
+    <button id="closeBtn" class="secondary">Close</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <script src="request-mic.js"></script>
+</body>
+</html>

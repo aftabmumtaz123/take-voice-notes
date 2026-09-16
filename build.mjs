@@ -4,9 +4,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
-const SOURCE_DIR = path.join(ROOT, 'dist');
+const DIST_DIR = path.join(ROOT, 'dist');
 const ICONS_DIR = path.join(ROOT, 'icons');
 const BUILD_ROOT = path.join(ROOT, 'build');
+const SOURCE_BUILD_ROOT = path.join(ROOT, 'source');
+const PREBUILT_DIR = path.join(SOURCE_BUILD_ROOT, 'development');
+const PREBUILT_QA_DIR = path.join(SOURCE_BUILD_ROOT, 'qa');
+const DEFAULT_BACKEND_URL = 'https://take-voice-notes.vercel.app';
 
 const mode = process.argv[2] || 'development';
 const envFile = mode === 'qa' ? '.env.qa' : '.env';
@@ -44,6 +48,9 @@ async function copyDir(src, dest) {
 
 async function main() {
   const env = parseEnv(await fs.readFile(envPath, 'utf8'));
+  // Production backend used by the normal `npm run build`.
+  if (mode === 'development' && !env.BACKEND_URL) env.BACKEND_URL = DEFAULT_BACKEND_URL;
+  if (mode === 'development' && !env.CLIENT_URL) env.CLIENT_URL = env.BACKEND_URL;
   const activeProvider = (env.TRANSCRIBE_PROVIDER || 'assemblyai').trim().toLowerCase();
   const fallbackProviders = uniqueProviders(
     activeProvider,
@@ -61,14 +68,23 @@ async function main() {
     deepgramModel: env.DEEPGRAM_MODEL || 'nova-3',
     assemblyaiModel: env.ASSEMBLYAI_MODEL || 'universal-3-5-pro',
     openaiModel: env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
-    backendUrl: (env.BACKEND_URL || 'http://localhost:4000').replace(/\/$/, ''),
-    clientUrl: (env.CLIENT_URL || env.BACKEND_URL || 'http://localhost:4000').replace(/\/$/, ''),
+    backendUrl: (env.BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, ''),
+    clientUrl: (env.CLIENT_URL || env.BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, ''),
     buildEnvironment: mode
   };
 
+  // This repository archive may not contain dist/. In that case the checked-in
+  // development build is the source and is updated in place.
+  const hasDist = await fs.access(DIST_DIR).then(() => true).catch(() => false);
+  const sourceDir = hasDist ? DIST_DIR : (mode === 'qa' ? PREBUILT_QA_DIR : PREBUILT_DIR);
+
+  // Always rebuild output from a pristine source copy. This prevents a partially
+  // deleted build/development directory from causing ENOENT on background.js.
   await fs.rm(outputDir, { recursive: true, force: true });
   await fs.mkdir(outputDir, { recursive: true });
-  await copyDir(SOURCE_DIR, outputDir);
+  await copyDir(sourceDir, outputDir);
+
+  await fs.mkdir(path.join(outputDir, 'icons'), { recursive: true });
   await copyDir(ICONS_DIR, path.join(outputDir, 'icons'));
 
   // runtime-config.js is loaded by the extension pages that use module imports.

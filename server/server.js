@@ -43,91 +43,8 @@ import { EmailTemplate, seedEmailTemplates, sendEmail, sendTemplateToUser, creat
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
-
-// Vercel serverless requests must not rely on Mongoose's query buffer.
-// Database-backed routes are guarded by ensureMongoConnection() below.
-mongoose.set('bufferCommands', false);
-// Fail database connections quickly in serverless environments instead of
-// allowing requests to wait for Mongoose's query buffer timeout.
-mongoose.set('bufferTimeoutMS', 0);
-
 const port = Number(process.env.PORT || 4000);
-const isVercel = Boolean(process.env.VERCEL);
-const mongoUri = process.env.MONGODB_URI || (isVercel ? '' : 'mongodb://127.0.0.1:27017/ai_note_taker');
-
-// Vercel runs this Express app as a serverless function. Reuse a module-scoped
-// connection/promise when a warm function instance is reused, but reconnect if
-// a previously connected instance has been disconnected.
-let mongoConnectionPromise = null;
-let initializationPromise = null;
-
-async function ensureMongoConnection() {
-  if (!mongoUri) {
-    throw new Error('MONGODB_URI is not configured. Add it in Vercel → Project Settings → Environment Variables.');
-  }
-
-  // Reuse an already-open connection in a warm Vercel function.
-  if (mongoose.connection.readyState === 1) {
-    await initializeMongoOnce();
-    return mongoose.connection;
-  }
-
-  // Reuse an in-flight connection attempt so concurrent requests do not
-  // create multiple MongoDB connections.
-  if (!mongoConnectionPromise) {
-    mongoConnectionPromise = mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 8000,
-      connectTimeoutMS: 8000,
-      socketTimeoutMS: 20000,
-      maxPoolSize: 10,
-      maxIdleTimeMS: 10000
-    }).catch((error) => {
-      mongoConnectionPromise = null;
-      throw error;
-    });
-  }
-
-  await mongoConnectionPromise;
-
-  if (mongoose.connection.readyState !== 1) {
-    mongoConnectionPromise = null;
-    throw new Error('MongoDB connection was not established.');
-  }
-
-  await initializeMongoOnce();
-  return mongoose.connection;
-}
-
-async function initializeMongoOnce() {
-  if (!initializationPromise) {
-    initializationPromise = (async () => {
-      await seedDefaults();
-      await seedEmailTemplates();
-      await Plan.updateOne(
-        { slug: 'pro' },
-        { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
-      ).catch(() => {});
-    })().catch((error) => {
-      initializationPromise = null;
-      throw error;
-    });
-  }
-
-  await initializationPromise;
-}
-
-// A warm Vercel instance can lose its MongoDB connection. Clear the cached
-// promise so the next request can establish a fresh connection.
-mongoose.connection.on('disconnected', () => {
-  mongoConnectionPromise = null;
-  initializationPromise = null;
-  console.warn('[mongo] connection disconnected; next request will reconnect.');
-});
-
-mongoose.connection.on('error', (error) => {
-  console.error('[mongo] connection error:', error.message);
-});
-
+const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ai_note_taker';
 const geminiKey = process.env.GEMINI_API_KEY || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -189,30 +106,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// IMPORTANT: Express middleware only affects routes registered after it.
-// Keep MongoDB initialization here, before the application's database-backed
-// routes (including /verify-email, /login, /register, etc.). The old middleware
-// lived near /api/health, after those routes, which allowed Mongoose queries to
-// run before a Vercel function had connected and eventually time out in its
-// query buffer.
-app.use(async (req, res, next) => {
-  // /api/health intentionally handles its own connection attempt so it can
-  // report the actual MongoDB status instead of being intercepted here.
-  if (req.path === '/api/health') return next();
-
-  try {
-    await ensureMongoConnection();
-    next();
-  } catch (error) {
-    console.error('[mongo] request initialization failed:', error.message);
-    res.status(503).json({
-      ok: false,
-      error: 'Database is unavailable.',
-      details: isVercel ? 'Check MONGODB_URI and MongoDB Atlas network access.' : error.message
-    });
-  }
-});
-
 const actionItemSchema = new mongoose.Schema({
   task: { type: String, default: '' },
   owner: { type: String, default: '' },
@@ -221,7 +114,7 @@ const actionItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const meetingSchema = new mongoose.Schema({
-  externalId: { type: String, required: true, unique: true },
+  externalId: { type: String, required: true, unique: true, index: true },
   userId: { type: String, required: true, index: true },
   workspaceId: { type: String, default: '', index: true },
   visibility: { type: String, enum: ['private', 'shared'], default: 'private', index: true },
@@ -1327,7 +1220,7 @@ app.get('/login', optionalAuth, async (req, res) => {
 app.post('/login', async (req, res) => {
   try {
     const result = await loginUser({
-      identifier: req.body.username || req.body.email || req.body.identifier,
+      username: req.body.username,
       passkey: req.body.passkey || req.body.password,
       label: 'web'
     });
@@ -3284,27 +3177,10 @@ app.post('/meetings/:id/archive', requireAuth, async (req, res) => {
 
 
 
-app.get('/api/health', async (_req, res) => {
-  let mongo = mongoose.connection.readyState === 1;
-  let mongoError = null;
-  try {
-    await ensureMongoConnection();
-    mongo = true;
-  } catch (error) {
-    mongo = false;
-    mongoError = error?.message || String(error);
-    console.error('[health] MongoDB check failed:', error);
-  }
-
-  res.status(mongo ? 200 : 503).json({
-    ok: mongo,
-    mongo,
-    mongoState: mongoose.connection.readyState,
-    mongoError,
-    vercel: isVercel,
-    node: process.version,
-    deploymentVersion: '2026-09-16-vercel-mongo-auth-fix-01',
-    timestamp: new Date().toISOString(),
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    mongo: mongoose.connection.readyState === 1,
     gemini: Boolean(geminiKey),
     geminiModel,
     geminiFallbacks: GEMINI_FALLBACKS,
@@ -3794,23 +3670,22 @@ app.delete('/api/meetings/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Vercel imports the Express app and invokes it per request. Starting a
-// listening socket inside the serverless runtime causes FUNCTION_INVOCATION_FAILED.
-// Keep app.listen() only for local development.
-export default app;
-
-if (!isVercel) {
-  ensureMongoConnection()
-    .then(() => {
-      app.listen(port, '0.0.0.0', () => {
-        console.log(`AI Note Taker API listening on http://0.0.0.0:${port}`);
-        console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
-        console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
-        console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
-      });
-    })
-    .catch((error) => {
-      console.error('MongoDB connection failed:', error.message);
-      console.error('Local server will not start until MongoDB is available.');
+mongoose.connect(mongoUri)
+  .then(async () => {
+    await seedDefaults();
+    await seedEmailTemplates();
+    await Plan.updateOne(
+      { slug: 'pro' },
+      { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
+    ).catch(() => {});
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`AI Note Taker API listening on http://0.0.0.0:${port}`);
+      console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
+      console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
+      console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
     });
-}
+  })
+  .catch((error) => {
+    console.error('MongoDB connection failed:', error.message);
+    process.exit(1);
+  });
