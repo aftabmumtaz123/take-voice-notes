@@ -57,3 +57,5 @@ The application disables Mongoose query buffering, so database failures should n
 ## Username index fix
 
 The `username` field now owns the single unique index with `unique: true`. There is no second `userSchema.index({ username: 1 })` declaration. This removes the Mongoose duplicate schema-index warning.
+
+Vercel entry point: api/index.js (Express app in server/app.js).

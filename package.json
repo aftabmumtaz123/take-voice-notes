@@ -3,12 +3,17 @@
   "version": "2.0.1",
   "private": true,
   "type": "module",
-  "engines": { "node": "24.x" },
+  "engines": {
+    "node": "24.x"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "ejs": "^3.1.10",
     "express": "^5.1.0",
     "mongoose": "^8.18.0"
+  },
+  "scripts": {
+    "build": "node --check api/index.js && node --check server/app.js && node --check server/auth.js && node --check server/billing.js && node --check server/email.js"
   }
 }

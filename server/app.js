@@ -1,0 +1,3816 @@
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import mongoose from 'mongoose';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import {
+  registerUser,
+  loginUser,
+  logoutUser,
+  requireAuth,
+  requireAdmin,
+  optionalAuth,
+  resolveUser,
+  setSessionCookie,
+  clearSessionCookie,
+  rotateApiKey,
+  updateAccountSettings,
+  postLoginRedirect,
+  seedDefaults,
+  User,
+  Plan,
+  publicUser,
+  getSiteSettings,
+  updateSiteSettings,
+  completeOnboarding,
+  isPaidPlan,
+  planBadgeLabel,
+  isUnlimited,
+  formatLimit,
+  findOrCreateGoogleUser,
+  resetPasskey,
+  createSession,
+  getPlanDefinition
+} from './auth.js';
+import {
+  Subscription, UpgradeRequest, Payment, Workspace, WorkspaceMember, WorkspaceInvitation, getEffectivePlan, getPendingUpgradeRequest,
+  createUpgradeRequest, activateSubscription, rejectUpgradeRequest, cancelUserSubscription, scheduleSubscriptionCancellation, undoSubscriptionCancellation, getWorkspaceForUser, getUserWorkspaces, generateWorkspaceInviteToken, hashWorkspaceInviteToken
+} from './billing.js';
+import { EmailTemplate, seedEmailTemplates, sendEmail, sendTemplateToUser, createOtp, hashSecret, appBaseUrl } from './email.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+
+// Vercel serverless requests must not rely on Mongoose's query buffer.
+// Database-backed routes are guarded by ensureMongoConnection() below.
+mongoose.set('bufferCommands', false);
+// Fail database connections quickly in serverless environments instead of
+// allowing requests to wait for Mongoose's query buffer timeout.
+mongoose.set('bufferTimeoutMS', 0);
+
+const port = Number(process.env.PORT || 4000);
+const isVercel = Boolean(process.env.VERCEL);
+const mongoUri = process.env.MONGODB_URI || (isVercel ? '' : 'mongodb://127.0.0.1:27017/ai_note_taker');
+
+// Vercel runs this Express app as a serverless function. Reuse a module-scoped
+// connection/promise when a warm function instance is reused, but reconnect if
+// a previously connected instance has been disconnected.
+let mongoConnectionPromise = null;
+let initializationPromise = null;
+
+async function ensureMongoConnection() {
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is not configured. Add it in Vercel → Project Settings → Environment Variables.');
+  }
+
+  // Reuse an already-open connection in a warm Vercel function.
+  if (mongoose.connection.readyState === 1) {
+    await initializeMongoOnce();
+    return mongoose.connection;
+  }
+
+  // Reuse an in-flight connection attempt so concurrent requests do not
+  // create multiple MongoDB connections.
+  if (!mongoConnectionPromise) {
+    mongoConnectionPromise = mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 8000,
+      socketTimeoutMS: 20000,
+      maxPoolSize: 10,
+      maxIdleTimeMS: 10000
+    }).catch((error) => {
+      mongoConnectionPromise = null;
+      throw error;
+    });
+  }
+
+  await mongoConnectionPromise;
+
+  if (mongoose.connection.readyState !== 1) {
+    mongoConnectionPromise = null;
+    throw new Error('MongoDB connection was not established.');
+  }
+
+  await initializeMongoOnce();
+  return mongoose.connection;
+}
+
+async function initializeMongoOnce() {
+  if (!initializationPromise) {
+    initializationPromise = (async () => {
+      await seedDefaults();
+      await seedEmailTemplates();
+      await Plan.updateOne(
+        { slug: 'pro' },
+        { $set: { maxMeetingsPerMonth: null, maxTranscriptionMinutes: null, maxAiQuestions: null } }
+      ).catch(() => {});
+    })().catch((error) => {
+      initializationPromise = null;
+      throw error;
+    });
+  }
+
+  await initializationPromise;
+}
+
+// A warm Vercel instance can lose its MongoDB connection. Clear the cached
+// promise so the next request can establish a fresh connection.
+mongoose.connection.on('disconnected', () => {
+  mongoConnectionPromise = null;
+  initializationPromise = null;
+  console.warn('[mongo] connection disconnected; next request will reconnect.');
+});
+
+mongoose.connection.on('error', (error) => {
+  console.error('[mongo] connection error:', error.message);
+});
+
+const geminiKey = process.env.GEMINI_API_KEY || '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${port}/api/google/callback`;
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+const CLOUDINARY_AVATAR_FOLDER = 'ai-note-taker/avatars';
+
+const GOOGLE_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/calendar.readonly'
+].join(' ');
+const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+// Try these in order when the preferred model is overloaded / unavailable
+const GEMINI_FALLBACKS = [
+  geminiModel,
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash'
+].filter((v, i, a) => v && a.indexOf(v) === i);
+
+app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: false }));
+// Avatar uploads are sent as a data URI so the server can validate and forward them to Cloudinary.
+app.use('/api/account/avatar', express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use('/public', express.static(path.join(__dirname, 'public')));
+
+
+// Loud request logger — every API hit shows in the terminal
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  const start = Date.now();
+  console.log(`\n>>> ${req.method} ${req.path}  (${new Date().toLocaleTimeString()})`);
+  if (req.method !== 'GET' && req.body && Object.keys(req.body).length) {
+    const preview = { ...req.body };
+    if (preview.fullTranscript) {
+      preview.fullTranscript = `[${String(preview.fullTranscript).length} chars]`;
+    }
+    if (preview.transcript) {
+      preview.transcript = `[${Array.isArray(preview.transcript) ? preview.transcript.length : 0} segments]`;
+    }
+    console.log('    body:', JSON.stringify(preview).slice(0, 300));
+  }
+  if (req.query && Object.keys(req.query).length) {
+    console.log('    query:', JSON.stringify(req.query));
+  }
+  res.on('finish', () => {
+    console.log(`<<< ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)\n`);
+  });
+  next();
+});
+
+// IMPORTANT: Express middleware only affects routes registered after it.
+// Keep MongoDB initialization here, before the application's database-backed
+// routes (including /verify-email, /login, /register, etc.). The old middleware
+// lived near /api/health, after those routes, which allowed Mongoose queries to
+// run before a Vercel function had connected and eventually time out in its
+// query buffer.
+app.use(async (req, res, next) => {
+  // /api/health intentionally handles its own connection attempt so it can
+  // report the actual MongoDB status instead of being intercepted here.
+  if (req.path === '/api/health') return next();
+
+  try {
+    await ensureMongoConnection();
+    next();
+  } catch (error) {
+    console.error('[mongo] request initialization failed:', error.message);
+    res.status(503).json({
+      ok: false,
+      error: 'Database is unavailable.',
+      details: isVercel ? 'Check MONGODB_URI and MongoDB Atlas network access.' : error.message
+    });
+  }
+});
+
+const actionItemSchema = new mongoose.Schema({
+  task: { type: String, default: '' },
+  owner: { type: String, default: '' },
+  deadline: { type: String, default: '' },
+  completed: { type: Boolean, default: false }
+}, { _id: false });
+
+const meetingSchema = new mongoose.Schema({
+  externalId: { type: String, required: true, unique: true },
+  userId: { type: String, required: true, index: true },
+  workspaceId: { type: String, default: '', index: true },
+  visibility: { type: String, enum: ['private', 'shared'], default: 'private', index: true },
+  title: { type: String, default: 'Untitled meeting' },
+  platform: { type: String, default: 'Manual' },
+  meetingUrl: { type: String, default: '' },
+  startedAt: Date,
+  endedAt: Date,
+  duration: { type: Number, default: 0 },
+  participants: [{
+    name: { type: String, default: '' },
+    email: { type: String, default: '' },
+    talkSeconds: { type: Number, default: 0 },
+    talkPercent: { type: Number, default: 0 },
+    color: { type: String, default: '' }
+  }],
+  fullTranscript: { type: String, default: '' },
+  transcript: [{ speaker: String, text: String, startTime: Number, endTime: Number, confidence: Number }],
+  ai: {
+    generatedTitle: { type: String, default: '' },
+    summary: { type: String, default: '' },
+    detailedSummary: { type: String, default: '' },
+    discussionDetails: { type: [{ topic: String, details: String, outcome: String }], default: [] },
+    keyPoints: { type: [String], default: [] },
+    decisions: { type: [String], default: [] },
+    decisionDetails: { type: [{ decision: String, rationale: String }], default: [] },
+    actionItems: { type: [actionItemSchema], default: [] },
+    topics: { type: [String], default: [] },
+    risks: { type: [String], default: [] },
+    conflicts: { type: [{ topic: String, perspectives: String, impact: String, resolution: String, status: String }], default: [] },
+    openQuestions: { type: [String], default: [] },
+    followUps: { type: [String], default: [] },
+    generatedAt: Date,
+    error: { type: String, default: '' }
+  },
+  notes: { type: String, default: '' },
+  isFavorite: { type: Boolean, default: false },
+  isArchived: { type: Boolean, default: false },
+  viewCount: { type: Number, default: 0 },
+  lastSyncError: { type: String, default: '' },
+  syncedAt: Date
+}, { timestamps: true });
+
+meetingSchema.index({ userId: 1, startedAt: -1 });
+meetingSchema.index({ userId: 1, isFavorite: 1, startedAt: -1 });
+meetingSchema.index({ userId: 1, isArchived: 1, startedAt: -1 });
+meetingSchema.index({ userId: 1, title: 'text', fullTranscript: 'text' });
+const Meeting = mongoose.model('Meeting', meetingSchema);
+
+// Short-lived lifecycle state used by the post-meeting processing screen.
+// It is intentionally separate from the Meeting document so the UI can show
+// progress while /api/meetings/complete is still saving/analyzing.
+const meetingProcessingStates = new Map();
+const meetingProcessingLocks = new Map();
+
+let lastGeminiOkAt = null;
+let lastGeminiError = '';
+
+function sanitizeParticipantName(value) {
+  let name = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!name || name.length < 2 || name.length > 80) return '';
+  name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+  name = name.replace(/\s*[-–—|]\s*(?:you|me)\s*$/i, '').trim();
+  name = name.replace(/^[•·]\s*/, '').trim();
+  const normalized = name.toLowerCase();
+  const ignored = new Set([
+    'you','me','host','co-host','presenter','participant','participants','meeting',
+    'meeting controls','more options','more actions','options','chat','mute','unmute',
+    'camera','microphone','leave','leave meeting','end meeting','share screen',
+    'raise hand','captions','settings','close','minimize','maximize','recording',
+    'transcribing','connected','reconnecting','devices','more_vert'
+  ]);
+  if (ignored.has(normalized)) return '';
+  if (/^(?:button|menu|dialog|list|video|audio|tile|participant|tooltip)\b/i.test(name)) return '';
+  if (/\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|options|settings|leave|end meeting|hang up|share screen|present|presenting|raise hand|captions|chat|you can't|can't unmute|turn on|turn off|remove|pin|spotlight|hide|show|stop|start)\b/i.test(name)) return '';
+  if (/https?:\/\//i.test(name) || /[{}<>]/.test(name)) return '';
+  if (name.split(' ').filter(Boolean).length > 6) return '';
+  if ((name.match(/[.!?]/g) || []).length > 1) return '';
+  return name;
+}
+
+function sanitizeParticipants(list = []) {
+  const merged = new Map();
+  for (const p of Array.isArray(list) ? list : []) {
+    const name = sanitizeParticipantName(p?.name || p?.displayName);
+    if (!name) continue;
+    const key = name.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    if (!merged.has(key)) {
+      merged.set(key, {
+        name,
+        email: String(p?.email || '').slice(0, 200),
+        talkSeconds: Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0)),
+        talkPercent: Math.max(0, Math.min(100, Number(p?.talkPercent || 0))),
+        color: String(p?.color || '').slice(0, 20)
+      });
+    } else {
+      const current = merged.get(key);
+      current.talkSeconds += Math.max(0, Number(p?.talkSeconds || p?.talkTime || 0));
+      current.talkPercent = Math.max(current.talkPercent, Math.max(0, Math.min(100, Number(p?.talkPercent || 0))));
+      if (!current.email && p?.email) current.email = String(p.email).slice(0, 200);
+    }
+  }
+  return Array.from(merged.values()).slice(0, 50);
+}
+
+function normalizeMeetingBody(body = {}) {
+  return {
+    externalId: String(body.externalId || crypto.randomUUID()),
+    userId: String(body.userId || 'local-user'),
+    title: body.title == null ? null : (String(body.title).trim().slice(0, 160) || null),
+    platform: String(body.platform || 'Manual').slice(0, 80),
+    meetingUrl: String(body.meetingUrl || '').slice(0, 2000),
+    startedAt: body.startedAt ? new Date(body.startedAt) : new Date(),
+    endedAt: body.endedAt ? new Date(body.endedAt) : new Date(),
+    duration: Math.max(0, Number(body.duration || 0)),
+    participants: sanitizeParticipants(body.participants),
+    fullTranscript: String(body.fullTranscript || ''),
+    transcript: Array.isArray(body.transcript) ? body.transcript : [],
+    notes: String(body.notes || '')
+  };
+}
+
+/** Coerce Gemini values that may be objects into readable strings */
+function asText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    if (value.text) return String(value.text);
+    if (value.title) return String(value.title);
+    if (value.description) return String(value.description);
+    if (value.item) return String(value.item);
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+function emptyAnalysis(reason = '') {
+  return {
+    generatedTitle: '',
+    summary: reason || 'No transcript was captured for this meeting.',
+    detailedSummary: '',
+    discussionDetails: [],
+    keyPoints: [], decisions: [], decisionDetails: [], actionItems: [], topics: [], risks: [],
+    conflicts: [], openQuestions: [], followUps: []
+  };
+}
+
+function isOverloadError(status, message = '') {
+  const m = String(message).toLowerCase();
+  return status === 429 || status === 503
+    || m.includes('high demand')
+    || m.includes('resource exhausted')
+    || m.includes('unavailable')
+    || m.includes('try again later')
+    || m.includes('overloaded')
+    || m.includes('quota')
+    || m.includes('capacity');
+}
+
+function logBanner(kind, title, detail = '') {
+  const line = '─'.repeat(56);
+  if (kind === 'ok') {
+    console.log(`\n✅ ${title}`);
+    if (detail) console.log(`   ${detail}`);
+    console.log(`${line}\n`);
+  } else if (kind === 'fail') {
+    console.error(`\n❌ ${title}`);
+    if (detail) console.error(`   ${detail}`);
+    console.error(`${line}\n`);
+  } else {
+    console.log(`\n⚠️  ${title}`);
+    if (detail) console.log(`   ${detail}`);
+    console.log(`${line}\n`);
+  }
+}
+
+async function callGeminiOnce(model, prompt, { json = false, purpose = 'request' } = {}) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  console.log(`[gemini] → ${purpose} | model=${model} | promptChars=${prompt.length}`);
+
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      ...(json ? { responseMimeType: 'application/json' } : {})
+    }
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  const started = Date.now();
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': geminiKey
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    const msg = err.name === 'AbortError' ? 'Gemini request timed out (90s)' : (err.message || String(err));
+    console.error(`[gemini] NETWORK ERROR model=${model}: ${msg}`);
+    const e = new Error(msg);
+    e.status = 0;
+    e.overload = false;
+    e.model = model;
+    throw e;
+  }
+  clearTimeout(timeout);
+
+  const elapsed = Date.now() - started;
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const msg = payload?.error?.message
+      || payload?.error?.status
+      || `Gemini request failed (${response.status})`;
+    const full = payload?.error ? JSON.stringify(payload.error) : msg;
+    console.error(`[gemini] FAIL status=${response.status} model=${model} ${elapsed}ms`);
+    console.error(`[gemini] error body: ${full}`);
+    const e = new Error(msg);
+    e.status = response.status;
+    e.overload = isOverloadError(response.status, msg);
+    e.model = model;
+    e.raw = payload?.error || null;
+    throw e;
+  }
+
+  const text = payload?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+  if (!text.trim()) {
+    console.error(`[gemini] EMPTY RESPONSE model=${model} ${elapsed}ms payload=`, JSON.stringify(payload).slice(0, 500));
+    const e = new Error('Gemini returned empty content');
+    e.status = response.status;
+    e.overload = false;
+    e.model = model;
+    throw e;
+  }
+
+  console.log(`[gemini] SUCCESS model=${model} ${elapsed}ms responseChars=${text.length}`);
+  return text;
+}
+
+async function callGemini(prompt, { json = false, purpose = 'request' } = {}) {
+  if (!geminiKey) {
+    logBanner('fail', 'GEMINI_API_KEY missing', 'Set GEMINI_API_KEY in server/.env and restart');
+    throw new Error('GEMINI_API_KEY is not configured on the server.');
+  }
+
+  console.log(`[gemini] start ${purpose} | fallbacks: ${GEMINI_FALLBACKS.join(' → ')}`);
+
+  let lastErr = null;
+  for (let i = 0; i < GEMINI_FALLBACKS.length; i++) {
+    const model = GEMINI_FALLBACKS[i];
+    try {
+      const text = await callGeminiOnce(model, prompt, { json, purpose });
+      lastGeminiOkAt = new Date();
+      lastGeminiError = '';
+      logBanner('ok', `${purpose} succeeded`, `model=${model} | chars=${text.length}`);
+      return text;
+    } catch (err) {
+      lastErr = err;
+      lastGeminiError = `[${err.model || model}] ${err.message || String(err)}`;
+      if (err.overload && i < GEMINI_FALLBACKS.length - 1) {
+        logBanner('warn', `Model overloaded: ${model}`, `Trying next: ${GEMINI_FALLBACKS[i + 1]}`);
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      // Non-overload or last model — stop
+      break;
+    }
+  }
+
+  logBanner(
+    'fail',
+    `${purpose} FAILED`,
+    lastErr
+      ? `model=${lastErr.model || '?'} | status=${lastErr.status ?? '?'} | ${lastErr.message}`
+      : 'Unknown Gemini error'
+  );
+  throw lastErr || new Error('Gemini request failed');
+}
+
+async function analyzeTranscript(meeting) {
+  const transcript = String(meeting.fullTranscript || '').trim();
+  if (!transcript) {
+    console.log('[gemini] skip: empty transcript');
+    return emptyAnalysis('No transcript was captured for this meeting.');
+  }
+
+  const prompt = `You are a meticulous AI meeting analyst. Analyze ONLY the transcript below. Never invent facts, people, dates, deadlines, decisions, action owners, disagreements, or outcomes. If information is unavailable, use an empty string, empty array, or "Not specified" only when the schema requires a string.
+
+Create a concise meeting-specific title based on the actual subject of the discussion. The title should be 4-10 words, specific and useful in a meeting history list, not generic (avoid titles like "Meeting Notes", "Team Meeting", or "Discussion").
+
+Write TWO levels of narrative summary:
+
+1) summary — an executive overview of 2–4 full paragraphs. Cover meeting purpose/context, who/what was involved when stated, the main topics, the most important outcomes, and any critical open issues. This should still be readable as a standalone briefing.
+
+2) detailedSummary — a thorough meeting narrative of 6–12 substantial paragraphs (or clearly separated sections). Walk through the discussion in logical order:
+   - Opening context and goals
+   - Each major topic thread: what was said, options considered, constraints, numbers/dates/requirements mentioned
+   - Clarifications and important side points
+   - Decisions reached and why
+   - Action items and ownership when stated
+   - Unresolved questions, risks, and next steps
+   Do NOT merely list bullets here — write connected prose that someone who missed the meeting can use as a full substitute for reading the transcript. Preserve concrete details (names only if spoken, amounts, deadlines, product/feature names, URLs, metrics).
+
+Also identify genuine conflicts/disagreements or competing viewpoints. Only include a conflict when the transcript shows differing opinions, requirements, interpretations, priorities, or unresolved disagreement. Do not label ordinary discussion as conflict.
+
+Return valid JSON with EXACTLY these keys:
+generatedTitle, summary, detailedSummary, discussionDetails, keyPoints, decisions, decisionDetails, actionItems, topics, risks, conflicts, openQuestions, followUps.
+
+Field guidance:
+- discussionDetails: array of {topic, details, outcome}. Aim for one entry per major discussion thread. "details" should be 2–5 sentences capturing what was explored; "outcome" is the result or "Still open" if unresolved.
+- decisionDetails: array of {decision, rationale}. Prefer these over short one-liners when a decision has context.
+- decisions: short string list of the same decisions for quick scanning.
+- actionItems: array of {task, owner, deadline, completed}. owner/deadline only if explicitly stated; otherwise "".
+- keyPoints: 5–12 high-signal bullets of facts, requirements, or takeaways.
+- topics: short topic tags.
+- risks: blockers, dependencies, or risks mentioned.
+- conflicts: array of {topic, perspectives, impact, resolution, status}.
+- openQuestions: questions that remain unanswered or need confirmation.
+- followUps: concrete next-step items even if not formal action items.
+
+Rules:
+- Use only the transcript.
+- Do not fabricate participant names.
+- Do not invent deadlines or owners.
+- Do not infer agreement when none is stated.
+- Preserve important numbers, time windows, requirements, and constraints accurately.
+- If there is no real conflict, return conflicts as [].
+- If there are no open questions, return openQuestions as [].
+- Keep the title short and meeting-specific.
+- Prefer completeness over brevity for detailedSummary and discussionDetails.
+- detailedSummary MUST be substantially longer and more specific than summary.
+
+MEETING TITLE CURRENTLY: ${meeting.title}
+PLATFORM: ${meeting.platform}
+
+TRANSCRIPT:
+${transcript}`;
+
+  // One outer retry on non-overload failures; overload is handled inside callGemini fallbacks
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const text = await callGemini(prompt, { json: true, purpose: 'analyze-transcript' });
+      const cleaned = text.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        // Sometimes model still wraps or adds prose — try to extract first {…}
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error('Gemini returned non-JSON content');
+        parsed = JSON.parse(match[0]);
+      }
+
+      return {
+        generatedTitle: String(parsed.generatedTitle || '').trim().slice(0, 160),
+        summary: String(parsed.summary || ''),
+        detailedSummary: String(parsed.detailedSummary || ''),
+        discussionDetails: Array.isArray(parsed.discussionDetails) ? parsed.discussionDetails.slice(0, 30).map((x) => ({
+          topic: String(x?.topic || ''), details: String(x?.details || ''), outcome: String(x?.outcome || '')
+        })) : [],
+        keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints.map(asText).slice(0, 30) : [],
+        decisions: Array.isArray(parsed.decisions) ? parsed.decisions.map(asText).slice(0, 30) : [],
+        decisionDetails: Array.isArray(parsed.decisionDetails) ? parsed.decisionDetails.slice(0, 30).map((x) => ({
+          decision: asText(x?.decision), rationale: asText(x?.rationale)
+        })) : [],
+        actionItems: Array.isArray(parsed.actionItems) ? parsed.actionItems.slice(0, 50).map((x) => ({
+          task: asText(x?.task), owner: asText(x?.owner), deadline: asText(x?.deadline), completed: Boolean(x?.completed)
+        })) : [],
+        topics: Array.isArray(parsed.topics) ? parsed.topics.map(asText).slice(0, 30) : [],
+        risks: Array.isArray(parsed.risks) ? parsed.risks.map(asText).slice(0, 30) : [],
+        conflicts: Array.isArray(parsed.conflicts) ? parsed.conflicts.slice(0, 30).map((x) => ({
+          topic: asText(x?.topic), perspectives: asText(x?.perspectives), impact: asText(x?.impact),
+          resolution: asText(x?.resolution), status: asText(x?.status)
+        })) : [],
+        openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions.map(asText).slice(0, 30) : [],
+        followUps: Array.isArray(parsed.followUps) ? parsed.followUps.map(asText).slice(0, 30) : []
+      };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[gemini] analyze attempt ${attempt} failed:`, err.message);
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  throw lastErr || new Error('Gemini analysis failed');
+}
+
+const MEETING_PROMPT_TEMPLATES = {
+  detailed_transcript: {
+    id: 'detailed_transcript',
+    label: 'Detailed transcription',
+    icon: 'description',
+    instruction: `Create a detailed, chronological reconstruction of the meeting from the transcript. Preserve only what was actually said. Use speaker names only when present in the transcript or participant metadata. Include timestamps when available. Do not invent missing speech.`
+  },
+  short_summary: {
+    id: 'short_summary',
+    label: 'Short summary',
+    icon: '✦',
+    instruction: `Write a SHORT executive summary of this meeting in 1–2 tight paragraphs (or 5–7 bullets if clearer).
+Focus only on: purpose, main outcomes, and the most important next step.
+Do not include long discussion detail.`
+  },
+  detailed_summary: {
+    id: 'detailed_summary',
+    label: 'Detailed summary',
+    icon: '✦',
+    instruction: `Write a DETAILED meeting summary in Markdown.
+Use sections:
+## Overview
+## Discussion
+## Decisions
+## Action items
+## Open questions / next steps
+Walk through the conversation in order. Preserve concrete numbers, names (only if spoken), deadlines, and requirements. Aim for 6–12 substantial paragraphs or equivalent structured sections.`
+  },
+  detailed_with_citations: {
+    id: 'detailed_with_citations',
+    label: 'Detailed summary with citation',
+    icon: '✦',
+    instruction: `Write a detailed summary with light citations back to the transcript.
+For important claims, add a short quote or paraphrase in italics after the point, e.g. _(“…quote…”)_ .
+Structure with ## headings. Include Overview, Key discussion points, Decisions, and Next steps.`
+  },
+  summary_and_actions: {
+    id: 'summary_and_actions',
+    label: 'Summary and Action items',
+    icon: '📋',
+    instruction: `Produce:
+## Summary
+2–4 paragraphs covering purpose and outcomes.
+## Action items
+A checkbox list: - [ ] Task (Owner: Name if known; Deadline: if known)
+Only include real action items from the transcript. If none, say so under the heading.`
+  },
+  team_sync: {
+    id: 'team_sync',
+    label: 'Team Sync – Project Updates',
+    icon: '👥',
+    instruction: `Format as a team sync update in Markdown:
+## Project status
+## What was discussed
+## Blockers / risks
+## Decisions
+## Action items
+- [ ] Task (Owner)
+Keep it scannable for someone who missed the meeting.`
+  },
+  smart_advice: {
+    id: 'smart_advice',
+    label: 'Smart AI Advice',
+    icon: '💡',
+    instruction: `Based only on this meeting, give practical advice:
+## What went well
+## Risks or gaps
+## Recommended next moves
+## Questions the team should resolve
+Be concrete and grounded in the transcript. Do not invent external facts.`
+  },
+  task_list: {
+    id: 'task_list',
+    label: 'Short task list',
+    icon: 'checklist',
+    instruction: `Create a short, prioritized task list from the meeting. Use checkbox bullets only. Include an owner and deadline only when explicitly supported by the transcript.`
+  },
+  other_mentions: {
+    id: 'other_mentions',
+    label: 'Other mentions',
+    icon: 'alternate_email',
+    instruction: `Extract notable mentions that are not already clear decisions or action items: people mentioned, products, customers, dates, requirements, risks, questions, or references. Group them under concise headings. Do not invent context.`
+  },
+  generate_tasks: {
+    id: 'generate_tasks',
+    label: 'Generate tasks',
+    icon: '☑',
+    instruction: `Extract a clean task list from the meeting.
+Use only checkbox items:
+- [ ] Task description — Owner: … — Deadline: … (omit owner/deadline if unknown)
+Group under ## Tasks if helpful. No fluff — tasks only, or a short note if none exist.`
+  },
+  prepare_slides: {
+    id: 'prepare_slides',
+    label: 'Prepare slides',
+    icon: '▶',
+    instruction: `Turn this meeting into a slide outline in Markdown.
+Use ## Slide 1: Title, ## Slide 2: … etc.
+Each slide: 3–6 short bullets max. Cover: title/context, key points, decisions, action items, next steps.
+Suitable for a 5–8 slide recap deck.`
+  },
+  key_decisions: {
+    id: 'key_decisions',
+    label: 'Key decisions',
+    icon: '🔵',
+    instruction: `List only the decisions made in this meeting.
+Format each as:
+🔵 **Decision** — brief rationale if stated
+If none, say no explicit decisions were recorded.`
+  },
+  next_steps: {
+    id: 'next_steps',
+    label: 'Next steps',
+    icon: '→',
+    instruction: `List concrete next steps and follow-ups from the meeting as:
+- [ ] Step (Owner if known)
+Include open questions that block progress under ## Open questions.`
+  }
+};
+
+async function answerMeetingQuestion(meeting, question, promptId = null) {
+  const template = promptId ? MEETING_PROMPT_TEMPLATES[promptId] : null;
+  const taskBlock = template
+    ? `PROMPT TEMPLATE: ${template.label}\n\nYOUR TASK:\n${template.instruction}`
+    : `QUESTION:\n${question}`;
+
+  const prompt = `You are a meeting assistant. Use ONLY the meeting context below.
+If information is not present in the transcript or summary, say so clearly. Do not invent facts, names, deadlines, or owners.
+
+Format your answer as clean Markdown for a product UI:
+- Use ## / ### headings when helpful.
+- Use **bold** for key terms.
+- Use bullet lists for key points.
+- For tasks/action items use: - [ ] Task (Owner: Name) when applicable.
+- For decisions you may use: 🔵 **Topic** — decision text
+- Never wrap the entire answer in a code fence.
+- Do not invent content beyond the meeting context.
+
+MEETING: ${meeting.title}
+SUMMARY: ${meeting.ai?.summary || ''}
+DETAILED SUMMARY: ${meeting.ai?.detailedSummary || ''}
+KEY POINTS: ${(meeting.ai?.keyPoints || []).join(' | ')}
+DECISIONS: ${(meeting.ai?.decisions || []).join(' | ')}
+ACTION ITEMS: ${JSON.stringify(meeting.ai?.actionItems || [])}
+TRANSCRIPT:
+${meeting.fullTranscript || ''}
+
+${taskBlock}`;
+
+  const label = template ? template.id : String(question).slice(0, 120);
+  console.log(`[chat] prompt="${label}" meeting=${meeting.externalId || meeting._id}`);
+  return (await callGemini(prompt, { purpose: 'meeting-chat' })).trim() || 'No answer generated.';
+}
+
+
+
+function buildMeetingExportText(meeting) {
+  const ai = meeting.ai || {};
+  const lines = [];
+  lines.push(ai.generatedTitle || meeting.title || 'Untitled meeting');
+  lines.push('='.repeat(48));
+  lines.push(`Platform: ${meeting.platform || 'Manual'}`);
+  if (meeting.startedAt) lines.push(`Started: ${new Date(meeting.startedAt).toLocaleString()}`);
+  if (meeting.duration) lines.push(`Duration: ${Math.round(meeting.duration / 60)} min`);
+  lines.push('');
+  lines.push('EXECUTIVE SUMMARY');
+  lines.push('-'.repeat(48));
+  lines.push(ai.summary || 'No summary.');
+  lines.push('');
+  lines.push('DETAILED SUMMARY');
+  lines.push('-'.repeat(48));
+  lines.push(ai.detailedSummary || ai.summary || '—');
+  lines.push('');
+  if (ai.keyPoints?.length) {
+    lines.push('KEY POINTS');
+    lines.push('-'.repeat(48));
+    ai.keyPoints.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
+    lines.push('');
+  }
+  if (ai.decisions?.length) {
+    lines.push('DECISIONS');
+    lines.push('-'.repeat(48));
+    ai.decisions.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
+    lines.push('');
+  }
+  if (ai.actionItems?.length) {
+    lines.push('ACTION ITEMS');
+    lines.push('-'.repeat(48));
+    ai.actionItems.forEach((a, i) => {
+      lines.push(`${i + 1}. ${a.task || ''}${a.owner ? ` — ${a.owner}` : ''}${a.deadline ? ` (${a.deadline})` : ''}`);
+    });
+    lines.push('');
+  }
+  if (ai.topics?.length) {
+    lines.push('TOPICS');
+    lines.push('-'.repeat(48));
+    lines.push(ai.topics.map((t) => `#${t}`).join(', '));
+    lines.push('');
+  }
+  if (ai.openQuestions?.length) {
+    lines.push('OPEN QUESTIONS');
+    lines.push('-'.repeat(48));
+    ai.openQuestions.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
+    lines.push('');
+  }
+  if (ai.risks?.length) {
+    lines.push('RISKS');
+    lines.push('-'.repeat(48));
+    ai.risks.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
+    lines.push('');
+  }
+  if (ai.followUps?.length) {
+    lines.push('FOLLOW-UPS');
+    lines.push('-'.repeat(48));
+    ai.followUps.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
+    lines.push('');
+  }
+  if (meeting.notes) {
+    lines.push('NOTES');
+    lines.push('-'.repeat(48));
+    lines.push(meeting.notes);
+    lines.push('');
+  }
+  lines.push('TRANSCRIPT');
+  lines.push('-'.repeat(48));
+  lines.push(meeting.fullTranscript || 'No transcript.');
+  lines.push('');
+  return lines.join('\n');
+}
+
+// ─── Web (EJS) ──────────────────────────────────────────────────────
+app.get('/', optionalAuth, async (req, res) => {
+  // Logged-in users go to their app / admin; guests see the marketing landing page
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const [plans, settings] = await Promise.all([
+    Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => []),
+    getSiteSettings().catch(() => null)
+  ]);
+  res.render('landing', { user: null, plans, settings, error: null, success: null });
+});
+
+
+async function loadUserPlanContext(user) {
+  const effective = await getEffectivePlan(user);
+  let plan = effective.plan;
+  let subscription = effective.subscription;
+  let workspace = await getWorkspaceForUser(user.id).catch(() => null);
+  // Team is a workspace entitlement. Members can use Team features even when
+  // their personal account is Free; billing remains attached to the workspace.
+  if (workspace?.subscriptionId) {
+    const wsSub = await Subscription.findOne({ _id: workspace.subscriptionId, status: { $in: ['trialing','active'] } }).populate('planId').lean().catch(() => null);
+    if (wsSub?.planId?.slug === 'team' && (!subscription || String(subscription._id) !== String(wsSub._id))) {
+      plan = wsSub.planId;
+      subscription = wsSub;
+    }
+  }
+  const account = await User.findById(user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null);
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const usedThisMonth = await Meeting.countDocuments({ userId: user.id, createdAt: { $gte: monthStart } }).catch(() => 0);
+  const aiThisMonth = await Meeting.countDocuments({ userId: user.id, createdAt: { $gte: monthStart }, 'ai.summary': { $exists: true, $ne: '' } }).catch(() => 0);
+  const durationSec = await Meeting.aggregate([
+    { $match: { userId: user.id, createdAt: { $gte: monthStart } } },
+    { $group: { _id: null, total: { $sum: '$duration' } } }
+  ]).then((r) => r[0]?.total || 0).catch(() => 0);
+  const planSlug = String(plan?.slug || 'free').toLowerCase();
+  const definition = getPlanDefinition(planSlug);
+  // The plan slug is the canonical product identity. Merge the canonical
+  // definition over database feature flags so stale records cannot create
+  // contradictory UI/access behavior.
+  const effectivePlan = plan ? { ...plan, ...definition, _id: plan._id, slug: plan.slug } : definition;
+  const maxMeetings = effectivePlan.maxMeetingsPerMonth === undefined ? 3 : effectivePlan.maxMeetingsPerMonth;
+  const maxTranscriptionMinutes = effectivePlan.maxTranscriptionMinutes === undefined ? 30 : effectivePlan.maxTranscriptionMinutes;
+  const maxAiQuestions = effectivePlan.maxAiQuestions === undefined ? 20 : effectivePlan.maxAiQuestions;
+  const remainingPct = isUnlimited(maxMeetings) ? 100 : Math.max(0, Math.round((1 - usedThisMonth / Math.max(1, maxMeetings)) * 100));
+  const monthKey = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`;
+  const askAiCount = account?.askAiUsageMonth === monthKey ? Number(account.askAiUsageCount || 0) : 0;
+  const askAiAvailable = Boolean(effectivePlan.featureFlags?.askAi);
+  const paid = planSlug === 'pro' || planSlug === 'team' || (planSlug && planSlug !== 'free');
+  return {
+    plan: effectivePlan, subscription, workspace,
+    usage: { meetingsUsed: usedThisMonth, meetingsMax: maxMeetings, aiNotes: aiThisMonth, transcriptionMinutes: Math.round(durationSec / 60), transcriptionMax: maxTranscriptionMinutes, aiQuestions: askAiCount, aiQuestionsMax: maxAiQuestions, remainingPct, isPaid: paid, askAiAvailable, badge: planBadgeLabel(planSlug) }
+  };
+}
+
+app.get('/app', requireAuth, (req, res) => res.redirect('/app/overview'));
+
+app.get('/app/overview', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role === 'admin') {
+      // admins can still view user overview
+    }
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const recent = await Meeting.find({ userId: req.user.id, isArchived: { $ne: true } })
+      .sort({ startedAt: -1 }).limit(6).lean();
+
+    const now = new Date();
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [todayMeetings, todayAi, todayActionItems, todayMinutes, actionDocs, insightAgg] = await Promise.all([
+      Meeting.countDocuments({ userId: req.user.id, isArchived: { $ne: true }, startedAt: { $gte: dayStart, $lt: dayEnd } }).catch(() => 0),
+      Meeting.countDocuments({ userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: dayStart, $lt: dayEnd }, 'ai.summary': { $exists: true, $ne: '' } }).catch(() => 0),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: dayStart, $lt: dayEnd } } },
+        { $unwind: { path: '$ai.actionItems', preserveNullAndEmptyArrays: false } },
+        { $match: { 'ai.actionItems.completed': { $ne: true } } },
+        { $count: 'count' }
+      ]).then(r => r[0]?.count || 0).catch(() => 0),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, startedAt: { $gte: dayStart, $lt: dayEnd } } },
+        { $group: { _id: null, total: { $sum: '$duration' } } }
+      ]).then(r => Math.round((r[0]?.total || 0) / 60)).catch(() => 0),
+      Meeting.find({ userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart }, 'ai.actionItems.0': { $exists: true } })
+        .select('externalId title startedAt ai.actionItems').sort({ startedAt: -1 }).limit(12).lean().catch(() => []),
+      Meeting.aggregate([
+        { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart } } },
+        { $group: { _id: null, decisions: { $sum: { $size: { $ifNull: ['$ai.decisions', []] } } }, topics: { $sum: { $size: { $ifNull: ['$ai.topics', []] } } }, followUps: { $sum: { $size: { $ifNull: ['$ai.followUps', []] } } } } }
+      ]).then(r => r[0] || { decisions: 0, topics: 0, followUps: 0 }).catch(() => ({ decisions: 0, topics: 0, followUps: 0 }))
+    ]);
+
+    const aiActionCount = await Meeting.aggregate([
+      { $match: { userId: req.user.id, isArchived: { $ne: true }, createdAt: { $gte: monthStart } } },
+      { $unwind: { path: '$ai.actionItems', preserveNullAndEmptyArrays: false } },
+      { $match: { 'ai.actionItems.task': { $nin: ['', null] } } },
+      { $count: 'count' }
+    ]).then(r => r[0]?.count || 0).catch(() => 0);
+
+    const actionItems = [];
+    for (const m of actionDocs) {
+      for (const item of (m.ai?.actionItems || [])) {
+        if (item.completed) continue;
+        actionItems.push({
+          meetingId: m.externalId,
+          meetingTitle: m.title || 'Untitled meeting',
+          task: item.task || 'Action item',
+          owner: item.owner || '',
+          deadline: item.deadline || ''
+        });
+      }
+    }
+    actionItems.splice(8);
+
+    const hour = now.getHours();
+    const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+    res.render('overview', {
+      user: req.user,
+      settings,
+      plan: ctx.plan,
+      usage: ctx.usage,
+      recent,
+      today: { meetings: todayMeetings, summaries: todayAi, actionItems: todayActionItems, minutes: todayMinutes },
+      actionItems,
+      insights: insightAgg,
+      aiActionCount,
+      greet,
+      error: null,
+      success: null
+    });
+  } catch (error) {
+    res.status(500).render('overview', {
+      user: req.user, settings: null, plan: null,
+      usage: { meetingsUsed: 0, meetingsMax: 5, aiNotes: 0, remainingPct: 100, isPaid: false, badge: 'FREE' },
+      recent: [], today: { meetings: 0, summaries: 0, actionItems: 0, minutes: 0 }, actionItems: [], insights: { decisions: 0, topics: 0, followUps: 0 }, aiActionCount: 0, greet: 'Hello', error: error.message, success: null
+    });
+  }
+});
+
+app.get('/app/meetings', requireAuth, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const view = String(req.query.view || 'all');
+    const content = String(req.query.content || 'all');
+    const filter = { userId: req.user.id };
+    if (view === 'favorites') filter.isFavorite = true;
+    else if (view === 'archived') filter.isArchived = true;
+    else filter.isArchived = { $ne: true };
+    if (content === 'summary') filter['ai.summary'] = { $exists: true, $ne: '' };
+    else if (content === 'actions') filter['ai.actionItems.0'] = { $exists: true };
+    else if (content === 'insights') filter['ai.decisions.0'] = { $exists: true };
+    if (q) {
+      filter.$or = [
+        { title: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { platform: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+      ];
+    }
+    const meetings = await Meeting.find(filter).sort({ startedAt: -1 }).limit(100).lean();
+    const success = req.query.success ? String(req.query.success) : null;
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    res.render('home', {
+      user: req.user, meetings, q, view, content, error: null, success, settings,
+      plan: ctx.plan, usage: ctx.usage
+    });
+  } catch (error) {
+    res.status(500).render('home', {
+      user: req.user, meetings: [], q: '', view: 'all', content: 'all', error: error.message, success: null,
+      settings: null, plan: null, usage: { meetingsUsed: 0, meetingsMax: 5, remainingPct: 100, isPaid: false, badge: 'FREE' }
+    });
+  }
+});
+
+app.get('/app/insights', requireAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(req.user);
+  const range = ['today', '7d', '30d', '90d'].includes(String(req.query.range || '7d')) ? String(req.query.range || '7d') : '7d';
+  const days = range === 'today' ? 1 : range === '30d' ? 30 : range === '90d' ? 90 : 7;
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - days + (range === 'today' ? 0 : 1));
+  start.setHours(0, 0, 0, 0);
+  const previousStart = new Date(start);
+  previousStart.setDate(previousStart.getDate() - days);
+  const previousEnd = new Date(start);
+
+  const [meetings, previousMeetings] = await Promise.all([
+    Meeting.find({ userId: req.user.id, startedAt: { $gte: start } }).sort({ startedAt: -1 }).lean().catch(() => []),
+    Meeting.find({ userId: req.user.id, startedAt: { $gte: previousStart, $lt: previousEnd } }).sort({ startedAt: -1 }).lean().catch(() => [])
+  ]);
+
+  const aggregate = (docs) => {
+    const topics = new Map();
+    const decisions = [];
+    const actions = [];
+    const unresolved = [];
+    let actionCount = 0;
+    let decisionCount = 0;
+    let totalMin = 0;
+    let summaries = 0;
+    for (const m of docs) {
+      totalMin += Math.round((Number(m.duration || 0) / 60) * 10) / 10;
+      if (m.ai?.summary) summaries++;
+      const seenTopics = new Set();
+      for (const raw of (m.ai?.topics || [])) {
+        const topic = String(raw || '').trim();
+        if (!topic) continue;
+        const key = topic.toLowerCase();
+        if (seenTopics.has(key)) continue;
+        seenTopics.add(key);
+        const entry = topics.get(key) || { name: topic, meetings: 0, meetingIds: [] };
+        entry.meetings += 1;
+        if (m.externalId) entry.meetingIds.push(m.externalId);
+        topics.set(key, entry);
+      }
+      for (const d of (m.ai?.decisionDetails || [])) {
+        const text = String(d?.decision || '').trim();
+        if (text) { decisionCount++; decisions.push({ text, rationale: String(d?.rationale || ''), meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt }); }
+      }
+      if (!(m.ai?.decisionDetails || []).length) {
+        for (const d of (m.ai?.decisions || [])) {
+          const text = typeof d === 'object' ? String(d?.decision || d?.text || '').trim() : String(d || '').trim();
+          if (text) { decisionCount++; decisions.push({ text, rationale: '', meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt }); }
+        }
+      }
+      for (const a of (m.ai?.actionItems || [])) {
+        actionCount++;
+        if (!a.completed && a.task) actions.push({ ...a, meetingId: m.externalId, meetingTitle: m.title });
+      }
+      for (const q of (m.ai?.openQuestions || [])) {
+        const text = String(q || '').trim();
+        if (text) unresolved.push({ type: 'question', text, meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt });
+      }
+      for (const c of (m.ai?.conflicts || [])) {
+        const topic = String(c?.topic || '').trim();
+        const status = String(c?.status || '').trim();
+        if (topic && (!status || /open|pending|unresolved/i.test(status))) unresolved.push({ type: 'issue', text: topic, detail: String(c?.impact || c?.perspectives || ''), meetingId: m.externalId, meetingTitle: m.title, date: m.startedAt });
+      }
+    }
+    return {
+      meetings: docs.length, totalMin, actionItems: actionCount, decisionCount: decisionCount, summaries,
+      topics: [...topics.values()].sort((a,b) => b.meetings - a.meetings || a.name.localeCompare(b.name)).slice(0, 12),
+      decisions: decisions.slice(0, 8), actions: actions.slice(0, 8), unresolved: unresolved.slice(0, 8)
+    };
+  };
+  const current = aggregate(meetings);
+  const previous = aggregate(previousMeetings);
+  const maxTopicMeetings = Math.max(1, ...current.topics.map(t => t.meetings));
+  const pct = (a, b) => b ? Math.round(((a - b) / b) * 100) : (a ? null : 0);
+
+  const fallbackOverview = current.meetings
+    ? `Your meetings in this period focused most on ${current.topics.slice(0, 2).map(t => t.name).join(' and ') || 'the topics captured in your notes'}. You have ${current.decisionCount} tracked decisions and ${current.actionItems} action items, with ${current.unresolved.length} unresolved items surfaced for follow-up.`
+    : 'Capture a few meetings to unlock cross-meeting patterns, decisions, action items, and unresolved topics.';
+
+  let aiOverview = fallbackOverview;
+  if (ctx.usage.isPaid && current.meetings >= 2 && req.query.ai === '1') {
+    try {
+      const source = meetings.slice(0, 20).map(m => ({
+        title: m.title, date: m.startedAt, summary: m.ai?.summary || '', topics: m.ai?.topics || [],
+        decisions: (m.ai?.decisionDetails || m.ai?.decisions || []).map(d => typeof d === 'object' ? (d.decision || d.text || '') : String(d || '')).filter(Boolean), actions: (m.ai?.actionItems || []).map(a => a.task), openQuestions: m.ai?.openQuestions || []
+      }));
+      const prompt = `You are an AI meeting intelligence analyst. Use ONLY the supplied meeting data. Do not invent facts. Write one concise executive overview of 2-3 paragraphs explaining the strongest cross-meeting themes, important decisions/actions, and unresolved issues. If evidence is weak, say so. Data:\n${JSON.stringify(source)}`;
+      aiOverview = String(await callGemini(prompt, { json: false, purpose: 'cross-meeting-insights' })).replace(/^```[a-z]*\s*/i,'').replace(/\s*```$/,'').trim();
+    } catch (e) {
+      console.warn('[gemini] cross-meeting insights failed:', e.message);
+    }
+  }
+
+  res.render('insights', {
+    user: req.user, settings, plan: ctx.plan, usage: ctx.usage, meetings,
+    insights: {
+      ...current,
+      previous,
+      range, days,
+      topicMax: maxTopicMeetings,
+      topicTrends: current.topics.slice(0, 6).map(t => ({ ...t, change: pct(t.meetings, (previous.topics.find(x => x.name.toLowerCase() === t.name.toLowerCase()) || {}).meetings || 0) })),
+      comparison: { meetings: pct(current.meetings, previous.meetings), actionItems: pct(current.actionItems, previous.actionItems), decisions: pct(current.decisionCount, previous.decisionCount) },
+      aiOverview,
+      isPaid: ctx.usage.isPaid
+    },
+    error: null, success: null
+  });
+});
+
+app.post('/api/insights/ask', requireAuth, async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) return res.status(401).json({ ok: false, error: 'Authentication required' });
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ ok: false, error: 'Question is required' });
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.aiInsights) return res.status(403).json({ ok: false, error: 'AI Insights is a Pro feature.' });
+    const meetings = await Meeting.find({ userId: req.user.id }).sort({ startedAt: -1 }).limit(50).lean();
+    if (!meetings.length) return res.json({ ok: true, answer: 'You do not have enough meeting data yet. Capture a few meetings and ask again.' });
+    const source = meetings.map(m => ({ id: m.externalId, title: m.title, date: m.startedAt, platform: m.platform, participants: (m.participants || []).map(p => p.name).filter(Boolean), summary: m.ai?.summary || '', detailedSummary: m.ai?.detailedSummary || '', topics: m.ai?.topics || [], decisions: (m.ai?.decisionDetails || m.ai?.decisions || []).map(d => typeof d === 'object' ? (d.decision || d.text || '') : String(d || '')).filter(Boolean), actions: (m.ai?.actionItems || []).map(a => ({ task: a.task, owner: a.owner, deadline: a.deadline, completed: a.completed })), openQuestions: m.ai?.openQuestions || [], followUps: m.ai?.followUps || [] }));
+    const prompt = `Answer the user's question using ONLY these meeting records. Do not invent facts or names. Mention supporting meeting titles/dates when useful. If the records do not contain the answer, say that clearly. User question: ${question}\n\nMEETING RECORDS:\n${JSON.stringify(source)}`;
+    const answer = String(await callGemini(prompt, { json: false, purpose: 'cross-meeting-ask-ai' })).replace(/^```[a-z]*\s*/i,'').replace(/\s*```$/,'').trim();
+    res.json({ ok: true, answer });
+  } catch (error) {
+    console.error('[api] insights ask failed:', error.message);
+    res.status(500).json({ ok: false, error: error.message || 'Unable to answer question' });
+  }
+});
+
+app.get('/app/subscription', requireAuth, async (req, res) => {
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const [plans, teamPlan, pendingRequest] = await Promise.all([
+      Plan.find({ isActive: true, slug: { $in: ['free', 'pro', 'team'] } }).sort({ sortOrder: 1 }).lean().catch(() => []),
+      Plan.findOne({ slug: 'team' }).lean().catch(() => null),
+      getPendingUpgradeRequest(req.user.id).catch(() => null)
+    ]);
+    const planSlug = String(ctx.plan?.slug || 'free').toLowerCase();
+    const isPro = planSlug === 'pro';
+    const isTeam = planSlug === 'team';
+    const teamWorkspace = isTeam ? await getWorkspaceForUser(req.user.id).catch(() => null) : null;
+    const isTeamOwner = !isTeam || teamWorkspace?.role === 'owner';
+    const currentPeriodEnd = ctx.subscription?.currentPeriodEnd ? new Date(ctx.subscription.currentPeriodEnd) : null;
+    const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    const currentPrice = (isPro || isTeam) ? Number(ctx.plan?.priceMonthly || 0) : 0;
+    res.render('subscription', { user: req.user, settings, plan: ctx.plan, subscription: ctx.subscription, plans, teamPlan, pendingRequest, isPro, isTeam, isTeamOwner, teamWorkspace, planSlug, currentPeriodEnd, currentPrice, usage: ctx.usage, formatDate, error: req.query.error || null, success: req.query.success || null });
+  } catch (error) {
+    console.error('[subscription] render failed:', error.message);
+    res.status(500).send('Unable to load subscription management.');
+  }
+});
+
+app.post('/billing/change-plan-request', requireAuth, async (req, res) => {
+  try {
+    const { planSlug, billingInterval, note, workspaceName, seats } = req.body || {};
+    const requestedSlug = String(planSlug || '').toLowerCase();
+    const requesterCtx = await loadUserPlanContext(req.user);
+    if (String(requesterCtx.plan?.slug || '').toLowerCase() === 'team' && requesterCtx.workspace?.role !== 'owner') return res.redirect('/app/subscription?error=' + encodeURIComponent('Only the Team workspace owner can request a plan change.'));
+    if (requestedSlug === 'free') return res.redirect('/app/subscription?error=' + encodeURIComponent('Switching to Free is handled through cancellation so you keep Pro until the end of your current period.'));
+    const created = await createUpgradeRequest({ userId: req.user.id, planSlug: requestedSlug, billingInterval, paymentMethod: 'manual', note, workspaceName, seats });
+    if (!created.duplicate) {
+      const r = created.request;
+      await sendTemplateToUser(req.user.id, 'upgrade-request-submitted', { planName: r.requestedPlanSlug === 'pro' ? 'Pro' : r.requestedPlanSlug, billingInterval: r.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount: Number(r.amount || 0).toFixed(2), currency: r.currency || 'USD', paymentMethod: 'Manual verification', requestId: String(r._id).slice(-8).toUpperCase(), appUrl: appBaseUrl() }, { transactional: true });
+    }
+    return res.redirect('/app/subscription?success=' + encodeURIComponent(created.duplicate ? 'You already have a pending plan-change request.' : `Your ${requestedSlug.toUpperCase()} plan-change request has been sent for review.`));
+  } catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/subscription/cancel', requireAuth, async (req, res) => {
+  try {
+    const sub = await scheduleSubscriptionCancellation(req.user.id, { reason: req.body?.reason, feedback: req.body?.feedback });
+    return res.redirect('/app/subscription?success=' + encodeURIComponent(`Cancellation scheduled. Your subscription remains active until ${new Date(sub.currentPeriodEnd).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}.`));
+  } catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/subscription/undo-cancellation', requireAuth, async (req, res) => {
+  try { await undoSubscriptionCancellation(req.user.id); return res.redirect('/app/subscription?success=' + encodeURIComponent('Cancellation removed. Your subscription will continue normally.')); }
+  catch (error) { return res.redirect('/app/subscription?error=' + encodeURIComponent(error.message)); }
+});
+
+app.get('/app/team', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (String(ctx.plan?.slug || '').toLowerCase() !== 'team') return res.redirect('/app/subscription?error=' + encodeURIComponent('Team workspace access requires an active Team subscription.'));
+    const workspace = await getWorkspaceForUser(req.user.id, req.query.workspaceId).catch(() => null);
+    if (!workspace) return res.redirect('/app/subscription?error=' + encodeURIComponent('Your Team workspace is not ready yet.'));
+    const members = await WorkspaceMember.find({ workspaceId: workspace._id, status: 'active' }).populate('userId', 'displayName username email').sort({ role: 1, createdAt: 1 }).lean();
+    const pendingInvites = await WorkspaceInvitation.find({ workspaceId: workspace._id, status: 'pending', expiresAt: { $gt: new Date() } }).sort({ createdAt: -1 }).lean();
+    const sharedMeetings = await Meeting.find({ workspaceId: String(workspace._id), visibility: 'shared' }).sort({ startedAt: -1 }).limit(50).lean();
+    const analytics = { meetings: sharedMeetings.length, minutes: Math.round(sharedMeetings.reduce((n,m)=>n + Number(m.duration||0),0)/60), summaries: sharedMeetings.filter(m=>m.ai?.summary).length, actions: sharedMeetings.reduce((n,m)=>n+(m.ai?.actionItems?.length||0),0), decisions: sharedMeetings.reduce((n,m)=>n+(m.ai?.decisions?.length||m.ai?.decisionDetails?.length||0),0) };
+    res.render('team', { user:req.user, settings:await getSiteSettings().catch(()=>null), usage:ctx.usage, plan:ctx.plan, workspace, members, pendingInvites, sharedMeetings, analytics, activeNav:'team', error:req.query.error||null, success:req.query.success||null });
+  } catch (error) { console.error('[team] render failed:', error.message); res.status(500).send('Unable to load Team workspace.'); }
+});
+
+app.post('/billing/team/invite', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (String(ctx.plan?.slug||'') !== 'team') throw new Error('An active Team subscription is required.');
+    const workspace = await getWorkspaceForUser(req.user.id, req.body?.workspaceId);
+    if (!workspace || !['owner','admin'].includes(workspace.role)) throw new Error('You do not have permission to invite members.');
+    const email = String(req.body?.email||'').trim().toLowerCase();
+    const role = req.body?.role === 'admin' ? 'admin' : 'member';
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) throw new Error('Enter a valid email address.');
+    const activeCount = await WorkspaceMember.countDocuments({ workspaceId: workspace._id, status:'active' });
+    if (activeCount >= workspace.seatLimit) throw new Error(`All ${workspace.seatLimit} Team seats are currently in use.`);
+    const existingUser = await User.findOne({ email }).lean();
+    if (existingUser && await WorkspaceMember.exists({ workspaceId:workspace._id, userId:existingUser._id, status:'active' })) throw new Error('That user is already a workspace member.');
+    await WorkspaceInvitation.updateMany({ workspaceId:workspace._id, email, status:'pending' }, { $set:{ status:'revoked' } });
+    const token = generateWorkspaceInviteToken();
+    await WorkspaceInvitation.create({ workspaceId:workspace._id, email, role, invitedBy:req.user.id, tokenHash:hashWorkspaceInviteToken(token), expiresAt:new Date(Date.now()+7*86400000) });
+    const link = `${appBaseUrl()}/team/invite/${encodeURIComponent(token)}`;
+    const esc = (v) => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');
+    const safeWorkspaceName = esc(workspace.name);
+    const safeInviter = esc(req.user.displayName || req.user.username);
+    await sendEmail({ to:email, subject:`You're invited to ${workspace.name} · AI Note Taker`, html:`<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:32px"><h1>You're invited to join ${safeWorkspaceName}</h1><p>${safeInviter} invited you to join the Team workspace on AI Note Taker.</p><p><strong>Role:</strong> ${esc(role)}</p><p><a href="${link}" style="display:inline-block;padding:12px 18px;background:#6657ee;color:#fff;text-decoration:none;border-radius:8px">Accept invitation</a></p><p>This invitation expires in 7 days.</p></div>`, text:`You're invited to join ${workspace.name}. Accept: ${link}`, allowUnconfigured:true });
+    res.redirect('/app/team?success=' + encodeURIComponent(`Invitation sent to ${email}.`));
+  } catch (error) { res.redirect('/app/team?error=' + encodeURIComponent(error.message)); }
+});
+
+app.post('/billing/team/members/:id/remove', requireAuth, async (req,res)=>{
+  try { const ctx=await loadUserPlanContext(req.user); if(String(ctx.plan?.slug||'')!=='team') throw new Error('An active Team subscription is required.'); const workspace=await getWorkspaceForUser(req.user.id, req.body?.workspaceId); if(!workspace||!['owner','admin'].includes(workspace.role)) throw new Error('You do not have permission to manage members.'); const member=await WorkspaceMember.findOne({_id:req.params.id,workspaceId:workspace._id,status:'active'}); if(!member||String(member.userId)===String(workspace.ownerId)) throw new Error('The workspace owner cannot be removed.'); member.status='removed'; await member.save(); res.redirect('/app/team?success='+encodeURIComponent('Member removed from the workspace.')); } catch(e){res.redirect('/app/team?error='+encodeURIComponent(e.message));}
+});
+
+app.get('/team/invite/:token', optionalAuth, async (req,res)=>{
+  try { const inv=await WorkspaceInvitation.findOne({tokenHash:hashWorkspaceInviteToken(req.params.token),status:'pending'}).populate('workspaceId','name').lean(); if(!inv||new Date(inv.expiresAt)<=new Date()) return res.status(410).send('This invitation has expired or is no longer available.'); if(!req.user) return res.redirect('/login?next='+encodeURIComponent('/team/invite/'+req.params.token)); const existing=await User.findById(req.user.id).lean(); if(existing?.email && existing.email.toLowerCase()!==inv.email.toLowerCase()) return res.status(403).send('Please sign in with the invited email address.'); await WorkspaceMember.updateOne({workspaceId:inv.workspaceId._id,userId:req.user.id},{ $set:{role:inv.role,status:'active',joinedAt:new Date()}},{upsert:true}); await WorkspaceInvitation.updateOne({_id:inv._id},{ $set:{status:'accepted'} }); res.redirect('/app/team?success='+encodeURIComponent(`Welcome to ${inv.workspaceId.name}.`)); } catch(e){res.status(500).send('Unable to accept this invitation.');}
+});
+
+app.get('/app/usage', requireAuth, async (req, res) => {
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const range = ['today', '7d', 'month', 'last-month'].includes(String(req.query.range || 'month')) ? String(req.query.range || 'month') : 'month';
+    let historyStart = monthStart;
+    let historyEnd = monthEnd;
+    if (range === 'today') {
+      historyStart = new Date(now); historyStart.setHours(0, 0, 0, 0);
+      historyEnd = new Date(historyStart); historyEnd.setDate(historyEnd.getDate() + 1);
+    } else if (range === '7d') {
+      historyStart = new Date(now); historyStart.setDate(historyStart.getDate() - 6); historyStart.setHours(0, 0, 0, 0);
+      historyEnd = new Date(now); historyEnd.setDate(historyEnd.getDate() + 1); historyEnd.setHours(0, 0, 0, 0);
+    } else if (range === 'last-month') {
+      historyStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      historyEnd = monthStart;
+    }
+    const [historyMeetings, plans, aiActivityMeetings, billingHistory] = await Promise.all([
+      Meeting.find({ userId: req.user.id, createdAt: { $gte: historyStart, $lt: historyEnd } })
+        .sort({ createdAt: -1 }).limit(50)
+        .select('externalId title platform startedAt createdAt duration ai.summary ai.actionItems ai.decisions')
+        .lean().catch(() => []),
+      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).lean().catch(() => []),
+      Meeting.find({ userId: req.user.id, createdAt: { $gte: monthStart, $lt: monthEnd } })
+        .select('ai.summary ai.actionItems ai.decisions')
+        .lean().catch(() => []),
+      Payment.find({ userId: req.user.id, status: { $in: ['paid', 'refunded', 'failed'] } })
+        .sort({ paidAt: -1, createdAt: -1 }).limit(12).lean().catch(() => [])
+    ]);
+    const usageHistory = historyMeetings.map((m) => ({
+      id: m.externalId, title: m.title || 'Untitled meeting', platform: m.platform || 'Manual',
+      date: m.startedAt || m.createdAt, minutes: Math.max(0, Math.round((m.duration || 0) / 60)),
+      summary: Boolean(m.ai?.summary), actionItems: Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0
+    }));
+    const aiSummaryCount = aiActivityMeetings.filter((m) => Boolean(m.ai?.summary)).length;
+    const actionItemsTotal = aiActivityMeetings.reduce((sum, m) => sum + (Array.isArray(m.ai?.actionItems) ? m.ai.actionItems.length : 0), 0);
+    const decisionsTotal = aiActivityMeetings.reduce((sum, m) => sum + (Array.isArray(m.ai?.decisions) ? m.ai.decisions.length : 0), 0);
+    const aiActivity = { meetingsAnalyzed: aiSummaryCount, summaries: aiSummaryCount, actionItems: actionItemsTotal, decisions: decisionsTotal };
+    const periodEnd = monthEnd;
+    const daysLeft = Math.max(1, Math.ceil((periodEnd - now) / 86400000));
+    const periodLabel = range === 'today' ? 'Today' : range === '7d' ? 'Last 7 days' : range === 'last-month' ? 'Last month' : 'This month';
+    const comparisonPlans = plans.filter((pl) => ['free', 'pro'].includes(pl.slug)).map((pl) => ({ ...pl, ...getPlanDefinition(pl.slug), _id: pl._id, slug: pl.slug }));
+    const upgradeRequest = await getPendingUpgradeRequest(req.user.id).catch(() => null);
+    res.render('usage', {
+      user: req.user, settings, plan: ctx.plan, subscription: ctx.subscription, usage: ctx.usage, daysLeft, monthStart, monthEnd,
+      usageHistory, plans: comparisonPlans, aiActivity, upgradeRequest, billingHistory, range, periodLabel, error: null, success: req.query.success || null
+    });
+  } catch (error) {
+    console.error('[usage] render failed:', error.message);
+    res.status(500).render('usage', { user: req.user, settings: null, plan: null, usage: {}, daysLeft: 1, monthStart: new Date(), monthEnd: new Date(), usageHistory: [], plans: [], aiActivity: {}, range: 'month', periodLabel: 'This month', error: error.message, success: null });
+  }
+});
+
+
+app.get('/login', optionalAuth, async (req, res) => {
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('login', {
+    user: null,
+    error: req.query.error || null,
+    success: null,
+    formUsername: '',
+    settings,
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET)
+  });
+});
+
+app.post('/login', async (req, res) => {
+  try {
+    const result = await loginUser({
+      identifier: req.body.username || req.body.email || req.body.identifier,
+      passkey: req.body.passkey || req.body.password,
+      label: 'web'
+    });
+    setSessionCookie(res, result.token);
+    sendTemplateToUser(result.user.id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Web sign-in' }).catch(() => {});
+    res.redirect(postLoginRedirect(result.user));
+  } catch (error) {
+    if (error.code === 'EMAIL_NOT_VERIFIED') return res.redirect('/verify-email?username=' + encodeURIComponent(error.username || req.body.username || '') + '&error=' + encodeURIComponent(error.message));
+    const settings = await getSiteSettings().catch(() => null);
+    res.status(error.status || 400).render('login', {
+      user: null,
+      error: error.message,
+      success: null,
+      formUsername: req.body.username || '',
+      settings,
+      googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET)
+    });
+  }
+});
+
+// ─── Google OAuth ────────────────────────────────────────────────────────────
+app.get('/api/google/start', (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.redirect('/login?error=' + encodeURIComponent('Google sign-in is not configured.'));
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  res.setHeader(
+    'Set-Cookie',
+    `google_oauth_state=${encodeURIComponent(state)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`
+  );
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope: GOOGLE_SCOPES,
+    access_type: 'offline',
+    prompt: 'consent',
+    state
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+function parseCookieHeader(header = '') {
+  const out = {};
+  String(header || '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const i = part.indexOf('=');
+      if (i === -1) return;
+      out[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1));
+    });
+  return out;
+}
+
+app.get('/api/google/callback', async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return res.redirect('/login?error=' + encodeURIComponent('Google sign-in is not configured.'));
+    }
+    const { code, state, error } = req.query;
+    if (error) {
+      return res.redirect('/login?error=' + encodeURIComponent(String(error)));
+    }
+    const cookies = parseCookieHeader(req.headers.cookie);
+    const expected = cookies.google_oauth_state;
+    if (!code || !state || !expected || state !== expected) {
+      return res.redirect('/login?error=' + encodeURIComponent('Invalid OAuth state. Try again.'));
+    }
+    res.setHeader('Set-Cookie', 'google_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_REDIRECT_URI,
+        grant_type: 'authorization_code'
+      })
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.access_token) {
+      console.error('[google] token exchange failed', tokenData);
+      return res.redirect('/login?error=' + encodeURIComponent(tokenData.error_description || 'Google token exchange failed.'));
+    }
+
+    const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const profile = await profileRes.json().catch(() => ({}));
+    if (!profileRes.ok || !profile.sub) {
+      return res.redirect('/login?error=' + encodeURIComponent('Could not load Google profile.'));
+    }
+
+    const result = await findOrCreateGoogleUser({
+      googleId: profile.sub,
+      email: profile.email,
+      displayName: profile.name || profile.email,
+      avatarUrl: profile.picture,
+      tokens: {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token || '',
+        expiryDate: Date.now() + (Number(tokenData.expires_in) || 3600) * 1000,
+        scope: tokenData.scope || GOOGLE_SCOPES
+      }
+    });
+    setSessionCookie(res, result.token);
+    sendTemplateToUser(result.user.id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Google sign-in' }).catch(() => {});
+    console.log(`[auth] google login @${result.user.username}`);
+    res.redirect(postLoginRedirect(result.user));
+  } catch (err) {
+    console.error('[google] callback error', err.message);
+    res.redirect('/login?error=' + encodeURIComponent(err.message || 'Google sign-in failed.'));
+  }
+});
+
+app.get('/register', optionalAuth, async (req, res) => {
+  if (req.user) return res.redirect(postLoginRedirect(req.user));
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('register', { user: null, error: null, success: null, settings });
+});
+
+app.post('/register', async (req, res) => {
+  try {
+    if (String(req.body.passkey || '') !== String(req.body.passkey2 || '')) {
+      const settings = await getSiteSettings().catch(() => null);
+      return res.status(400).render('register', { user: null, error: 'Passkeys do not match.', success: null, settings });
+    }
+    const result = await registerUser({
+      username: req.body.username,
+      passkey: req.body.passkey,
+      displayName: req.body.displayName,
+      email: req.body.email
+    });
+    const user = await User.findById(result.user.id);
+    const mail = await issueVerificationOtp(user);
+    if (!mail.ok) {
+      await User.deleteOne({ _id: user._id }).catch(() => {});
+      throw new Error(mail.error || 'We could not send the verification email. Please check the Gmail configuration.');
+    }
+    res.redirect('/verify-email?username=' + encodeURIComponent(user.username));
+  } catch (error) {
+    const settings = await getSiteSettings().catch(() => null);
+    res.status(error.status || 400).render('register', { user: null, error: error.message, success: null, settings });
+  }
+});
+
+
+
+// ─── Email verification & password recovery ────────────────────────────────
+function safeEmail(raw) { return String(raw || '').trim().toLowerCase(); }
+function formatUserDate(d) { return d ? new Date(d).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '—'; }
+
+async function issueVerificationOtp(user) {
+  const otp = createOtp();
+  user.emailOtpHash = hashSecret(otp);
+  user.emailOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  user.emailOtpAttempts = 0;
+  await user.save();
+  return sendEmail({
+    to: user.email, templateKey: 'signup-otp', transactional: true,
+    vars: { siteName: (await getSiteSettings().catch(() => null))?.siteName || 'AI Note Taker', username: user.username, displayName: user.displayName || user.username, otp, expiresMinutes: 10 }
+  });
+}
+
+app.get('/verify-email', async (req, res) => {
+  const username = String(req.query.username || '').trim().toLowerCase();
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('verify-email', { user: null, username, error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/verify-email', async (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase();
+  const otp = String(req.body.otp || '').trim();
+  const settings = await getSiteSettings().catch(() => null);
+  try {
+    const user = await User.findOne({ username });
+    if (!user) throw Object.assign(new Error('We could not find that account.'), { status: 404 });
+    if (user.emailVerified) return res.redirect('/login?success=' + encodeURIComponent('Your email is already verified. You can log in now.'));
+    if (!user.emailOtpHash || !user.emailOtpExpiresAt || new Date(user.emailOtpExpiresAt) < new Date()) throw Object.assign(new Error('That verification code has expired. Request a new one.'), { status: 400 });
+    if (Number(user.emailOtpAttempts || 0) >= 5) throw Object.assign(new Error('Too many incorrect attempts. Request a new verification code.'), { status: 429 });
+    user.emailOtpAttempts = Number(user.emailOtpAttempts || 0) + 1;
+    if (hashSecret(otp) !== user.emailOtpHash) { await user.save(); throw Object.assign(new Error('That verification code is incorrect.'), { status: 400 }); }
+    user.emailVerified = true; user.emailOtpHash = ''; user.emailOtpExpiresAt = null; user.emailOtpAttempts = 0;
+    await user.save();
+    const session = await createSession(user, 'web');
+    await sendTemplateToUser(user._id, 'welcome', { appUrl: appBaseUrl() }, { transactional: true }).catch(() => {});
+    setSessionCookie(res, session.token);
+    res.redirect(postLoginRedirect(publicUser(user)));
+  } catch (error) {
+    res.status(error.status || 400).render('verify-email', { user: null, username, error: error.message, success: null, settings });
+  }
+});
+
+app.post('/verify-email/resend', async (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase();
+  try {
+    const user = await User.findOne({ username });
+    if (!user || !user.email) throw new Error('We could not find a verifiable account for that username.');
+    if (user.emailVerified) return res.redirect('/login?success=' + encodeURIComponent('Your email is already verified.'));
+    const result = await issueVerificationOtp(user);
+    if (!result.ok) throw new Error(result.error || 'Unable to send the verification email.');
+    res.redirect('/verify-email?username=' + encodeURIComponent(username) + '&success=' + encodeURIComponent('A fresh verification code has been sent to your email.'));
+  } catch (error) {
+    res.redirect('/verify-email?username=' + encodeURIComponent(username) + '&error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/forgot-password', optionalAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('forgot-password', { user: null, error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/forgot-password', async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  const identifier = safeEmail(req.body.identifier);
+  try {
+    const user = await User.findOne({ $or: [{ email: identifier }, { username: identifier }] });
+    // Always return the same user-facing result to avoid account enumeration.
+    if (user?.email) {
+      const rawToken = crypto.randomBytes(32).toString('base64url');
+      user.passwordResetTokenHash = hashSecret(rawToken);
+      user.passwordResetExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      await user.save();
+      const resetUrl = `${appBaseUrl()}/reset-password?token=${encodeURIComponent(rawToken)}`;
+      await sendTemplateToUser(user._id, 'password-reset', { resetUrl, expiresMinutes: 30 }, { transactional: true });
+    }
+    res.render('forgot-password', { user: null, error: null, success: 'If an account matches that information, a password reset email has been sent.' , settings });
+  } catch (error) {
+    res.status(200).render('forgot-password', { user: null, error: 'We could not start the reset process right now. Please try again.', success: null, settings });
+  }
+});
+
+app.get('/reset-password', async (req, res) => {
+  const token = String(req.query.token || '');
+  const settings = await getSiteSettings().catch(() => null);
+  const valid = token && await User.findOne({ passwordResetTokenHash: hashSecret(token), passwordResetExpiresAt: { $gt: new Date() } }).select('_id').lean().catch(() => null);
+  res.render('reset-password', { user: null, token, valid: Boolean(valid), error: req.query.error || null, success: req.query.success || null, settings });
+});
+
+app.post('/reset-password', async (req, res) => {
+  const token = String(req.body.token || '');
+  const settings = await getSiteSettings().catch(() => null);
+  try {
+    const user = await User.findOne({ passwordResetTokenHash: hashSecret(token), passwordResetExpiresAt: { $gt: new Date() } });
+    if (!user) throw Object.assign(new Error('This reset link is invalid or has expired.'), { status: 400 });
+    if (String(req.body.passkey || '') !== String(req.body.passkey2 || '')) throw Object.assign(new Error('Passkeys do not match.'), { status: 400 });
+    await resetPasskey(user._id, req.body.passkey);
+    await sendTemplateToUser(user._id, 'login-success', { loginTime: formatUserDate(new Date()), loginLabel: 'Passkey reset' }, { transactional: true }).catch(() => {});
+    res.redirect('/login?success=' + encodeURIComponent('Your passkey has been reset. You can now log in securely.'));
+  } catch (error) {
+    res.status(error.status || 400).render('reset-password', { user: null, token, valid: false, error: error.message, success: null, settings });
+  }
+});
+
+app.get('/logout', async (req, res) => {
+  const cookie = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('note_session='));
+  const token = cookie ? decodeURIComponent(cookie.split('=')[1]) : '';
+  await logoutUser(token);
+  clearSessionCookie(res);
+  res.redirect('/');
+});
+
+app.get('/onboarding', requireAuth, async (req, res) => {
+  if (req.user.role === 'admin') return res.redirect('/admin');
+  if (req.user.onboardingCompleted) return res.redirect('/app');
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('onboarding', {
+    user: req.user,
+    settings,
+    step: Number(req.query.step || 1),
+    error: null
+  });
+});
+
+app.post('/onboarding', requireAuth, async (req, res) => {
+  try {
+    if (req.user.role === 'admin') return res.redirect('/admin');
+    const step = Number(req.body.step || 1);
+    const settings = await getSiteSettings().catch(() => null);
+
+    if (step === 1) {
+      const useCase = String(req.body.useCase || '').trim();
+      if (!useCase) {
+        return res.status(400).render('onboarding', {
+          user: req.user, settings, step: 1, error: 'Please choose an option.'
+        });
+      }
+      // stash in session via query for step 2 — persist partial on user
+      await User.findByIdAndUpdate(req.user.id, {
+        $set: { 'onboarding.useCase': useCase.slice(0, 80) }
+      });
+      return res.redirect('/onboarding?step=2');
+    }
+
+    if (step === 2) {
+      const heardFrom = String(req.body.heardFrom || '').trim();
+      if (!heardFrom) {
+        return res.status(400).render('onboarding', {
+          user: req.user, settings, step: 2, error: 'Please choose an option.'
+        });
+      }
+      const existing = await User.findById(req.user.id).lean();
+      const useCase = existing?.onboarding?.useCase || '';
+      await completeOnboarding(req.user.id, { useCase, heardFrom });
+      return res.redirect('/onboarding?step=3');
+    }
+
+    // step 3 continue
+    return res.redirect('/app/overview');
+  } catch (error) {
+    const settings = await getSiteSettings().catch(() => null);
+    res.status(500).render('onboarding', {
+      user: req.user, settings, step: 1, error: error.message
+    });
+  }
+});
+
+app.get('/install', optionalAuth, async (req, res) => {
+  const settings = await getSiteSettings().catch(() => null);
+  res.render('install', { user: req.user || null, settings });
+});
+
+app.post('/onboarding/skip', requireAuth, async (req, res) => {
+  try {
+    await completeOnboarding(req.user.id, {
+      useCase: 'skipped',
+      heardFrom: 'skipped'
+    });
+  } catch (_) {}
+  res.redirect('/app/overview');
+});
+
+
+
+// ─── Admin Email Template Center ──────────────────────────────────────────
+const emailPreviewSamples = { siteName:'AI Note Taker', username:'alex', displayName:'Alex', otp:'482193', expiresMinutes:'10', resetUrl:'#reset', appUrl:'#app', planName:'Pro', billingInterval:'Monthly', amount:'19', currency:'USD', paymentMethod:'Manual verification', requestId:'A-1042', reason:'Payment reference could not be verified.', meetingTitle:'Product planning session', platform:'Google Meet', meetingDate:'Sep 9, 2026, 2:00 PM', duration:'48 minutes', meetingId:'MTG-8291', meetingUrlInApp:'#meeting', summary:'The team aligned on the next release scope and assigned owners for the remaining work.', actionCount:'3', actionItems:'• Finalize release notes\\n• Confirm QA window\\n• Share customer update', error:'AI analysis timed out. Please retry analysis.' };
+
+app.get('/admin/email-templates', requireAdmin, async (req, res) => {
+  try {
+    const templates = await EmailTemplate.find().sort({ sortOrder: 1, category: 1, name: 1 }).lean();
+    const gmailConfigured = Boolean(process.env.GMAIL_SMTP_USER && process.env.GMAIL_SMTP_APP_PASSWORD);
+    res.render('admin/email-templates', { user: req.user, templates, gmailConfigured, error: req.query.error || null, success: req.query.success || null });
+  } catch (error) { res.status(500).render('admin/email-templates', { user: req.user, templates: [], gmailConfigured: false, error: error.message, success: null }); }
+});
+app.get('/admin/email-templates/new', requireAdmin, (req, res) => res.render('admin/email-template-edit', { user: req.user, template: { key:'',name:'',category:'General',description:'',subject:'',preheader:'',bodyHtml:'<div class="email-card"><div class="email-kicker">UPDATE</div><h1>Hello {{displayName}}</h1><p>Write your professional message here.</p></div>',bodyText:'',variables:[],isActive:true }, isNew:true, error:null, samples: emailPreviewSamples }));
+app.get('/admin/email-templates/:id/edit', requireAdmin, async (req, res) => {
+  const template = await EmailTemplate.findById(req.params.id).lean().catch(() => null);
+  if (!template) return res.redirect('/admin/email-templates?error=' + encodeURIComponent('Template not found.'));
+  res.render('admin/email-template-edit', { user: req.user, template, isNew:false, error:req.query.error || null, success:req.query.success || null, samples: emailPreviewSamples });
+});
+function parseTemplateBody(body = {}, isNew = false) {
+  const key = String(body.key || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 80);
+  const variables = String(body.variables || '').split(',').map(v => v.trim().replace(/^{{|}}$/g,'')).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(0,40);
+  return { key, name:String(body.name||'').trim().slice(0,120), category:String(body.category||'General').trim().slice(0,60), description:String(body.description||'').slice(0,500), subject:String(body.subject||'').slice(0,250), preheader:String(body.preheader||'').slice(0,250), bodyHtml:String(body.bodyHtml||'').slice(0,30000), bodyText:String(body.bodyText||'').slice(0,10000), variables, isActive:body.isActive === '1' || body.isActive === 'on' || body.isActive === true, ...(isNew ? { isSystem:false } : {}) };
+}
+app.post('/admin/email-templates', requireAdmin, async (req, res) => {
+  try { const data=parseTemplateBody(req.body,true); if(!data.key||!data.name||!data.subject||!data.bodyHtml) throw new Error('Key, name, subject, and HTML body are required.'); await EmailTemplate.create(data); res.redirect('/admin/email-templates?success='+encodeURIComponent('Email template created.')); }
+  catch(error){ res.status(400).render('admin/email-template-edit',{user:req.user,template:{...req.body,key:String(req.body.key||''),variables:String(req.body.variables||'').split(',').map(x=>x.trim()),isActive:req.body.isActive==='1'},isNew:true,error:error.message,samples:emailPreviewSamples}); }
+});
+app.post('/admin/email-templates/:id', requireAdmin, async (req, res) => {
+  try { const data=parseTemplateBody(req.body,false); delete data.key; if(!data.name||!data.subject||!data.bodyHtml) throw new Error('Name, subject, and HTML body are required.'); await EmailTemplate.updateOne({_id:req.params.id},{$set:data}); res.redirect('/admin/email-templates?success='+encodeURIComponent('Email template updated. Changes are live immediately.')); }
+  catch(error){ const template=await EmailTemplate.findById(req.params.id).lean().catch(()=>null); res.status(400).render('admin/email-template-edit',{user:req.user,template:{...(template||{}),...req.body,variables:String(req.body.variables||'').split(',').map(x=>x.trim())},isNew:false,error:error.message,samples:emailPreviewSamples}); }
+});
+app.post('/admin/email-templates/:id/toggle', requireAdmin, async (req,res)=>{ const t=await EmailTemplate.findById(req.params.id); if(t){t.isActive=!t.isActive;await t.save();} res.redirect('/admin/email-templates?success='+encodeURIComponent('Template status updated.')); });
+app.post('/admin/email-templates/:id/test', requireAdmin, async (req,res)=>{ try { const t=await EmailTemplate.findById(req.params.id).lean(); if(!t) throw new Error('Template not found.'); const to=String(req.body.to||req.user.email||'').trim(); if(!to) throw new Error('Enter a test recipient email.'); const result=await sendEmail({to,templateKey:t.key,vars:emailPreviewSamples}); if(!result.ok) throw new Error(result.error||'Email could not be sent.'); res.redirect('/admin/email-templates/'+t._id+'/edit?success='+encodeURIComponent('Test email sent.')); } catch(error){ res.redirect('/admin/email-templates/'+req.params.id+'/edit?error='+encodeURIComponent(error.message)); } });
+
+// ─── Admin ──────────────────────────────────────────────────────────
+app.get('/admin', requireAdmin, async (req, res) => {
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const prevMonthStart = new Date(monthStart);
+  prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+  const [
+    userCount,
+    usersThisMonth,
+    usersPrevMonth,
+    meetingCount,
+    meetingsThisMonth,
+    meetingsPrevMonth,
+    planCount,
+    recentUsers,
+    plans,
+    activeUsers,
+    meetingsWithAi,
+    totalDurationSec
+  ] = await Promise.all([
+    User.countDocuments(),
+    User.countDocuments({ createdAt: { $gte: monthStart } }),
+    User.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+    Meeting.countDocuments(),
+    Meeting.countDocuments({ createdAt: { $gte: monthStart } }),
+    Meeting.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+    Plan.countDocuments({ isActive: true }),
+    User.find().sort({ createdAt: -1 }).limit(8).lean(),
+    Plan.find().sort({ sortOrder: 1 }).lean(),
+    User.countDocuments({ isActive: { $ne: false } }),
+    Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+    Meeting.aggregate([{ $group: { _id: null, total: { $sum: '$duration' } } }]).then((r) => r[0]?.total || 0).catch(() => 0)
+  ]);
+
+  const planDist = {};
+  for (const pl of plans) planDist[pl.slug] = 0;
+  const byPlan = await User.aggregate([
+    { $group: { _id: '$planSlug', count: { $sum: 1 } } }
+  ]).catch(() => []);
+  for (const row of byPlan) {
+    const key = row._id || 'free';
+    planDist[key] = row.count;
+  }
+
+  const paidSubs = await User.countDocuments({
+    planSlug: { $nin: ['free', null, ''] },
+    isActive: { $ne: false }
+  }).catch(() => 0);
+
+  // per-user meeting counts for recent table
+  const recentIds = recentUsers.map((u) => u._id);
+  const meetingCounts = await Meeting.aggregate([
+    { $match: { userId: { $in: recentIds.map(String) } } },
+    { $group: { _id: '$userId', total: { $sum: 1 }, withAi: { $sum: { $cond: [{ $and: [{ $ifNull: ['$ai.summary', false] }, { $ne: ['$ai.summary', ''] }] }, 1, 0] } } } }
+  ]).catch(() => []);
+  const countMap = Object.fromEntries(meetingCounts.map((m) => [String(m._id), m]));
+
+  const pct = (cur, prev) => {
+    if (!prev) return cur ? 100 : 0;
+    return Math.round(((cur - prev) / prev) * 1000) / 10;
+  };
+
+  const transcriptionMinutes = Math.round(Number(totalDurationSec || 0) / 60);
+  // rough token estimate for display
+  const aiTokensEstimate = Math.round((meetingsWithAi || 0) * 2400);
+
+  const recentActivity = [];
+  for (const u of recentUsers.slice(0, 5)) {
+    recentActivity.push({
+      text: `@${u.username} joined the platform`,
+      time: u.createdAt,
+      type: 'user'
+    });
+  }
+  const recentMeetings = await Meeting.find().sort({ createdAt: -1 }).limit(5).lean().catch(() => []);
+  for (const m of recentMeetings) {
+    recentActivity.push({
+      text: m.ai?.summary
+        ? `AI summary generated · ${m.title || 'Meeting'}`
+        : `Meeting processed · ${m.title || 'Untitled'}`,
+      time: m.createdAt || m.startedAt,
+      type: m.ai?.summary ? 'ai' : 'meeting'
+    });
+  }
+  recentActivity.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+
+  // simple sparkline series from last 7 days of meetings
+  const series = [];
+  for (let i = 6; i >= 0; i--) {
+    const d0 = new Date();
+    d0.setHours(0, 0, 0, 0);
+    d0.setDate(d0.getDate() - i);
+    const d1 = new Date(d0);
+    d1.setDate(d1.getDate() + 1);
+    const c = await Meeting.countDocuments({ createdAt: { $gte: d0, $lt: d1 } }).catch(() => 0);
+    series.push({ label: d0.toLocaleDateString([], { weekday: 'short' }), value: c });
+  }
+
+  const mongoOk = mongoose.connection.readyState === 1;
+  const geminiOk = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+
+  res.render('admin/dashboard', {
+    user: req.user,
+    stats: {
+      userCount,
+      usersThisMonth,
+      usersGrowth: pct(usersThisMonth, usersPrevMonth),
+      activeSubscriptions: paidSubs,
+      meetingCount,
+      meetingsThisMonth,
+      meetingsGrowth: pct(meetingsThisMonth, meetingsPrevMonth),
+      aiNotesCount: meetingsWithAi,
+      transcriptionMinutes,
+      aiTokensEstimate,
+      extensionActiveUsers: activeUsers,
+      planCount,
+      monthlyRevenueEstimate: paidSubs * 12 // illustrative
+    },
+    planDist,
+    plans,
+    series,
+    recentActivity: recentActivity.slice(0, 8),
+    recentUsers: recentUsers.map((u) => {
+      const c = countMap[String(u._id)] || { total: 0, withAi: 0 };
+      return {
+        ...publicUser(u),
+        meetingsCount: c.total || 0,
+        aiNotesCount: c.withAi || 0
+      };
+    }),
+    health: {
+      api: true,
+      ai: geminiOk,
+      transcription: true,
+      database: mongoOk,
+      extension: true
+    },
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+async function buildUserStatsMap(userIds) {
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const ids = userIds.map(String);
+  const [meetingCounts, aiCounts] = await Promise.all([
+    Meeting.aggregate([
+      { $match: { userId: { $in: ids }, createdAt: { $gte: monthStart } } },
+      { $group: { _id: '$userId', count: { $sum: 1 } } }
+    ]),
+    Meeting.aggregate([
+      {
+        $match: {
+          userId: { $in: ids },
+          createdAt: { $gte: monthStart },
+          'ai.summary': { $exists: true, $ne: '' }
+        }
+      },
+      { $group: { _id: '$userId', count: { $sum: 1 } } }
+    ])
+  ]);
+  const meetingsMap = Object.fromEntries(meetingCounts.map((r) => [r._id, r.count]));
+  const aiMap = Object.fromEntries(aiCounts.map((r) => [r._id, r.count]));
+  return { meetingsMap, aiMap, monthStart };
+}
+
+app.get('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const planFilter = String(req.query.plan || 'all');
+    const roleFilter = String(req.query.role || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 20;
+
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ username: rx }, { displayName: rx }];
+    }
+    if (planFilter !== 'all') filter.planSlug = planFilter;
+    if (roleFilter !== 'all') filter.role = roleFilter;
+    if (statusFilter === 'active') filter.isActive = { $ne: false };
+    if (statusFilter === 'disabled') filter.isActive = false;
+
+    const [total, usersRaw, plans, totalAll, activeAll, proAll, freeAll] = await Promise.all([
+      User.countDocuments(filter),
+      User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Plan.find().sort({ sortOrder: 1 }).lean(),
+      User.countDocuments(),
+      User.countDocuments({ isActive: { $ne: false } }),
+      User.countDocuments({ planSlug: { $nin: ['free', null, ''] }, isActive: { $ne: false } }),
+      User.countDocuments({ $or: [{ planSlug: 'free' }, { planSlug: null }, { planSlug: '' }] })
+    ]);
+
+    const planBySlug = Object.fromEntries(plans.map((p) => [p.slug, p]));
+    const { meetingsMap, aiMap } = await buildUserStatsMap(usersRaw.map((u) => u._id));
+
+    const users = usersRaw.map((u) => {
+      const pub = publicUser(u);
+      const meetings = meetingsMap[pub.id] || 0;
+      const aiNotes = aiMap[pub.id] || 0;
+      const maxM = planBySlug[pub.planSlug]?.maxMeetingsPerMonth;
+      const usagePct = isUnlimited(maxM) ? null : Math.min(100, Math.round((meetings / Math.max(1, maxM ?? 5)) * 100));
+      return {
+        ...pub,
+        _id: u._id.toString(),
+        stats: { meetings, aiNotes, usagePct }
+      };
+    });
+
+    res.render('admin/users', {
+      user: req.user,
+      users,
+      plans,
+      stats: { total: totalAll, active: activeAll, pro: proAll, free: freeAll },
+      filters: { q, plan: planFilter, role: roleFilter, status: statusFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/users', {
+      user: req.user,
+      users: [],
+      plans: [],
+      stats: { total: 0, active: 0, pro: 0, free: 0 },
+      filters: { q: '', plan: 'all', role: 'all', status: 'all' },
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/users/new', requireAdmin, async (req, res) => {
+  const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+  res.render('admin/user-new', {
+    user: req.user,
+    plans,
+    form: null,
+    error: req.query.error || null
+  });
+});
+
+app.post('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const result = await registerUser({
+      username: req.body.username,
+      passkey: req.body.passkey,
+      displayName: req.body.displayName || '',
+      email: req.body.email
+    });
+    const updates = { emailVerified: true };
+    if (req.body.role === 'admin') updates.role = 'admin';
+    if (req.body.planSlug) {
+      const plan = await Plan.findOne({ slug: String(req.body.planSlug) });
+      if (plan) {
+        updates.planSlug = plan.slug;
+        updates.planId = plan._id;
+      }
+    }
+    if (Object.keys(updates).length) {
+      await User.findByIdAndUpdate(result.user.id, { $set: updates });
+    }
+    await sendTemplateToUser(result.user.id, 'welcome', { appUrl: appBaseUrl() }, { transactional: true }).catch(() => {});
+    res.redirect('/admin/users/' + result.user.id + '?success=' + encodeURIComponent('User created and welcome email sent when Gmail is configured.'));
+  } catch (error) {
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+    res.status(400).render('admin/user-new', {
+      user: req.user,
+      plans,
+      form: {
+        username: req.body.username || '',
+        displayName: req.body.displayName || '',
+        email: req.body.email || ''
+      },
+      error: error.message
+    });
+  }
+});
+
+app.get('/admin/users/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const planFilter = String(req.query.plan || 'all');
+    const roleFilter = String(req.query.role || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ username: rx }, { displayName: rx }];
+    }
+    if (planFilter !== 'all') filter.planSlug = planFilter;
+    if (roleFilter !== 'all') filter.role = roleFilter;
+    if (statusFilter === 'active') filter.isActive = { $ne: false };
+    if (statusFilter === 'disabled') filter.isActive = false;
+
+    const users = await User.find(filter).sort({ createdAt: -1 }).limit(5000).lean();
+    const header = 'id,username,displayName,role,planSlug,isActive,createdAt\n';
+    const rows = users.map((u) => {
+      const cells = [
+        u._id.toString(),
+        u.username,
+        JSON.stringify(u.displayName || ''),
+        u.role || 'user',
+        u.planSlug || 'free',
+        u.isActive === false ? 'false' : 'true',
+        u.createdAt ? new Date(u.createdAt).toISOString() : ''
+      ];
+      return cells.join(',');
+    }).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="users-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/users/:id', requireAdmin, async (req, res) => {
+  try {
+    const doc = await User.findById(req.params.id).lean();
+    if (!doc) return res.redirect('/admin/users');
+    const target = publicUser(doc);
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+    const plan = plans.find((p) => p.slug === (target.planSlug || 'free')) || null;
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [meetingsUsed, aiNotes, durationAgg, recentMeetings] = await Promise.all([
+      Meeting.countDocuments({ userId: target.id, createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({
+        userId: target.id,
+        createdAt: { $gte: monthStart },
+        'ai.summary': { $exists: true, $ne: '' }
+      }),
+      Meeting.aggregate([
+        { $match: { userId: target.id, createdAt: { $gte: monthStart } } },
+        { $group: { _id: null, total: { $sum: '$duration' } } }
+      ]),
+      Meeting.find({ userId: target.id }).sort({ startedAt: -1 }).limit(8).lean()
+    ]);
+
+    const maxMeetings = plan?.maxMeetingsPerMonth ?? 5;
+    res.render('admin/user-detail', {
+      user: req.user,
+      target: { ...target, updatedAt: doc.updatedAt },
+      plan,
+      plans,
+      usageStats: {
+        meetingsUsed,
+        meetingsMax: maxMeetings,
+        aiNotes,
+        transcriptionMinutes: Math.round((durationAgg[0]?.total || 0) / 60),
+        askAi: 0
+      },
+      recentMeetings,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/role', requireAdmin, async (req, res) => {
+  try {
+    const role = req.body.role === 'admin' ? 'admin' : 'user';
+    if (req.params.id === req.user.id && role !== 'admin') {
+      return res.redirect('/admin/users/' + req.params.id + '?success=' + encodeURIComponent('You cannot demote yourself.'));
+    }
+    await User.findByIdAndUpdate(req.params.id, { $set: { role } });
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent('Role updated'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/plan', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findOne({ slug: String(req.body.planSlug || 'free'), isActive: true });
+    if (!plan) throw new Error('Plan is not available.');
+    await activateSubscription({ userId: req.params.id, planId: plan._id, billingInterval: 'month', paymentMethod: 'admin-assigned', adminId: req.user.id });
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent('Plan updated'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/toggle', requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot disable your own account.'));
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) return res.redirect('/admin/users');
+    target.isActive = !target.isActive;
+    await target.save();
+    const back = req.get('Referer')?.includes('/admin/users/')
+      ? '/admin/users/' + req.params.id
+      : '/admin/users';
+    res.redirect(back + '?success=' + encodeURIComponent(target.isActive ? 'User enabled' : 'User disabled'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/users/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.redirect('/admin/users?success=' + encodeURIComponent('You cannot delete your own account.'));
+    }
+    await User.findByIdAndDelete(req.params.id);
+    res.redirect('/admin/users?success=' + encodeURIComponent('User deleted'));
+  } catch (error) {
+    res.redirect('/admin/users?success=' + encodeURIComponent(error.message));
+  }
+});
+
+function parseOptionalLimit(raw) {
+  const s = String(raw ?? '').trim();
+  if (s === '' || s.toLowerCase() === 'unlimited') return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n >= 9999) return null;
+  return n;
+}
+
+function parseFeatureFlags(body = {}) {
+  const keys = [
+    'liveTranscription', 'aiSummaries', 'actionItems', 'askAi', 'aiInsights',
+    'pdfExport', 'markdownExport', 'txtExport', 'teamWorkspace', 'adminDashboard'
+  ];
+  const flags = {};
+  for (const k of keys) {
+    flags[k] = body[`flag_${k}`] === 'on' || body[`flag_${k}`] === 'true';
+  }
+  return flags;
+}
+
+function parsePlanBody(body = {}, { isNew = false } = {}) {
+  const features = String(body.features || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const data = {
+    name: String(body.name || '').slice(0, 80),
+    priceMonthly: Math.max(0, Number(body.priceMonthly || 0)),
+    priceAnnual: Math.max(0, Number(body.priceAnnual || 0)),
+    description: String(body.description || '').slice(0, 400),
+    features,
+    maxMeetingsPerMonth: parseOptionalLimit(body.maxMeetingsPerMonth),
+    maxTranscriptionMinutes: parseOptionalLimit(body.maxTranscriptionMinutes),
+    maxAiQuestions: parseOptionalLimit(body.maxAiQuestions),
+    maxStorageGb: parseOptionalLimit(body.maxStorageGb),
+    featureFlags: parseFeatureFlags(body),
+    isActive: body.isActive === 'on' || body.isActive === 'true',
+    isRecommended: body.isRecommended === 'on' || body.isRecommended === 'true',
+    sortOrder: Number(body.sortOrder || 0)
+  };
+  if (isNew) {
+    const slug = String(body.slug || body.name || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40);
+    data.slug = slug;
+  }
+  return data;
+}
+
+app.get('/admin/billing/requests/:id', requireAdmin, async (req, res) => {
+  const request = await UpgradeRequest.findById(req.params.id).populate('userId requestedPlanId').lean().catch(() => null);
+  if (!request) return res.redirect('/admin/plans?tab=requests');
+  res.render('admin/billing-request', { user: req.user, request, error: req.query.error || null, success: req.query.success || null });
+});
+
+app.post('/admin/billing/requests/:id/approve', requireAdmin, async (req, res) => {
+  try {
+    const request = await UpgradeRequest.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'processing' } },
+      { returnDocument: 'after' }
+    ).lean();
+    if (!request) throw new Error('This request is no longer pending.');
+    try {
+      await activateSubscription({
+        userId: request.userId, planId: request.requestedPlanId, billingInterval: request.billingInterval,
+        paymentMethod: request.paymentMethod || 'manual', adminId: req.user.id, upgradeRequestId: request._id,
+        amount: request.amount, currency: request.currency, reference: req.body.reference, workspaceName: request.workspaceName, seats: request.seats
+      });
+    } catch (activationError) {
+      await UpgradeRequest.updateOne({ _id: request._id, status: 'processing' }, { $set: { status: 'pending' } }).catch(() => {});
+      throw activationError;
+    }
+    const approvedSub = await Subscription.findOne({ _id: (await UpgradeRequest.findById(req.params.id).lean())?.subscriptionId }).lean().catch(() => null);
+    const approvedUser = await User.findById(request.userId).lean().catch(() => null);
+    const approvedPlan = await Plan.findById(request.requestedPlanId).lean().catch(() => null);
+    await sendEmail({ to: approvedUser?.email, templateKey: 'upgrade-approved', vars: { siteName:(await getSiteSettings()).siteName, username:approvedUser?.username, displayName:approvedUser?.displayName || approvedUser?.username, planName:approvedPlan?.name || request.requestedPlanSlug, billingInterval:request.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount:Number(request.amount||0).toFixed(2), currency:request.currency||'USD', periodEnd:approvedSub?.currentPeriodEnd ? formatUserDate(approvedSub.currentPeriodEnd) : 'Unlimited', requestId:String(request._id).slice(-8).toUpperCase(), appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=requests&success=' + encodeURIComponent('Upgrade approved and subscription activated.'));
+  } catch (error) {
+    res.redirect('/admin/billing/requests/' + req.params.id + '?error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/billing/requests/:id/reject', requireAdmin, async (req, res) => {
+  try {
+    const result = await rejectUpgradeRequest(req.params.id, req.user.id, req.body.reason);
+    if (!result) throw new Error('This request is no longer pending.');
+    const rejectedUser = await User.findById(result.userId).lean().catch(() => null);
+    const rejectedPlan = await Plan.findById(result.requestedPlanId).lean().catch(() => null);
+    await sendEmail({ to: rejectedUser?.email, templateKey: 'upgrade-rejected', vars: { siteName:(await getSiteSettings()).siteName, username:rejectedUser?.username, displayName:rejectedUser?.displayName || rejectedUser?.username, planName:rejectedPlan?.name || result.requestedPlanSlug, requestId:String(result._id).slice(-8).toUpperCase(), reason:result.rejectionReason || 'The payment could not be verified.', appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=requests&success=' + encodeURIComponent('Upgrade request rejected. The user has been notified by email.'));
+  } catch (error) {
+    res.redirect('/admin/billing/requests/' + req.params.id + '?error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/billing/subscriptions/:id/cancel', requireAdmin, async (req, res) => {
+  try {
+    const sub = await Subscription.findById(req.params.id).lean();
+    if (!sub) throw new Error('Subscription not found.');
+    await cancelUserSubscription(sub.userId, req.user.id);
+    const cancelledUser = await User.findById(sub.userId).lean().catch(() => null);
+    const cancelledPlan = await Plan.findById(sub.planId).lean().catch(() => null);
+    await sendEmail({ to: cancelledUser?.email, templateKey: 'subscription-cancelled', vars: { siteName:(await getSiteSettings()).siteName, username:cancelledUser?.username, displayName:cancelledUser?.displayName || cancelledUser?.username, planName:cancelledPlan?.name || sub.planSlug, cancelledAt:formatUserDate(new Date()), appUrl:appBaseUrl() }, allowUnconfigured:true });
+    res.redirect('/admin/plans?tab=subscriptions&success=' + encodeURIComponent('Subscription cancelled and user moved to Free. The user has been notified by email.'));
+  } catch (error) {
+    res.redirect('/admin/plans?tab=subscriptions&success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/admin/plans', requireAdmin, async (req, res) => {
+  try {
+    const tab = String(req.query.tab || 'plans');
+    const plans = await Plan.find().sort({ sortOrder: 1 }).lean();
+
+    const byPlan = await User.aggregate([
+      { $group: { _id: '$planSlug', count: { $sum: 1 } } }
+    ]);
+    const subscriberCounts = Object.fromEntries(byPlan.map((r) => [r._id || 'free', r.count]));
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [totalUsers, paidUsers, freeUsers, activeUsers, newThisMonth] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ planSlug: { $nin: ['free', null, ''] }, isActive: { $ne: false } }),
+      User.countDocuments({ $or: [{ planSlug: 'free' }, { planSlug: null }, { planSlug: '' }] }),
+      User.countDocuments({ isActive: { $ne: false } }),
+      User.countDocuments({ createdAt: { $gte: monthStart }, planSlug: { $nin: ['free', null, ''] } })
+    ]);
+
+    let mrr = 0;
+    for (const p of plans) {
+      const c = subscriberCounts[p.slug] || 0;
+      mrr += (Number(p.priceMonthly) || 0) * c;
+    }
+
+    let subscribers = [];
+    let upgradeRequests = [];
+    let subscriptions = [];
+    let payments = [];
+    if (tab === 'requests') {
+      upgradeRequests = await UpgradeRequest.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('requestedPlanId', 'name slug priceMonthly priceAnnual currency').lean();
+    }
+    if (tab === 'subscriptions') {
+      subscriptions = await Subscription.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('planId', 'name slug').lean();
+    }
+    if (tab === 'transactions') {
+      payments = await Payment.find().sort({ createdAt: -1 }).limit(100)
+        .populate('userId', 'username displayName email')
+        .populate('subscriptionId', 'planSlug billingInterval').lean();
+    }
+    const filters = { q: String(req.query.q || '').trim(), plan: String(req.query.plan || 'all') };
+    if (tab === 'subscribers') {
+      const filter = {};
+      if (filters.q) {
+        const rx = new RegExp(filters.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        filter.$or = [{ username: rx }, { displayName: rx }];
+      }
+      if (filters.plan !== 'all') filter.planSlug = filters.plan;
+      const docs = await User.find(filter).sort({ createdAt: -1 }).limit(100).lean();
+      subscribers = docs.map((u) => publicUser(u));
+    }
+
+    res.render('admin/plans', {
+      user: req.user,
+      plans,
+      activeTab: tab,
+      subscriberCounts,
+      subscribers, upgradeRequests, subscriptions, payments,
+      filters,
+      billingStats: { totalUsers, paidUsers, freeUsers, activeUsers, newThisMonth, mrr },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/plans', {
+      user: req.user,
+      plans: [],
+      activeTab: 'plans',
+      subscriberCounts: {},
+      subscribers: [], upgradeRequests: [], subscriptions: [], payments: [],
+      filters: { q: '', plan: 'all' },
+      billingStats: {},
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/plans/new', requireAdmin, async (req, res) => {
+  res.render('admin/plan-edit', {
+    user: req.user,
+    plan: null,
+    isNew: true,
+    error: null
+  });
+});
+
+app.get('/admin/plans/:id/edit', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findById(req.params.id).lean();
+    if (!plan) return res.redirect('/admin/plans');
+    res.render('admin/plan-edit', {
+      user: req.user,
+      plan,
+      isNew: false,
+      error: null
+    });
+  } catch (error) {
+    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/plans', requireAdmin, async (req, res) => {
+  try {
+    const data = parsePlanBody(req.body, { isNew: true });
+    if (!data.slug || !data.name) throw new Error('Name is required');
+    await Plan.create(data);
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan created'));
+  } catch (error) {
+    res.status(400).render('admin/plan-edit', {
+      user: req.user,
+      plan: { ...req.body, features: String(req.body.features || '').split('\n') },
+      isNew: true,
+      error: error.message
+    });
+  }
+});
+
+app.post('/admin/plans/:id', requireAdmin, async (req, res) => {
+  try {
+    const data = parsePlanBody(req.body, { isNew: false });
+    if (!data.name) throw new Error('Name is required');
+    await Plan.findByIdAndUpdate(req.params.id, { $set: data });
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan updated'));
+  } catch (error) {
+    res.redirect('/admin/plans/' + req.params.id + '/edit?error=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/plans/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    const plan = await Plan.findById(req.params.id);
+    if (plan?.slug === 'free') {
+      return res.redirect('/admin/plans?success=' + encodeURIComponent('Cannot delete the Free plan'));
+    }
+    await Plan.findByIdAndDelete(req.params.id);
+    res.redirect('/admin/plans?success=' + encodeURIComponent('Plan deleted'));
+  } catch (error) {
+    res.redirect('/admin/plans?success=' + encodeURIComponent(error.message));
+  }
+});
+
+
+app.get('/admin/meetings', requireAdmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const platformFilter = String(req.query.platform || 'all');
+    const aiFilter = String(req.query.ai || 'all');
+    const dateFilter = String(req.query.date || 'all');
+    const userFilter = String(req.query.user || '').trim().toLowerCase();
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 25;
+
+    const filter = {};
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { title: rx },
+        { 'ai.generatedTitle': rx },
+        { platform: rx },
+        { userId: rx }
+      ];
+    }
+    if (platformFilter !== 'all') {
+      if (platformFilter === 'Google Meet') filter.platform = /meet|google/i;
+      else if (platformFilter === 'Zoom') filter.platform = /zoom/i;
+      else if (platformFilter === 'Microsoft Teams') filter.platform = /teams|microsoft/i;
+      else if (platformFilter === 'Manual') filter.platform = /manual|^$/i;
+      else filter.platform = platformFilter;
+    }
+    if (aiFilter === 'ready') filter['ai.summary'] = { $exists: true, $ne: '' };
+    if (aiFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+    if (aiFilter === 'pending') {
+      filter.fullTranscript = { $exists: true, $ne: '' };
+      filter.$and = [
+        { $or: [{ 'ai.summary': { $exists: false } }, { 'ai.summary': '' }] },
+        { $or: [{ 'ai.error': { $exists: false } }, { 'ai.error': '' }] }
+      ];
+    }
+    if (aiFilter === 'none') {
+      filter.$or = [{ fullTranscript: { $exists: false } }, { fullTranscript: '' }];
+    }
+    if (dateFilter === 'today') {
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      filter.createdAt = { $gte: start };
+    } else if (dateFilter === '7d') {
+      const start = new Date(); start.setDate(start.getDate() - 7);
+      filter.createdAt = { $gte: start };
+    } else if (dateFilter === '30d') {
+      const start = new Date(); start.setDate(start.getDate() - 30);
+      filter.createdAt = { $gte: start };
+    }
+
+    if (userFilter) {
+      const matchedUsers = await User.find({
+        $or: [
+          { username: new RegExp(userFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+          { displayName: new RegExp(userFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+        ]
+      }).select('_id').lean();
+      const ids = matchedUsers.map((u) => u._id.toString());
+      if (ids.length) filter.userId = { $in: ids };
+      else filter.userId = '__none__';
+    }
+
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const prevMonthStart = new Date(monthStart); prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+    const [
+      total,
+      meetingsRaw,
+      totalAll,
+      todayCount,
+      aiReadyAll,
+      issuesAll,
+      thisMonth,
+      prevMonth
+    ] = await Promise.all([
+      Meeting.countDocuments(filter),
+      Meeting.find(filter).sort({ startedAt: -1, createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Meeting.countDocuments(),
+      Meeting.countDocuments({ createdAt: { $gte: todayStart } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ 'ai.error': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({ createdAt: { $gte: prevMonthStart, $lt: monthStart } })
+    ]);
+
+    const userIds = [...new Set(meetingsRaw.map((m) => m.userId).filter(Boolean))];
+    const owners = await User.find({ _id: { $in: userIds.filter((id) => /^[a-f0-9]{24}$/i.test(id)) } }).lean().catch(() => []);
+    const ownerById = Object.fromEntries(owners.map((u) => [u._id.toString(), publicUser(u)]));
+
+    const meetings = meetingsRaw.map((m) => ({
+      ...m,
+      owner: ownerById[m.userId] || null
+    }));
+
+    const growth = prevMonth > 0
+      ? Math.round(((thisMonth - prevMonth) / prevMonth) * 1000) / 10
+      : (thisMonth > 0 ? 100 : 0);
+    const aiRate = totalAll > 0 ? Math.round((aiReadyAll / totalAll) * 1000) / 10 : 0;
+
+    res.render('admin/meetings', {
+      user: req.user,
+      meetings,
+      stats: {
+        total: totalAll,
+        today: todayCount,
+        aiReady: aiReadyAll,
+        issues: issuesAll,
+        growth,
+        aiRate
+      },
+      filters: { q, platform: platformFilter, ai: aiFilter, date: dateFilter, user: userFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/meetings', {
+      user: req.user,
+      meetings: [],
+      stats: { total: 0, today: 0, aiReady: 0, issues: 0, growth: 0, aiRate: 0 },
+      filters: { q: '', platform: 'all', ai: 'all', date: 'all', user: '' },
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/meetings/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(5000).lean();
+    const header = 'externalId,title,userId,platform,durationSec,aiReady,startedAt,createdAt\n';
+    const rows = meetings.map((m) => [
+      m.externalId,
+      JSON.stringify(m.ai?.generatedTitle || m.title || ''),
+      m.userId,
+      JSON.stringify(m.platform || ''),
+      m.duration || 0,
+      m.ai?.summary ? 'true' : 'false',
+      m.startedAt ? new Date(m.startedAt).toISOString() : '',
+      m.createdAt ? new Date(m.createdAt).toISOString() : ''
+    ].join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="meetings-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/meetings/:id', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id }).lean();
+    if (!meeting) return res.redirect('/admin/meetings');
+    let ownerUser = null;
+    if (meeting.userId && /^[a-f0-9]{24}$/i.test(meeting.userId)) {
+      const u = await User.findById(meeting.userId).lean();
+      if (u) ownerUser = publicUser(u);
+    }
+    res.render('admin/meeting-detail', {
+      user: req.user,
+      meeting,
+      ownerUser,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/analyze', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id });
+    if (!meeting) return res.redirect('/admin/meetings');
+    const generated = await analyzeTranscript(meeting);
+    if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+    meeting.ai = { ...generated, generatedAt: new Date(), error: '' };
+    await meeting.save();
+    res.redirect('/admin/meetings/' + req.params.id + '?success=' + encodeURIComponent('AI analysis updated'));
+  } catch (error) {
+    try {
+      await Meeting.findOneAndUpdate(
+        { externalId: req.params.id },
+        { $set: { 'ai.error': error.message } }
+      );
+    } catch (_) {}
+    res.redirect('/admin/meetings/' + req.params.id + '?success=' + encodeURIComponent('Analysis failed: ' + error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/archive', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id });
+    if (!meeting) return res.redirect('/admin/meetings');
+    meeting.isArchived = !meeting.isArchived;
+    await meeting.save();
+    const back = req.get('Referer')?.includes('/admin/meetings/')
+      ? '/admin/meetings/' + req.params.id
+      : '/admin/meetings';
+    res.redirect(back + '?success=' + encodeURIComponent(meeting.isArchived ? 'Meeting archived' : 'Meeting unarchived'));
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/admin/meetings/:id/delete', requireAdmin, async (req, res) => {
+  try {
+    await Meeting.deleteOne({ externalId: req.params.id });
+    res.redirect('/admin/meetings?success=' + encodeURIComponent('Meeting deleted'));
+  } catch (error) {
+    res.redirect('/admin/meetings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/admin/ai-notes', requireAdmin, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const contentFilter = String(req.query.content || 'all');
+    const statusFilter = String(req.query.status || 'all');
+    const planFilter = String(req.query.plan || 'all');
+    const dateFilter = String(req.query.date || 'all');
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = 25;
+
+    const filter = {};
+    if (statusFilter === 'ready') filter['ai.summary'] = { $exists: true, $ne: '' };
+    else if (statusFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+    else if (statusFilter === 'pending') {
+      filter.fullTranscript = { $exists: true, $ne: '' };
+      filter.$and = [
+        { $or: [{ 'ai.summary': { $exists: false } }, { 'ai.summary': '' }] },
+        { $or: [{ 'ai.error': { $exists: false } }, { 'ai.error': '' }] }
+      ];
+    } else {
+      filter.$or = [
+        { 'ai.summary': { $exists: true, $ne: '' } },
+        { 'ai.error': { $exists: true, $ne: '' } },
+        { fullTranscript: { $exists: true, $ne: '' } }
+      ];
+    }
+
+    if (contentFilter === 'summary') filter['ai.summary'] = { $exists: true, $ne: '' };
+    if (contentFilter === 'actions') filter['ai.actionItems.0'] = { $exists: true };
+    if (contentFilter === 'insights') filter['ai.keyPoints.0'] = { $exists: true };
+    if (contentFilter === 'failed') filter['ai.error'] = { $exists: true, $ne: '' };
+
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$and = (filter.$and || []).concat([{
+        $or: [
+          { title: rx },
+          { 'ai.generatedTitle': rx },
+          { 'ai.summary': rx },
+          { userId: rx }
+        ]
+      }]);
+    }
+
+    if (dateFilter === 'today') {
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      filter.updatedAt = { $gte: start };
+    } else if (dateFilter === '7d') {
+      const start = new Date(); start.setDate(start.getDate() - 7);
+      filter.updatedAt = { $gte: start };
+    } else if (dateFilter === '30d') {
+      const start = new Date(); start.setDate(start.getDate() - 30);
+      filter.updatedAt = { $gte: start };
+    }
+
+    if (planFilter !== 'all') {
+      const planUsers = await User.find({ planSlug: planFilter }).select('_id').lean();
+      const ids = planUsers.map((u) => u._id.toString());
+      filter.userId = { $in: ids.length ? ids : ['__none__'] };
+    }
+
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const prevMonthStart = new Date(monthStart); prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
+
+    const [
+      total,
+      notesRaw,
+      totalAi,
+      todayAi,
+      withActions,
+      failedCount,
+      thisMonthAi,
+      prevMonthAi,
+      plans
+    ] = await Promise.all([
+      Meeting.countDocuments(filter),
+      Meeting.find(filter).sort({ 'ai.generatedAt': -1, updatedAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({
+        'ai.summary': { $exists: true, $ne: '' },
+        $or: [
+          { 'ai.generatedAt': { $gte: todayStart } },
+          { updatedAt: { $gte: todayStart }, 'ai.summary': { $exists: true, $ne: '' } }
+        ]
+      }),
+      Meeting.countDocuments({ 'ai.actionItems.0': { $exists: true } }),
+      Meeting.countDocuments({ 'ai.error': { $exists: true, $ne: '' } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' }, createdAt: { $gte: monthStart } }),
+      Meeting.countDocuments({ 'ai.summary': { $exists: true, $ne: '' }, createdAt: { $gte: prevMonthStart, $lt: monthStart } }),
+      Plan.find().sort({ sortOrder: 1 }).lean()
+    ]);
+
+    const userIds = [...new Set(notesRaw.map((m) => m.userId).filter(Boolean))];
+    const owners = await User.find({ _id: { $in: userIds.filter((id) => /^[a-f0-9]{24}$/i.test(id)) } }).lean().catch(() => []);
+    const ownerById = Object.fromEntries(owners.map((u) => [u._id.toString(), publicUser(u)]));
+    const notes = notesRaw.map((m) => ({ ...m, owner: ownerById[m.userId] || null }));
+
+    const growth = prevMonthAi > 0
+      ? Math.round(((thisMonthAi - prevMonthAi) / prevMonthAi) * 1000) / 10
+      : (thisMonthAi > 0 ? 100 : 0);
+    const actionRate = totalAi > 0 ? Math.round((withActions / totalAi) * 1000) / 10 : 0;
+    const failRate = (totalAi + failedCount) > 0
+      ? Math.round((failedCount / Math.max(1, totalAi + failedCount)) * 1000) / 10
+      : 0;
+    const successRate = Math.max(0, Math.round(1000 - failRate * 10) / 10);
+
+    const activitySeries = [];
+    for (let i = 13; i >= 0; i--) {
+      const day = new Date();
+      day.setHours(0, 0, 0, 0);
+      day.setDate(day.getDate() - i);
+      const next = new Date(day);
+      next.setDate(next.getDate() + 1);
+      // sequential is fine for 14 days
+      // eslint-disable-next-line no-await-in-loop
+      const value = await Meeting.countDocuments({
+        'ai.summary': { $exists: true, $ne: '' },
+        $or: [
+          { 'ai.generatedAt': { $gte: day, $lt: next } },
+          { updatedAt: { $gte: day, $lt: next } }
+        ]
+      });
+      activitySeries.push({
+        label: day.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+        short: day.toLocaleDateString([], { weekday: 'narrow' }),
+        value
+      });
+    }
+
+    res.render('admin/ai-notes', {
+      user: req.user,
+      notes,
+      plans,
+      stats: {
+        total: totalAi,
+        today: todayAi,
+        withActions,
+        failed: failedCount,
+        growth,
+        actionRate,
+        failRate,
+        successRate
+      },
+      activitySeries,
+      filters: { q, content: contentFilter, status: statusFilter, plan: planFilter, date: dateFilter },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.status(500).render('admin/ai-notes', {
+      user: req.user,
+      notes: [],
+      plans: [],
+      stats: { total: 0, today: 0, withActions: 0, failed: 0, growth: 0, actionRate: 0, failRate: 0, successRate: 100 },
+      activitySeries: [],
+      filters: { q: '', content: 'all', status: 'all', plan: 'all', date: 'all' },
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 1 },
+      error: error.message,
+      success: null
+    });
+  }
+});
+
+app.get('/admin/ai-notes/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const meetings = await Meeting.find({
+      $or: [
+        { 'ai.summary': { $exists: true, $ne: '' } },
+        { 'ai.error': { $exists: true, $ne: '' } }
+      ]
+    }).sort({ updatedAt: -1 }).limit(5000).lean();
+    const header = 'externalId,title,userId,hasSummary,hasActions,hasError,generatedAt\n';
+    const rows = meetings.map((m) => [
+      m.externalId,
+      JSON.stringify(m.ai?.generatedTitle || m.title || ''),
+      m.userId,
+      m.ai?.summary ? 'true' : 'false',
+      m.ai?.actionItems?.length ? 'true' : 'false',
+      m.ai?.error ? 'true' : 'false',
+      m.ai?.generatedAt ? new Date(m.ai.generatedAt).toISOString() : ''
+    ].join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ai-notes-export.csv"');
+    res.send(header + rows);
+  } catch (error) {
+    res.status(500).send('Export failed: ' + error.message);
+  }
+});
+
+app.get('/admin/ai-notes/:id', requireAdmin, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id }).lean();
+    if (!meeting) return res.redirect('/admin/ai-notes');
+    let ownerUser = null;
+    if (meeting.userId && /^[a-f0-9]{24}$/i.test(meeting.userId)) {
+      const u = await User.findById(meeting.userId).lean();
+      if (u) ownerUser = publicUser(u);
+    }
+    res.render('admin/ai-note-detail', {
+      user: req.user,
+      meeting,
+      ownerUser,
+      error: null,
+      success: req.query.success || null
+    });
+  } catch (error) {
+    res.redirect('/admin/ai-notes?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/admin/transcriptions', requireAdmin, async (req, res) => {
+  const meetings = await Meeting.find().sort({ startedAt: -1 }).limit(100).lean();
+  res.render('admin/section', {
+    user: req.user,
+    title: 'Transcriptions',
+    activeNav: 'transcriptions',
+    description: 'Monitor transcription usage and session length.',
+    meetings,
+    error: null,
+    success: null
+  });
+});
+
+app.get('/admin/analytics', requireAdmin, async (req, res) => {
+  res.redirect('/admin');
+});
+
+app.get('/admin/extension', requireAdmin, async (req, res) => {
+  res.render('admin/section', {
+    user: req.user,
+    title: 'Extension',
+    activeNav: 'extension',
+    description: 'Extension configuration and status. Share the install guide with users.',
+    meetings: [],
+    error: null,
+    success: null,
+    extraHtml: true
+  });
+});
+
+app.get('/admin/settings', requireAdmin, async (req, res) => {
+  const settings = await getSiteSettings();
+  res.render('admin/settings', {
+    user: req.user,
+    settings,
+    error: null,
+    success: req.query.success || null
+  });
+});
+
+app.post('/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const labels = [].concat(req.body.linkLabel || []);
+    const urls = [].concat(req.body.linkUrl || []);
+    const footerLinks = labels.map((label, i) => ({ label, url: urls[i] || '' }));
+    await updateSiteSettings({
+      siteName: req.body.siteName,
+      tagline: req.body.tagline,
+      authSubtitle: req.body.authSubtitle,
+      footerText: req.body.footerText,
+      supportEmail: req.body.supportEmail,
+      copyrightText: req.body.copyrightText,
+      footerLinks
+    });
+    res.redirect('/admin/settings?success=' + encodeURIComponent('Settings saved'));
+  } catch (error) {
+    res.redirect('/admin/settings?success=' + encodeURIComponent(error.message));
+  }
+});
+
+
+
+app.post('/billing/upgrade-request', requireAuth, async (req, res) => {
+  try {
+    const { planSlug, billingInterval, paymentMethod, note } = req.body || {};
+    const created = await createUpgradeRequest({ userId: req.user.id, planSlug: planSlug || 'pro', billingInterval, paymentMethod, note });
+    if (!created.duplicate) {
+      const r = created.request;
+      await sendTemplateToUser(req.user.id, 'upgrade-request-submitted', { planName: r.requestedPlanSlug === 'pro' ? 'Pro' : r.requestedPlanSlug, billingInterval: r.billingInterval === 'year' ? 'Yearly' : 'Monthly', amount: Number(r.amount || 0).toFixed(2), currency: r.currency || 'USD', paymentMethod: r.paymentMethod || 'Manual verification', requestId: String(r._id).slice(-8).toUpperCase(), appUrl: appBaseUrl() }, { transactional: true });
+    }
+    return res.redirect('/app/usage?success=' + encodeURIComponent(created.duplicate ? 'You already have a pending upgrade request.' : 'Your upgrade request has been sent. We emailed you a confirmation and will notify you after verification.'));
+  } catch (error) {
+    return res.redirect('/app/usage?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.post('/billing/upgrade-request/:id/cancel', requireAuth, async (req, res) => {
+  try {
+    await UpgradeRequest.updateOne({ _id: req.params.id, userId: req.user.id, status: 'pending' }, { $set: { status: 'cancelled' } });
+    res.redirect('/app/usage?success=' + encodeURIComponent('Upgrade request cancelled.'));
+  } catch (error) {
+    res.redirect('/app/usage?success=' + encodeURIComponent(error.message));
+  }
+});
+
+app.get('/account', requireAuth, async (req, res) => {
+  const success = req.query.welcome ? 'Account ready. Your extension key is protected and masked by default.' : null;
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(req.user);
+  const freshUser = await User.findById(req.user.id).lean().catch(() => null);
+  res.render('account', {
+    user: freshUser ? publicUser(freshUser) : req.user,
+    accountUser: freshUser || req.user,
+    error: null, success, settings, plan: ctx.plan, usage: ctx.usage
+  });
+});
+
+async function renderAccount(res, userId, { error = null, success = null } = {}, status = 200) {
+  const raw = await User.findById(userId).lean().catch(() => null);
+  const user = raw ? publicUser(raw) : null;
+  const settings = await getSiteSettings().catch(() => null);
+  const ctx = await loadUserPlanContext(user || { id: userId, planSlug: 'free' }).catch(() => ({ plan: null, usage: {} }));
+  return res.status(status).render('account', { user, accountUser: raw || user, error, success, settings, plan: ctx.plan, usage: ctx.usage });
+}
+
+app.post('/account/profile', requireAuth, async (req, res) => {
+  try {
+    await updateAccountSettings(req.user.id, { displayName: req.body.displayName, username: req.body.username, email: req.body.email });
+    return renderAccount(res, req.user.id, { success: 'Profile updated.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+app.post('/account/preferences', requireAuth, async (req, res) => {
+  try {
+    const b = req.body;
+    const bool = (name) => b[name] === 'on' || b[name] === 'true';
+    const section = String(b.section || 'preferences');
+    const current = (await User.findById(req.user.id).lean())?.preferences || {};
+    const prefs = { ...current };
+    const set = (key, value) => { prefs[key] = value; };
+    if (section === 'preferences') {
+      set('appearance', b.appearance || current.appearance || 'system'); set('language', b.language || current.language || 'English'); set('dateFormat', b.dateFormat || current.dateFormat || 'DD MMM YYYY'); set('timezone', b.timezone || current.timezone || 'Asia/Karachi'); set('defaultMeetingView', b.defaultMeetingView || current.defaultMeetingView || 'timeline');
+    } else if (section === 'meetings') {
+      set('defaultTitleMode', b.defaultTitleMode || 'platform'); ['autoSummary','autoActionItems','autoDecisions','saveTranscript'].forEach(k => set(k, bool(k))); set('visibility', b.visibility || 'private');
+    } else if (section === 'ai') {
+      ['summaryStyle','aiLanguage','transcriptOutput','defaultExportFormat','filenameFormat'].forEach(k => { if (b[k] !== undefined) set(k, b[k]); });
+      ['detectResponsible','detectDueDates','detectPriority','includeTimestamps','identifySpeakers','showSpeakerLabels','autoScrollTranscript','saveRawTranscript','exportSummary','exportTranscript','exportActionItems','exportDecisions'].forEach(k => set(k, bool(k)));
+    } else if (section === 'notifications') {
+      ['notifySummaryReady','notifyProcessingFailure','notifyActionItems','notifyWeeklyInsights','notifyProductUpdates','notifyInApp','notifyEmail'].forEach(k => set(k, bool(k)));
+    } else if (section === 'privacy') {
+      ['storeRecordings','storeTranscripts'].forEach(k => set(k, bool(k)));
+    }
+    await updateAccountSettings(req.user.id, { preferences: prefs });
+    return renderAccount(res, req.user.id, { success: 'Settings saved.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+
+app.post('/account/change-passkey', requireAuth, async (req, res) => {
+  try { await changePasskey(req.user.id, req.body.currentPasskey, req.body.newPasskey); return renderAccount(res, req.user.id, { success: 'Passkey changed successfully.' }); }
+  catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 400); }
+});
+
+app.get('/account/export-data', requireAuth, async (req, res) => {
+  try {
+    const rawUser = await User.findById(req.user.id).lean();
+    const meetings = await Meeting.find({ userId: req.user.id }).lean();
+    const safeUser = rawUser ? { id: rawUser._id.toString(), username: rawUser.username, displayName: rawUser.displayName, email: rawUser.email, planSlug: rawUser.planSlug, preferences: rawUser.preferences || {}, createdAt: rawUser.createdAt } : null;
+    const payload = { exportedAt: new Date().toISOString(), user: safeUser, meetings };
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ai-note-taker-data.json"');
+    res.send(JSON.stringify(payload, null, 2));
+  } catch (error) { res.status(500).send(error.message); }
+});
+
+app.post('/account/delete-meeting-data', requireAuth, async (req, res) => {
+  try { await deleteAllMeetings(req.user.id, Meeting); return res.redirect('/account?success=' + encodeURIComponent('All meeting data was deleted.')); }
+  catch (error) { return renderAccount(res, req.user.id, { error: error.message }, 400); }
+});
+
+app.post('/account/delete', requireAuth, async (req, res) => {
+  try {
+    await verifyPasskey(req.user.id, req.body.confirmPasskey);
+    await deleteAccount(req.user.id, Meeting);
+    clearSessionCookie(res);
+    return res.redirect('/');
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, 400); }
+});
+
+function cloudinarySignature(params) {
+  const canonical = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('&');
+  return crypto.createHash('sha1').update(canonical + CLOUDINARY_API_SECRET).digest('hex');
+}
+
+async function deleteCloudinaryAvatar(publicId) {
+  if (!publicId || !CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) return;
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = cloudinarySignature({ public_id: publicId, timestamp });
+  const body = new URLSearchParams({ public_id: publicId, timestamp: String(timestamp), api_key: CLOUDINARY_API_KEY, signature });
+  try {
+    await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(CLOUDINARY_CLOUD_NAME)}/image/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+  } catch (error) {
+    console.warn('Cloudinary avatar cleanup failed:', error.message);
+  }
+}
+
+app.post('/api/account/avatar', requireAuth, async (req, res) => {
+  try {
+    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+      return res.status(503).json({ ok: false, error: 'Profile photo upload is not configured.' });
+    }
+    const dataUri = String(req.body?.image || '');
+    const match = dataUri.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/i);
+    if (!match) return res.status(400).json({ ok: false, error: 'Please upload a JPG, PNG, WEBP, or GIF image.' });
+    const mime = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+    const buffer = Buffer.from(match[2], 'base64');
+    if (!buffer.length || buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ ok: false, error: 'Profile photo must be smaller than 5 MB.' });
+    }
+    const normalizedDataUri = `data:${mime};base64,${buffer.toString('base64')}`;
+    const timestamp = Math.floor(Date.now() / 1000);
+    const params = { folder: CLOUDINARY_AVATAR_FOLDER, timestamp };
+    const signature = cloudinarySignature(params);
+    const body = new URLSearchParams({
+      file: normalizedDataUri,
+      folder: CLOUDINARY_AVATAR_FOLDER,
+      timestamp: String(timestamp),
+      api_key: CLOUDINARY_API_KEY,
+      signature
+    });
+    const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(CLOUDINARY_CLOUD_NAME)}/image/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    const uploaded = await uploadRes.json().catch(() => ({}));
+    if (!uploadRes.ok || !uploaded.secure_url || !uploaded.public_id) {
+      console.error('Cloudinary avatar upload failed:', uploaded);
+      return res.status(502).json({ ok: false, error: 'Could not upload the profile photo. Please try again.' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found.' });
+    const previousPublicId = user.avatarPublicId || '';
+    user.avatarUrl = String(uploaded.secure_url).slice(0, 500);
+    user.avatarPublicId = String(uploaded.public_id).slice(0, 500);
+    user.avatarSource = 'cloudinary';
+    await user.save();
+
+    if (previousPublicId && previousPublicId !== user.avatarPublicId) await deleteCloudinaryAvatar(previousPublicId);
+    return res.json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    console.error('Profile photo upload error:', error);
+    return res.status(error.status || 500).json({ ok: false, error: 'Could not update profile photo.' });
+  }
+});
+
+app.delete('/api/account/avatar', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found.' });
+    const previousPublicId = user.avatarPublicId || '';
+    user.avatarUrl = '';
+    user.avatarPublicId = '';
+    user.avatarSource = '';
+    await user.save();
+    if (previousPublicId) await deleteCloudinaryAvatar(previousPublicId);
+    return res.json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    console.error('Profile photo removal error:', error);
+    return res.status(500).json({ ok: false, error: 'Could not remove profile photo.' });
+  }
+});
+
+app.get('/api/account/api-key', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || !user.apiKey) return res.status(404).json({ ok: false, error: 'No API key configured.' });
+    user.apiKeyLastUsedAt = new Date();
+    await user.save();
+    res.json({ ok: true, apiKey: user.apiKey });
+  } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
+});
+
+app.post('/account/rotate-key', requireAuth, async (req, res) => {
+  try {
+    const user = await rotateApiKey(req.user.id);
+    return renderAccount(res, req.user.id, { success: 'API key rotated. Configure the extension with the new key.' });
+  } catch (error) { return renderAccount(res, req.user.id, { error: error.message }, error.status || 500); }
+});
+
+
+app.get('/meetings/processing/:id', requireAuth, async (req, res) => {
+  try {
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    const title = String(req.query.title || 'Your meeting').slice(0, 160);
+    res.render('meeting-processing', {
+      user: req.user,
+      meetingId: req.params.id,
+      title,
+      settings,
+      plan: ctx.plan,
+      usage: ctx.usage
+    });
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/meetings/:id/export.txt', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.txtExport) return res.status(403).send('TXT export is available on the Pro plan.');
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
+    if (!meeting) return res.status(404).send('Meeting not found');
+    const text = buildMeetingExportText(meeting);
+    const safe = String(meeting.title || 'meeting').replace(/[^\w\-]+/g, '_').slice(0, 60);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safe}-summary.txt"`);
+    res.send(text);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/meetings/:id/export.md', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.markdownExport) return res.status(403).send('Markdown export is available on the Pro plan.');
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
+    if (!meeting) return res.status(404).send('Meeting not found');
+    const ai = meeting.ai || {};
+    const parts = [
+      `# ${ai.generatedTitle || meeting.title || 'Untitled meeting'}`,
+      '',
+      `**Platform:** ${meeting.platform || 'Manual'}  `,
+      meeting.startedAt ? `**Started:** ${new Date(meeting.startedAt).toLocaleString()}  ` : '',
+      '',
+      '## Executive summary',
+      '',
+      ai.summary || 'No summary.',
+      '',
+      '## Detailed summary',
+      '',
+      ai.detailedSummary || ai.summary || '—',
+      ''
+    ];
+    if (ai.keyPoints?.length) {
+      parts.push('## Key points', '', ...ai.keyPoints.map((x) => `- ${x}`), '');
+    }
+    if (ai.decisions?.length) {
+      parts.push('## Decisions', '', ...ai.decisions.map((x) => `- ${x}`), '');
+    }
+    if (ai.actionItems?.length) {
+      parts.push('## Action items', '', ...ai.actionItems.map((a) => `- **${a.task || ''}**${a.owner ? ` — ${a.owner}` : ''}${a.deadline ? ` (${a.deadline})` : ''}`), '');
+    }
+    parts.push('## Transcript', '', '```', meeting.fullTranscript || 'No transcript.', '```', '');
+    const safe = String(meeting.title || 'meeting').replace(/[^\w\-]+/g, '_').slice(0, 60);
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safe}-summary.md"`);
+    res.send(parts.filter((x) => x !== null).join('\n'));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/meetings/:id/export.pdf', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.pdfExport) return res.status(403).send('PDF export is available on the Pro plan.');
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id }).lean();
+    if (!meeting) return res.status(404).send('Meeting not found');
+    res.render('export-print', { user: req.user, meeting, autoPrint: true });
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+
+app.post('/billing/team/meetings/:id/share', requireAuth, async (req,res)=>{
+  try { const ctx=await loadUserPlanContext(req.user); if(String(ctx.plan?.slug||'')!=='team') throw new Error('An active Team subscription is required.'); const workspace=await getWorkspaceForUser(req.user.id); if(!workspace) throw new Error('Team workspace not found.'); const meeting=await Meeting.findOne({externalId:req.params.id,userId:req.user.id}); if(!meeting) throw new Error('Only the meeting owner can share this meeting.'); meeting.workspaceId=String(workspace._id); meeting.visibility='shared'; await meeting.save(); res.redirect('/meetings/'+req.params.id+'?success='+encodeURIComponent('Meeting shared with your Team workspace.')); } catch(e){res.redirect('/meetings/'+req.params.id+'?error='+encodeURIComponent(e.message));}
+});
+app.post('/billing/team/meetings/:id/unshare', requireAuth, async (req,res)=>{
+  try { const meeting=await Meeting.findOne({externalId:req.params.id,userId:req.user.id}); if(!meeting) throw new Error('Meeting not found.'); meeting.visibility='private'; await meeting.save(); res.redirect('/meetings/'+req.params.id+'?success='+encodeURIComponent('Meeting is private again.')); } catch(e){res.redirect('/meetings/'+req.params.id+'?error='+encodeURIComponent(e.message));}
+});
+
+app.get('/meetings/:id', requireAuth, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ $or: [ { externalId: req.params.id, userId: req.user.id }, ...(await (async()=>{ const w=await getWorkspaceForUser(req.user.id).catch(()=>null); return w ? [{ externalId:req.params.id, workspaceId:String(w._id), visibility:'shared' }] : []; })()) ] }).lean();
+    if (!meeting) return res.status(404).send('Meeting not found');
+    const settings = await getSiteSettings().catch(() => null);
+    const ctx = await loadUserPlanContext(req.user);
+    res.render('meeting', { user: req.user, meeting, error: null, success: null, settings, plan: ctx.plan, usage: ctx.usage });
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/notes', requireAuth, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOneAndUpdate(
+      { externalId: req.params.id, userId: req.user.id },
+      { $set: { notes: String(req.body.notes || '') } },
+      { returnDocument: 'after' }
+    );
+    if (!meeting) return res.status(404).send('Meeting not found');
+    res.redirect('/meetings/' + req.params.id);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/analyze', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.aiSummaries) return res.redirect('/meetings/' + req.params.id + '?error=' + encodeURIComponent('AI Summary is available on the Pro plan.'));
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id });
+    if (!meeting) return res.status(404).send('Meeting not found');
+    const generated = await analyzeTranscript(meeting);
+    if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+    meeting.ai = { ...generated, generatedAt: new Date(), error: '' };
+    meeting.lastSyncError = '';
+    await meeting.save();
+    res.redirect('/meetings/' + req.params.id);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/favorite', requireAuth, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id });
+    if (!meeting) return res.status(404).send('Meeting not found');
+    meeting.isFavorite = !meeting.isFavorite;
+    await meeting.save();
+    const back = req.body?.redirect || req.get('Referer') || '/app';
+    if (req.get('Accept')?.includes('application/json')) {
+      return res.json({ ok: true, isFavorite: meeting.isFavorite, message: meeting.isFavorite ? 'Added to favourites' : 'Removed from favourites' });
+    }
+    res.redirect(back);
+  } catch (error) {
+    if (req.get('Accept')?.includes('application/json')) return res.status(500).json({ ok: false, error: error.message });
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/delete', requireAuth, async (req, res) => {
+  try {
+    await Meeting.deleteOne({ externalId: req.params.id, userId: req.user.id });
+    res.redirect('/app?success=' + encodeURIComponent('Meeting deleted'));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.post('/meetings/:id/archive', requireAuth, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOne({ externalId: req.params.id, userId: req.user.id });
+    if (!meeting) return res.status(404).send('Meeting not found');
+    meeting.isArchived = !meeting.isArchived;
+    await meeting.save();
+    const back = req.body?.redirect || (meeting.isArchived ? '/app/meetings?view=archived' : '/app/meetings');
+    if (req.get('Accept')?.includes('application/json')) {
+      return res.json({ ok: true, isArchived: meeting.isArchived, message: meeting.isArchived ? 'Added to archive' : 'Removed from archive' });
+    }
+    res.redirect(back);
+  } catch (error) {
+    if (req.get('Accept')?.includes('application/json')) return res.status(500).json({ ok: false, error: error.message });
+    res.status(500).send(error.message);
+  }
+});
+
+
+
+app.get('/api/health', async (_req, res) => {
+  let mongo = mongoose.connection.readyState === 1;
+  let mongoError = null;
+  try {
+    await ensureMongoConnection();
+    mongo = true;
+  } catch (error) {
+    mongo = false;
+    mongoError = error?.message || String(error);
+    console.error('[health] MongoDB check failed:', error);
+  }
+
+  res.status(mongo ? 200 : 503).json({
+    ok: mongo,
+    mongo,
+    mongoState: mongoose.connection.readyState,
+    mongoError,
+    vercel: isVercel,
+    node: process.version,
+    deploymentVersion: '2026-09-16-vercel-mongo-auth-fix-01',
+    timestamp: new Date().toISOString(),
+    gemini: Boolean(geminiKey),
+    geminiModel,
+    geminiFallbacks: GEMINI_FALLBACKS,
+    lastGeminiOkAt,
+    lastGeminiError: lastGeminiError || null
+  });
+});
+
+// ─── Auth ───────────────────────────────────────────────────────────
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const result = await registerUser({
+      username: req.body.username,
+      passkey: req.body.passkey || req.body.password,
+      displayName: req.body.displayName,
+      email: req.body.email
+    });
+    console.log(`[auth] registered @${result.user?.username || req.body.username}`);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('[auth] register failed:', error.message);
+    res.status(error.status || 500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const label = req.body.label === 'extension' ? 'extension' : 'web';
+    const result = await loginUser({
+      username: req.body.username,
+      passkey: req.body.passkey || req.body.password,
+      label
+    });
+    console.log(`[auth] login @${result.username} (${label})`);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('[auth] login failed:', error.message);
+    res.status(error.status || 500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : (req.body?.token || '');
+    await logoutUser(token);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
+
+app.post('/api/auth/rotate-key', requireAuth, async (req, res) => {
+  try {
+    const user = await rotateApiKey(req.user.id);
+    res.json({ ok: true, user });
+  } catch (error) {
+    res.status(error.status || 500).json({ ok: false, error: error.message });
+  }
+});
+
+/** Quick manual test: curl -X POST http://localhost:4000/api/test-gemini */
+app.post('/api/test-gemini', async (_req, res) => {
+  console.log('\n>>> MANUAL Gemini test starting…');
+  try {
+    const text = await callGemini(
+      'Reply with exactly this JSON: {"ok":true,"message":"gemini works"}',
+      { json: true, purpose: 'manual-test' }
+    );
+    res.json({ ok: true, response: text.slice(0, 500) });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      status: error.status,
+      model: error.model,
+      lastGeminiError
+    });
+  }
+});
+
+app.get('/api/meetings', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const q = String(req.query.q || '').trim();
+    const view = String(req.query.view || 'all').toLowerCase();
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 100)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+    const filter = { userId };
+    if (view === 'favorites') {
+      filter.isFavorite = true;
+      filter.isArchived = { $ne: true };
+    } else if (view === 'archived') {
+      filter.isArchived = true;
+    } else {
+      filter.isArchived = { $ne: true };
+    }
+
+    // Search across the actual meeting workspace, not just title text.
+    // This supports titles, participants, transcript, AI summary, topics,
+    // decisions, action items and follow-ups from the My Meetings search box.
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp(safe, 'i');
+      filter.$or = [
+        { title: rx }, { platform: rx }, { meetingUrl: rx }, { fullTranscript: rx },
+        { 'participants.name': rx }, { 'participants.email': rx },
+        { 'ai.summary': rx }, { 'ai.detailedSummary': rx }, { 'ai.keyPoints': rx },
+        { 'ai.decisions': rx }, { 'ai.topics': rx }, { 'ai.followUps': rx },
+        { 'ai.actionItems.task': rx }, { 'ai.actionItems.owner': rx }
+      ];
+    }
+    const [meetings, total] = await Promise.all([
+      Meeting.find(filter).sort({ startedAt: -1 }).skip(offset).limit(limit).lean(),
+      Meeting.countDocuments(filter)
+    ]);
+    res.json({ ok: true, meetings, total, offset, limit, hasMore: offset + meetings.length < total, user: req.user });
+  } catch (error) {
+    console.error('[api] list meetings:', error.message);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/meetings/:id/status', requireAuth, async (req, res) => {
+  try {
+    const requestedId = String(req.params.id);
+    const state = meetingProcessingStates.get(requestedId);
+    const id = state?.aliasId || requestedId;
+    const meeting = await Meeting.findOne({ externalId: id, userId: req.user.id }).lean();
+    if (meeting) {
+      return res.json({ ok: true, status: 'completed', stage: 'ready', meetingId: id, meeting });
+    }
+    res.json({
+      ok: true,
+      status: state?.status || 'processing',
+      stage: state?.stage || 'waiting',
+      message: state?.message || 'Waiting for the final transcript…',
+      updatedAt: state?.updatedAt || null,
+      meetingId: id
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/meetings/:id', requireAuth, async (req, res) => {
+  try {
+    const meeting = await Meeting.findOneAndUpdate(
+      { externalId: req.params.id, userId: req.user.id },
+      { $inc: { viewCount: 1 } },
+      { returnDocument: 'after' }
+    ).lean();
+    if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
+    res.json({ ok: true, meeting });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+const PARTICIPANT_COLORS = ['#e07a3d', '#6bbf8a', '#e8a0a0', '#5b8def', '#c084fc', '#fbbf24', '#34d399'];
+
+function deriveParticipantsFromTranscript(transcript = [], fullText = '', durationSec = 0) {
+  const times = {};
+  if (Array.isArray(transcript) && transcript.length) {
+    for (const row of transcript) {
+      const name = String(row.speaker || row.name || 'Speaker').trim() || 'Speaker';
+      const start = Number(row.startTime || 0);
+      const end = Number(row.endTime || start);
+      const sec = Math.max(0, end - start) || Math.max(1, String(row.text || '').split(/\s+/).length * 0.4);
+      times[name] = (times[name] || 0) + sec;
+    }
+  } else if (fullText) {
+    // Heuristic: "Name: text" lines
+    const lines = String(fullText).split(/\n+/);
+    for (const line of lines) {
+      const m = line.match(/^([A-Z][A-Za-z0-9 ._-]{1,40})\s*:\s+(.+)$/);
+      if (!m) continue;
+      const name = m[1].trim();
+      const sec = Math.max(1, m[2].split(/\s+/).length * 0.4);
+      times[name] = (times[name] || 0) + sec;
+    }
+  }
+  const entries = Object.entries(times);
+  if (!entries.length) return [];
+  const total = entries.reduce((s, [, v]) => s + v, 0) || 1;
+  const scale = durationSec > 0 ? durationSec / total : 1;
+  return entries
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([name, sec], i) => {
+      const talkSeconds = Math.round(sec * scale);
+      return {
+        name,
+        email: '',
+        talkSeconds,
+        talkPercent: Math.round((sec / total) * 1000) / 10,
+        color: PARTICIPANT_COLORS[i % PARTICIPANT_COLORS.length]
+      };
+    });
+}
+
+app.post('/api/meetings/complete', requireAuth, async (req, res) => {
+  let processingId = String(req.body?.externalId || '');
+  try {
+    const data = normalizeMeetingBody({ ...req.body, userId: req.user.id });
+    processingId = data.externalId;
+
+    // Enforce monthly plan limits on the server. The extension UI is only a convenience;
+    // limits must never depend on client-side checks.
+    const existingForExternal = await Meeting.findOne({ externalId: data.externalId, userId: req.user.id }).select('_id').lean().catch(() => null);
+    const planCtx = await loadUserPlanContext(req.user);
+    const maxMeetings = planCtx.usage.meetingsMax;
+    if (!existingForExternal && !isUnlimited(maxMeetings) && planCtx.usage.meetingsUsed >= Number(maxMeetings)) {
+      return res.status(402).json({ ok: false, code: 'MEETING_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan allows ${maxMeetings} meetings per month. upgrade your plan to continue.` });
+    }
+    const teamWorkspace = String(planCtx.plan?.slug || '').toLowerCase() === 'team' ? await getWorkspaceForUser(req.user.id).catch(() => null) : null;
+    data.workspaceId = teamWorkspace ? String(teamWorkspace._id) : '';
+    data.visibility = String(req.body?.visibility || '').toLowerCase() === 'shared' && teamWorkspace ? 'shared' : 'private';
+
+    const maxMinutes = planCtx.usage.transcriptionMax;
+    const incomingMinutes = Math.ceil(Math.max(0, Number(data.duration || 0)) / 60);
+    if (!existingForExternal && !isUnlimited(maxMinutes) && (planCtx.usage.transcriptionMinutes + incomingMinutes) > Number(maxMinutes)) {
+      return res.status(402).json({ ok: false, code: 'TRANSCRIPTION_LIMIT_REACHED', error: `Your ${planCtx.plan?.name || 'Free'} plan has ${Math.max(0, Number(maxMinutes) - planCtx.usage.transcriptionMinutes)} transcription minutes remaining this month.` });
+    }
+
+    // Same externalId = same meeting. Never run two finalizers for it.
+    if (meetingProcessingLocks.has(processingId)) {
+      return await meetingProcessingLocks.get(processingId).then((result) => res.json(result));
+    }
+
+    const run = (async () => {
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'transcript', message: 'Transcript received. Saving your meeting…', updatedAt: Date.now()
+      });
+    data.participants = sanitizeParticipants(data.participants);
+    if (!data.participants?.length) {
+      data.participants = sanitizeParticipants(deriveParticipantsFromTranscript(
+        data.transcript,
+        data.fullTranscript,
+        data.duration
+      ));
+    } else {
+      const total = data.participants.reduce((s, p) => s + (p.talkSeconds || 0), 0);
+      data.participants = data.participants.map((p, i) => ({
+        ...p,
+        talkPercent: p.talkPercent || (total ? Math.round((p.talkSeconds / total) * 1000) / 10 : 0),
+        color: p.color || PARTICIPANT_COLORS[i % PARTICIPANT_COLORS.length]
+      }));
+    }
+    // Idempotency guard for duplicate extension stop/start signals. A single
+    // real meeting can sometimes produce two different client session IDs
+    // when the meeting UI fires both a Leave event and a tab lifecycle event.
+    // If the same user/platform/URL started within a short window, fold the
+    // later payload into the existing session instead of creating a second row.
+    let canonicalExternalId = data.externalId;
+    const startedMs = new Date(data.startedAt).getTime();
+    const recentWindowMs = 2 * 60 * 1000;
+    const recentFilter = {
+      userId: data.userId,
+      platform: data.platform,
+      startedAt: {
+        $gte: new Date(startedMs - recentWindowMs),
+        $lte: new Date(startedMs + recentWindowMs)
+      },
+      ...(data.meetingUrl
+        ? { meetingUrl: data.meetingUrl }
+        : { title: data.title })
+    };
+    const duplicateCandidate = await Meeting.findOne({
+      ...recentFilter,
+      externalId: { $ne: data.externalId }
+    }).sort({ startedAt: -1 });
+    if (duplicateCandidate) {
+      canonicalExternalId = duplicateCandidate.externalId;
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'transcript', aliasId: canonicalExternalId,
+        message: 'This meeting is already being finalized. Updating the existing meeting…', updatedAt: Date.now()
+      });
+      console.warn(`[api] duplicate session folded: ${data.externalId} -> ${canonicalExternalId}`);
+    }
+    data.externalId = canonicalExternalId;
+
+    console.log(`[api] complete user=@${req.user.username} externalId=${data.externalId} transcriptChars=${data.fullTranscript.length}`);
+
+    const meeting = await Meeting.findOneAndUpdate(
+      { externalId: data.externalId, userId: data.userId },
+      {
+        $set: {
+          ...data,
+          lastSyncError: '',
+          syncedAt: new Date()
+        }
+      },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+    );
+
+      meetingProcessingStates.set(processingId, {
+        status: 'processing', stage: 'analysis', message: 'Transcript received. Generating AI meeting insights…', updatedAt: Date.now()
+      });
+
+      // The analysis is deliberately performed after the transcript is persisted.
+      // AI summaries/actions are a Pro benefit; Free still gets the transcript and limited Ask AI.
+      const completionPlan = await loadUserPlanContext(req.user);
+      let analysis = meeting.ai || {};
+      let analysisReady = Boolean(analysis?.summary);
+      if (!completionPlan.plan?.featureFlags?.aiSummaries) {
+        meeting.ai = { ...(meeting.ai || {}), error: '', generatedAt: null };
+        await meeting.save();
+        meetingProcessingStates.set(processingId, {
+          status: 'completed', stage: 'ready', aliasId: data.externalId,
+          message: 'Your transcript is ready. AI meeting notes are available on Pro.', updatedAt: Date.now()
+        });
+        const freeResult = { ok: true, meeting: meeting.toObject(), analysisReady: false, analysisError: '' };
+        if (data.externalId !== processingId) meetingProcessingStates.set(data.externalId, { status: 'completed', stage: 'ready', aliasId: data.externalId, message: 'Your transcript is ready. AI meeting notes are available on Pro.', updatedAt: Date.now() });
+        setTimeout(() => { meetingProcessingStates.delete(processingId); if (data.externalId !== processingId) meetingProcessingStates.delete(data.externalId); }, 10 * 60 * 1000);
+        return freeResult;
+      }
+      try {
+        const generated = await analyzeTranscript(meeting);
+        analysis = { ...generated, generatedAt: new Date(), error: '' };
+        if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+        meeting.ai = analysis;
+        await meeting.save();
+        analysisReady = Boolean(analysis.summary) && !analysis.error;
+        logBanner('ok', 'Meeting saved + analyzed', `title="${meeting.title}" | analysisReady=${analysisReady}`);
+      } catch (error) {
+        logBanner('fail', 'Meeting saved but analysis FAILED', error.message);
+        meeting.ai = { ...(meeting.ai || {}), error: error.message, generatedAt: null };
+        meeting.lastSyncError = error.message;
+        await meeting.save();
+        analysis = meeting.ai;
+      }
+
+      const inAppMeetingUrl = `${appBaseUrl()}/meetings/${encodeURIComponent(data.externalId)}?tab=chat`;
+      const commonMeetingVars = {
+        displayName: req.user.displayName || req.user.username,
+        meetingTitle: meeting.title || 'Untitled meeting', platform: meeting.platform || 'Meeting',
+        meetingDate: formatUserDate(meeting.startedAt || meeting.createdAt), duration: meeting.duration ? `${Math.max(1, Math.round(meeting.duration / 60))} minutes` : '—',
+        meetingId: String(meeting.externalId || '').slice(-12), meetingUrlInApp: inAppMeetingUrl, meetingUrl: meeting.meetingUrl || ''
+      };
+      sendTemplateToUser(req.user.id, 'meeting-created', commonMeetingVars).catch(() => {});
+      if (analysisReady) {
+        sendTemplateToUser(req.user.id, 'meeting-summary-ready', { ...commonMeetingVars, summary: String(analysis.summary || '').slice(0, 1800) }).catch(() => {});
+        const actionItems = Array.isArray(analysis.actionItems) ? analysis.actionItems.filter(a => !a?.completed).slice(0, 8) : [];
+        if (actionItems.length) sendTemplateToUser(req.user.id, 'action-items-ready', { ...commonMeetingVars, actionCount: actionItems.length, actionItems: actionItems.map(a => `• ${a.task || 'Follow up'}${a.owner ? ` — ${a.owner}` : ''}${a.deadline ? ` · ${a.deadline}` : ''}`).join('\n') }).catch(() => {});
+      } else if (analysis?.error) {
+        sendTemplateToUser(req.user.id, 'meeting-processing-failed', { ...commonMeetingVars, error: String(analysis.error).slice(0, 1200) }).catch(() => {});
+      }
+
+      const result = {
+        ok: true,
+        meeting: meeting.toObject(),
+        analysisReady,
+        analysisError: analysis?.error || ''
+      };
+      const readyState = {
+        status: 'completed', stage: 'ready', aliasId: data.externalId,
+        message: analysisReady ? 'Your meeting is ready.' : 'Your meeting was saved. AI analysis can be retried.', updatedAt: Date.now()
+      };
+      meetingProcessingStates.set(processingId, readyState);
+      if (data.externalId !== processingId) meetingProcessingStates.set(data.externalId, readyState);
+      setTimeout(() => {
+        meetingProcessingStates.delete(processingId);
+        if (data.externalId !== processingId) meetingProcessingStates.delete(data.externalId);
+      }, 10 * 60 * 1000);
+      return result;
+    })();
+    meetingProcessingLocks.set(processingId, run);
+    try {
+      return res.json(await run);
+    } finally {
+      meetingProcessingLocks.delete(processingId);
+    }
+  } catch (error) {
+    console.error('[api] complete failed:', error.message);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/meetings/:id/analyze', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadUserPlanContext(req.user);
+    if (!ctx.plan?.featureFlags?.aiSummaries) return res.status(403).json({ ok: false, code: 'PRO_FEATURE', error: 'AI Summary is available on the Pro plan.' });
+    const meeting = await Meeting.findOne({
+      externalId: req.params.id,
+      userId: req.user.id
+    });
+    if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
+
+    console.log(`[api] re-analyze requested for ${req.params.id}`);
+    const generated = await analyzeTranscript(meeting);
+    if (generated.generatedTitle) meeting.title = generated.generatedTitle;
+    meeting.ai = { ...generated, generatedAt: new Date(), error: '' };
+    meeting.lastSyncError = '';
+    await meeting.save();
+    logBanner('ok', 'Re-analyze complete', `title="${meeting.title}"`);
+    res.json({ ok: true, meeting: meeting.toObject() });
+  } catch (error) {
+    logBanner('fail', 'Re-analyze FAILED', error.message);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/meetings/:id/chat', requireAuth, async (req, res) => {
+  try {
+    const memberWorkspace = await getWorkspaceForUser(req.user.id).catch(() => null);
+    const meeting = await Meeting.findOne({
+      $or: [
+        { externalId: req.params.id, userId: req.user.id },
+        ...(memberWorkspace ? [{ externalId: req.params.id, workspaceId: String(memberWorkspace._id), visibility: 'shared' }] : [])
+      ]
+    }).lean();
+    if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
+    const promptId = req.body.promptId ? String(req.body.promptId).trim() : null;
+    const question = String(req.body.question || '').trim();
+    if (!promptId && !question) {
+      return res.status(400).json({ ok: false, error: 'Question or promptId is required.' });
+    }
+    if (promptId && !MEETING_PROMPT_TEMPLATES[promptId]) {
+      return res.status(400).json({ ok: false, error: 'Unknown prompt template.' });
+    }
+    const chatCtx = await loadUserPlanContext(req.user);
+    if (!chatCtx.usage?.askAiAvailable) {
+      return res.status(403).json({ ok: false, code: 'FEATURE_NOT_AVAILABLE', error: 'Ask AI is not included in your current plan. Upgrade to Pro to use Ask AI.' });
+    }
+    if (!isUnlimited(chatCtx.usage.aiQuestionsMax) && chatCtx.usage.aiQuestions >= Number(chatCtx.usage.aiQuestionsMax)) {
+      return res.status(402).json({ ok: false, code: 'AI_QUESTION_LIMIT_REACHED', error: `You have reached your ${chatCtx.plan?.name || 'Free'} plan limit of ${chatCtx.usage.aiQuestionsMax} AI questions this month.` });
+    }
+    const answer = await answerMeetingQuestion(meeting, question || MEETING_PROMPT_TEMPLATES[promptId]?.label, promptId);
+    const chatNow = new Date();
+    const monthKey = `${chatNow.getFullYear()}-${String(chatNow.getMonth() + 1).padStart(2, '0')}`;
+    const chatUser = await User.findById(req.user.id).select('askAiUsageMonth askAiUsageCount').lean().catch(() => null);
+    if (chatUser?.askAiUsageMonth === monthKey) {
+      await User.updateOne({ _id: req.user.id }, { $inc: { askAiUsageCount: 1 } }).catch(() => {});
+    } else {
+      await User.updateOne({ _id: req.user.id }, { $set: { askAiUsageMonth: monthKey, askAiUsageCount: 1 } }).catch(() => {});
+    }
+    console.log(`[api] chat OK meeting=${req.params.id} prompt=${promptId || 'free'}`);
+    res.json({
+      ok: true,
+      answer,
+      promptId: promptId || null,
+      promptLabel: promptId ? MEETING_PROMPT_TEMPLATES[promptId].label : null
+    });
+  } catch (error) {
+    console.error(`[api] chat FAIL meeting=${req.params.id}:`, error.message);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.patch('/api/meetings/:id', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const allowed = {};
+    for (const key of ['title', 'notes']) if (req.body[key] !== undefined) allowed[key] = String(req.body[key]);
+    if (req.body.ai) allowed.ai = req.body.ai;
+    if (req.body.isFavorite !== undefined) allowed.isFavorite = Boolean(req.body.isFavorite);
+    if (req.body.isArchived !== undefined) allowed.isArchived = Boolean(req.body.isArchived);
+    if (!Object.keys(allowed).length) {
+      return res.status(400).json({ ok: false, error: 'No valid fields to update.' });
+    }
+    const meeting = await Meeting.findOneAndUpdate(
+      { externalId: req.params.id, userId },
+      { $set: allowed },
+      { returnDocument: 'after' }
+    ).lean();
+    if (!meeting) return res.status(404).json({ ok: false, error: 'Meeting not found.' });
+    res.json({ ok: true, meeting });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.delete('/api/meetings/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await Meeting.deleteOne({
+      externalId: req.params.id,
+      userId: req.user.id
+    });
+    res.json({ ok: true, deleted: result.deletedCount > 0 });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// Vercel imports the Express app and invokes it per request. Starting a
+// listening socket inside the serverless runtime causes FUNCTION_INVOCATION_FAILED.
+// Keep app.listen() only for local development.
+export default app;
+
+if (!isVercel) {
+  ensureMongoConnection()
+    .then(() => {
+      app.listen(port, '0.0.0.0', () => {
+        console.log(`AI Note Taker API listening on http://0.0.0.0:${port}`);
+        console.log(`Mongo: connected | Gemini key: ${geminiKey ? 'set' : 'MISSING'}`);
+        console.log(`Gemini models (in order): ${GEMINI_FALLBACKS.join(' → ')}`);
+        console.log(`Landing: http://localhost:${port}/  | Admin: admin / admin123`);
+      });
+    })
+    .catch((error) => {
+      console.error('MongoDB connection failed:', error.message);
+      console.error('Local server will not start until MongoDB is available.');
+    });
+}
