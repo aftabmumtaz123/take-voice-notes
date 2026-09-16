@@ -1,0 +1,113 @@
+<%- include("../partials/header", { title: (isNew ? "Create plan" : "Edit plan") + " · Admin", bodyClass: "app-shell" }) %>
+<%
+  const p = plan || {};
+  const flags = p.featureFlags || {};
+  function flagChecked(key, def) {
+    if (flags[key] === undefined) return def ? 'checked' : '';
+    return flags[key] ? 'checked' : '';
+  }
+  function limitVal(v) {
+    if (v == null || v < 0 || v >= 9999) return '';
+    return v;
+  }
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "plans" }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <a class="back" href="/admin/plans">← Plans &amp; Billing</a>
+        <h1 style="margin-top:8px"><%= isNew ? 'Create plan' : ('Edit ' + (p.name || 'plan')) %></h1>
+        <p class="admin-sub">Pricing, usage limits, and feature flags for this subscription tier.</p>
+      </div>
+    </header>
+
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <form method="POST" action="<%= isNew ? '/admin/plans' : ('/admin/plans/' + p._id) %>" class="plan-editor card section-card">
+      <h2>Basic information</h2>
+      <div class="form-row">
+        <label>Plan name
+          <input name="name" required value="<%= p.name || '' %>" placeholder="Pro" />
+        </label>
+        <label>Internal slug
+          <input name="slug" value="<%= p.slug || '' %>" placeholder="pro" <%= isNew ? '' : 'readonly' %> />
+        </label>
+      </div>
+      <label>Description
+        <input name="description" value="<%= p.description || '' %>" placeholder="For professionals who need advanced AI meeting intelligence." />
+      </label>
+
+      <hr class="form-divider" />
+
+      <h2>Pricing</h2>
+      <div class="form-row">
+        <label>Monthly price (USD)
+          <input name="priceMonthly" type="number" min="0" step="0.01" value="<%= p.priceMonthly != null ? p.priceMonthly : 0 %>" />
+        </label>
+        <label>Annual price (USD)
+          <input name="priceAnnual" type="number" min="0" step="0.01" value="<%= p.priceAnnual != null ? p.priceAnnual : 0 %>" />
+        </label>
+      </div>
+
+      <hr class="form-divider" />
+
+      <h2>Usage limits</h2>
+      <p class="muted" style="margin:0 0 10px;font-size:13px">Leave blank for <strong>Unlimited</strong>.</p>
+      <div class="form-row">
+        <label>Meetings / month
+          <input name="maxMeetingsPerMonth" type="number" min="0" placeholder="Unlimited" value="<%= limitVal(p.maxMeetingsPerMonth) %>" />
+        </label>
+        <label>Transcription minutes
+          <input name="maxTranscriptionMinutes" type="number" min="0" placeholder="Unlimited" value="<%= limitVal(p.maxTranscriptionMinutes) %>" />
+        </label>
+        <label>AI questions / month
+          <input name="maxAiQuestions" type="number" min="0" placeholder="Unlimited" value="<%= limitVal(p.maxAiQuestions) %>" />
+        </label>
+        <label>Storage (GB)
+          <input name="maxStorageGb" type="number" min="0" step="0.5" placeholder="Unlimited" value="<%= limitVal(p.maxStorageGb) %>" />
+        </label>
+      </div>
+
+      <hr class="form-divider" />
+
+      <h2>Features</h2>
+      <div class="feature-grid">
+        <label class="check-label"><input type="checkbox" name="flag_liveTranscription" value="on" <%= flagChecked('liveTranscription', true) %> /> Live transcription</label>
+        <label class="check-label"><input type="checkbox" name="flag_aiSummaries" value="on" <%= flagChecked('aiSummaries', true) %> /> AI summaries</label>
+        <label class="check-label"><input type="checkbox" name="flag_actionItems" value="on" <%= flagChecked('actionItems', true) %> /> Action items</label>
+        <label class="check-label"><input type="checkbox" name="flag_askAi" value="on" <%= flagChecked('askAi', false) %> /> Ask AI</label>
+        <label class="check-label"><input type="checkbox" name="flag_aiInsights" value="on" <%= flagChecked('aiInsights', false) %> /> AI Insights</label>
+        <label class="check-label"><input type="checkbox" name="flag_pdfExport" value="on" <%= flagChecked('pdfExport', false) %> /> PDF export</label>
+        <label class="check-label"><input type="checkbox" name="flag_markdownExport" value="on" <%= flagChecked('markdownExport', false) %> /> Markdown export</label>
+        <label class="check-label"><input type="checkbox" name="flag_txtExport" value="on" <%= flagChecked('txtExport', true) %> /> TXT export</label>
+        <label class="check-label"><input type="checkbox" name="flag_teamWorkspace" value="on" <%= flagChecked('teamWorkspace', false) %> /> Team workspace</label>
+        <label class="check-label"><input type="checkbox" name="flag_adminDashboard" value="on" <%= flagChecked('adminDashboard', false) %> /> Admin dashboard</label>
+      </div>
+
+      <label style="margin-top:14px">Feature list (shown on pricing cards, one per line)
+        <textarea name="features" rows="5" placeholder="Unlimited meetings&#10;Detailed AI analysis"><%= (p.features || []).join('\n') %></textarea>
+      </label>
+
+      <hr class="form-divider" />
+
+      <h2>Status</h2>
+      <div class="form-row">
+        <label class="check-label"><input type="checkbox" name="isActive" value="on" <%= p.isActive !== false ? 'checked' : '' %> /> Active</label>
+        <label class="check-label"><input type="checkbox" name="isRecommended" value="on" <%= p.isRecommended ? 'checked' : '' %> /> Mark as recommended (Most popular)</label>
+        <label>Sort order
+          <input name="sortOrder" type="number" value="<%= p.sortOrder != null ? p.sortOrder : 0 %>" />
+        </label>
+      </div>
+
+      <div class="plan-editor-actions">
+        <button type="submit" class="btn-primary"><%= isNew ? 'Create plan' : 'Save changes' %></button>
+        <a class="btn-ghost" href="/admin/plans">Cancel</a>
+        <% if (!isNew && p.slug !== 'free') { %>
+          <button type="submit" formaction="/admin/plans/<%= p._id %>/delete" class="btn-danger" onclick="return confirm('Delete this plan?')">Delete plan</button>
+        <% } %>
+      </div>
+    </form>
+  </div>
+</div>
+<%- include("../partials/footer") %>

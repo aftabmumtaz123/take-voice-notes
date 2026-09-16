@@ -1,0 +1,80 @@
+<%- include("partials/header", { title: "Manage subscription", bodyClass: "app-shell" }) %>
+<%
+  const p = plan || {};
+  const sub = subscription || null;
+  const isScheduled = Boolean(sub?.cancelAtPeriodEnd);
+  const pro = plans.find((x) => x.slug === 'pro') || p;
+  const team = teamPlan || null;
+  const currentPlan = String(planSlug || 'free').toLowerCase();
+  const price = Number(pro?.priceMonthly || 0);
+  const annual = Number(pro?.priceAnnual || 0);
+  const teamPrice = Number(team?.priceMonthly || 29);
+  const teamCurrency = team?.currency === 'USD' ? '$' : (team?.currency || '');
+  const currency = (currentPlan === 'team' ? team : pro)?.currency === 'USD' ? '$' : ((currentPlan === 'team' ? team : pro)?.currency || '');
+  const billingInterval = sub?.billingInterval === 'year' ? 'year' : 'month';
+  const billingPrice = billingInterval === 'year' ? (currentPlan === 'team' ? Number(team?.priceAnnual || 290) : annual) : (currentPlan === 'team' ? teamPrice : price);
+  const hasPending = Boolean(pendingRequest);
+  const pendingName = pendingRequest?.requestedPlanId?.name || pendingRequest?.requestedPlanSlug || 'Pro';
+  const pendingSlug = String(pendingRequest?.requestedPlanSlug || '').toLowerCase();
+  const teamAvailable = Boolean(team?.isActive);
+%>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "subscription", settings, usage: (usage || {}), q: "" }) %>
+  <div class="main tactiq-main subscription-page">
+    <header class="main-top page-head subscription-hero">
+      <div><p class="eyebrow">ACCOUNT</p><h1>Manage subscription</h1><p class="admin-sub">Manage your plan, billing cycle, and subscription status.</p></div>
+      <a class="btn-ghost" href="/app/usage"><span class="material-symbols-outlined">arrow_back</span> Back to Usage &amp; Plan</a>
+    </header>
+    <% if (success) { %><div class="subscription-flash ok"><span class="material-symbols-outlined">check_circle</span><%= success %></div><% } %>
+    <% if (error) { %><div class="subscription-flash error"><span class="material-symbols-outlined">error</span><%= error %></div><% } %>
+
+    <section class="subscription-section">
+      <div class="subscription-section-head"><p class="eyebrow">CURRENT PLAN</p><h2>Your subscription</h2></div>
+      <div class="current-subscription-card <%= isScheduled ? 'is-cancelling' : '' %>">
+        <div class="current-subscription-top">
+          <div><span class="subscription-plan-mark">✦</span><div><h3><%= p.name || 'Free' %></h3><span class="subscription-current-pill">CURRENT PLAN</span></div></div>
+          <strong class="subscription-price"><%= (currentPlan === 'pro' || currentPlan === 'team') ? `${currency}${billingPrice}/${billingInterval}` : '$0/month' %></strong>
+        </div>
+        <div class="subscription-status-row"><span class="status-dot"></span><strong><%= isScheduled ? 'Cancellation scheduled' : 'Active' %></strong><% if (isScheduled) { %><span class="scheduled-chip">Ends <%= formatDate(currentPeriodEnd) %></span><% } %></div>
+        <% if (currentPlan === 'pro' || currentPlan === 'team') { %>
+          <div class="subscription-benefit-list"><span>Unlimited meetings</span><span>Unlimited transcription</span><span>AI summaries</span><span>Action items</span><span>Ask AI</span><span>AI Insights</span><span>PDF, Markdown &amp; TXT exports</span><% if (currentPlan === 'team') { %><span>Team workspace &amp; shared meetings</span><span>Team analytics</span><% } %></div>
+          <div class="subscription-period"><span>Next billing</span><strong><%= formatDate(currentPeriodEnd) %></strong></div>
+        <% } else { %>
+          <div class="subscription-benefit-list"><span>3 meetings / month</span><span>30 min transcription / month</span><span>Basic meeting features</span></div>
+          <div class="subscription-period"><span>Billing</span><strong>No paid subscription</strong></div>
+        <% } %>
+      </div>
+      <% if (isTeam && !isTeamOwner) { %><div class="team-member-billing-note"><span class="material-symbols-outlined">groups</span><div><strong>Team workspace subscription</strong><p>Your Team access is managed by <%= teamWorkspace?.role === 'admin' ? 'the workspace owner' : 'the workspace owner' %>. Contact them for billing or plan changes.</p></div></div><% } %>
+      <div class="subscription-primary-actions">
+        <% if (isTeamOwner) { %><a class="btn-primary" href="#change-plan"><span class="material-symbols-outlined">swap_horiz</span> Change plan</a><% } %>
+        <% if ((currentPlan === 'pro' || currentPlan === 'team') && isTeamOwner) { %>
+          <% if (isScheduled) { %><form method="POST" action="/billing/subscription/undo-cancellation"><button class="btn-ghost" type="submit"><span class="material-symbols-outlined">undo</span> Keep Pro</button></form>
+          <% } else { %><a class="btn-ghost danger-soft" href="#cancellation"><span class="material-symbols-outlined">event_busy</span> Manage cancellation</a><% } %>
+        <% } %>
+      </div>
+    </section>
+
+    <% if (isTeamOwner) { %><section class="subscription-section" id="change-plan">
+      <div class="subscription-section-head"><p class="eyebrow">CHANGE PLAN</p><h2>Choose your plan</h2><p>Plan changes are currently reviewed by our team. Nothing changes until a request is approved.</p></div>
+      <div class="subscription-plan-grid">
+        <article class="subscription-choice <%= currentPlan === 'free' ? 'current' : '' %>"><div class="choice-head"><div><h3>Free</h3><span class="choice-badge">$0/month</span></div><% if (currentPlan === 'free') { %><b class="choice-current">CURRENT PLAN</b><% } %></div><ul><li>3 meetings/month</li><li>30 min transcription</li><li>Basic features</li></ul><% if (currentPlan === 'free') { %><button class="btn-ghost full" disabled>Current plan</button><% } else { %><a class="btn-ghost full" href="#cancellation">Switch to Free</a><% } %></article>
+        <article class="subscription-choice pro-choice <%= currentPlan === 'pro' ? 'current' : '' %>"><div class="choice-head"><div><h3>Pro</h3><span class="choice-badge"><%= currency %><%= price %>/month</span></div><% if (currentPlan === 'pro') { %><b class="choice-current">YOUR PLAN</b><% } %></div><ul><li>Unlimited meetings</li><li>Unlimited transcription</li><li>AI summaries</li><li>Action items</li><li>Ask AI</li><li>AI Insights</li><li>PDF, Markdown &amp; TXT exports</li></ul><% if (currentPlan === 'pro') { %><button class="btn-primary full" disabled>Current plan</button><% } else if (hasPending && pendingSlug === 'pro') { %><button class="btn-ghost full" disabled>Request pending</button><% } else { %><button class="btn-primary full" type="button" data-open-request="pro">Request Pro upgrade — <%= currency %><%= price %>/month</button><% } %></article>
+        <article class="subscription-choice <%= !teamAvailable ? 'unavailable' : '' %>"><div class="choice-head"><div><h3>Team</h3><span class="choice-badge"><%= team ? `${teamCurrency}${teamPrice}/month` : 'Custom' %></span></div><b class="choice-current neutral"><%= teamAvailable ? 'AVAILABLE' : 'COMING SOON' %></b></div><ul><li>Everything in Pro</li><li>Team workspace</li><li>Shared meetings</li><li>Team analytics</li></ul><% if (teamAvailable) { %><% if (hasPending && pendingSlug === 'team') { %><button class="btn-ghost full" disabled>Request pending</button><% } else { %><button class="btn-primary full" type="button" data-open-request="team">Request Team — <%= teamCurrency %><%= teamPrice %>/month</button><% } %><% } else { %><button class="btn-ghost full" disabled>Not available yet</button><% } %></article>
+      </div>
+    </section>
+
+    </section><% } %>
+
+    <section class="subscription-section request-section" id="request-panel" hidden><div class="request-panel"><div class="subscription-section-head"><p class="eyebrow">REQUEST PLAN CHANGE</p><h2 id="request-title">Request plan change</h2><p>Plan changes are currently reviewed by our team.</p></div><form method="POST" action="/billing/change-plan-request"><input type="hidden" name="planSlug" id="request-plan-slug" value="pro"><div class="request-summary"><strong>You’re requesting:</strong><span id="request-from-to"><%= currentPlan === 'pro' ? 'Pro → Pro' : 'Free → Pro' %></span></div><div class="request-form-grid"><label>Billing cycle<select name="billingInterval"><option value="month">Monthly</option><option value="year">Yearly</option></select></label><label id="workspace-name-wrap" hidden>Workspace name<input type="text" name="workspaceName" maxlength="100" placeholder="e.g. Avicenna Development"></label><label id="seat-wrap" hidden>Seats<input type="number" name="seats" min="1" max="500" value="5"></label><label>Reason — optional<textarea name="note" rows="3" maxlength="1000" placeholder="I'd like to use this plan for my project."></textarea></label></div><div class="request-actions"><button class="btn-primary" type="submit">Submit request</button><button class="btn-ghost" type="button" data-close-request>Cancel</button></div><p class="form-note">No charge is made by this form. An administrator will verify the request and activate the plan if approved.</p></form></div></section>
+
+    <% if (hasPending) { %><section class="subscription-section"><div class="pending-request-card"><div class="pending-icon"><span class="material-symbols-outlined">hourglass_top</span></div><div><p class="eyebrow">PLAN CHANGE PENDING</p><h2>Under review</h2><p>You requested <strong><%= currentPlan %> → <%= pendingName %></strong>.</p><div class="pending-meta"><span><strong>Submitted</strong> <%= formatDate(pendingRequest.createdAt) %></span><span><strong>Billing</strong> <%= pendingRequest.billingInterval === 'year' ? 'Yearly' : 'Monthly' %></span></div></div><form method="POST" action="/billing/upgrade-request/<%= pendingRequest._id %>/cancel" onsubmit="return confirm('Cancel this plan-change request?')"><button class="btn-ghost" type="submit">Cancel request</button></form></div></section><% } %>
+
+    <% if ((currentPlan === 'pro' || currentPlan === 'team') && isTeamOwner) { %><section class="subscription-section" id="cancellation"><div class="subscription-section-head"><p class="eyebrow">CANCELLATION</p><h2>Manage cancellation</h2><p>Cancellation is scheduled for the end of your current billing period. You keep <%= currentPlan === 'team' ? 'Team' : 'Pro' %> access until then.</p></div><% if (isScheduled) { %><div class="cancellation-scheduled-card"><span class="material-symbols-outlined">event_available</span><div><h3>Cancellation scheduled</h3><p>Your subscription will remain active until <strong><%= formatDate(currentPeriodEnd) %></strong>. You won't be charged for the next billing period.</p></div><form method="POST" action="/billing/subscription/undo-cancellation"><button class="btn-primary" type="submit">Keep Pro</button></form></div><% } else { %><div class="cancellation-card"><div class="cancellation-summary"><strong>Current plan:</strong> <%= currentPlan === 'team' ? 'Team' : 'Pro' %> · <%= currency %><%= billingPrice %>/<%= billingInterval %><br><strong>Next billing:</strong> <%= formatDate(currentPeriodEnd) %></div><h3>What happens after cancellation?</h3><ul><li>Keep <%= currentPlan === 'team' ? 'Team' : 'Pro' %> until <%= formatDate(currentPeriodEnd) %></li><li>Keep your existing meetings</li><li>Keep your transcripts</li><li>Keep your AI notes</li><li>Lose <%= currentPlan === 'team' ? 'Team-only features after the subscription ends' : 'Pro-only features after the subscription ends' %></li></ul><form method="POST" action="/billing/subscription/cancel" class="cancellation-form" onsubmit="return confirm('Schedule cancellation at the end of your current billing period?')"><fieldset><legend>Why are you cancelling? <span>Optional</span></legend><label><input type="radio" name="reason" value="Too expensive"> Too expensive</label><label><input type="radio" name="reason" value="Not using it enough"> Not using it enough</label><label><input type="radio" name="reason" value="Missing a feature"> Missing a feature</label><label><input type="radio" name="reason" value="Technical issues"> Technical issues</label><label><input type="radio" name="reason" value="Switching to another product"> Switching to another product</label><label><input type="radio" name="reason" value="Other"> Other</label></fieldset><label>Additional feedback<textarea name="feedback" rows="3" maxlength="1000" placeholder="Tell us more..."></textarea></label><div class="cancellation-actions"><button class="btn-ghost" type="button" onclick="location.href='/app/subscription'">Keep Pro</button><button class="btn-danger" type="submit">Continue cancellation</button></div></form></div><% } %></section><% } %>
+
+    <section class="subscription-section management-note"><div class="manual-billing-note"><span class="material-symbols-outlined">verified_user</span><div><strong>Manual plan review</strong><p>Plan changes are currently reviewed by our team. This page does not process payments automatically.</p></div></div></section>
+  </div>
+</div>
+<script>
+(() => { const panel=document.getElementById('request-panel'), slug=document.getElementById('request-plan-slug'), title=document.getElementById('request-title'), fromTo=document.getElementById('request-from-to'), workspaceWrap=document.getElementById('workspace-name-wrap'), seatWrap=document.getElementById('seat-wrap'), current=<%- JSON.stringify(currentPlan) %>; document.querySelectorAll('[data-open-request]').forEach(btn=>btn.addEventListener('click',()=>{const target=btn.dataset.openRequest;if(!panel)return;slug.value=target;title.textContent=target==='pro'?'Upgrade to Pro':'Request Team workspace';fromTo.textContent=`${current.charAt(0).toUpperCase()+current.slice(1)} → ${target.charAt(0).toUpperCase()+target.slice(1)}`; if(workspaceWrap) workspaceWrap.hidden=target!=='team'; if(seatWrap) seatWrap.hidden=target!=='team'; panel.hidden=false;panel.scrollIntoView({behavior:'smooth',block:'start'}); })); document.querySelector('[data-close-request]')?.addEventListener('click',()=>{panel.hidden=true;}); })();
+</script>
+<%- include("partials/footer") %>

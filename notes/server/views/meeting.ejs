@@ -1,0 +1,415 @@
+<%- include("partials/header", { title: meeting.title || "Meeting", bodyClass: "app-shell" }) %>
+<% const ai = meeting.ai || {}; const u = typeof usage !== 'undefined' && usage ? usage : { isPaid: false, askAiAvailable: false }; const planFlags = (typeof plan !== 'undefined' && plan?.featureFlags) || {}; const mins = Math.max(0, Math.round((meeting.duration || 0) / 60)); %>
+<div class="shell">
+  <%- include("partials/sidebar", { user, activeNav: "meetings", settings: typeof settings !== 'undefined' ? settings : null, usage: typeof usage !== 'undefined' ? usage : null, q: "" }) %>
+  <div class="main">
+    <header class="main-top">
+      <a class="back" href="/app/meetings">← Back to My Meetings</a>
+      <% if (String(plan?.slug || '').toLowerCase() === 'team' && meeting.userId === String(user.id)) { %>
+        <form method="POST" action="/billing/team/meetings/<%= meeting.externalId %>/<%= meeting.visibility === 'shared' ? 'unshare' : 'share' %>" style="display:inline"><button type="submit" class="btn-ghost"><span class="material-symbols-outlined"><%= meeting.visibility === 'shared' ? 'lock' : 'group' %></span><%= meeting.visibility === 'shared' ? 'Private' : 'Share with Team' %></button></form>
+      <% } %>
+      <div class="main-actions">
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/favorite" style="display:inline">
+          <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
+          <button type="submit" class="btn-ghost"><%= meeting.isFavorite ? '★ Favourited' : '☆ Favourite' %></button>
+        </form>
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/archive" style="display:inline">
+          <input type="hidden" name="redirect" value="/meetings/<%= meeting.externalId %>" />
+          <button type="submit" class="btn-ghost"><%= meeting.isArchived ? '↩ Unarchive' : 'Archive' %></button>
+        </form>
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/delete" style="display:inline" onsubmit="return confirm('Delete this meeting permanently?');">
+          <button type="submit" class="btn-danger">Delete</button>
+        </form>
+        <% if (planFlags.pdfExport) { %>
+          <a class="btn-primary" href="/meetings/<%= meeting.externalId %>/export.pdf" target="_blank">Export PDF</a>
+        <% } else { %>
+          <a class="btn-ghost" href="/app/usage" title="Pro feature">Export ✦ PRO</a>
+        <% } %>
+      </div>
+    </header>
+
+    <%
+      const participantUiPattern = /\b(?:mute|unmute|microphone|camera|speaker|device|devices|more actions|more options|settings|leave|end meeting|share screen|presenting|raise hand|captions|chat|you can't|can't unmute)\b/i;
+      const participantIgnore = new Set(['you','me','host','co-host','presenter','participant','participants','meeting','devices','more_vert','more actions','more options']);
+      const parts = [];
+      const seenPartNames = new Set();
+      (Array.isArray(meeting.participants) ? meeting.participants : []).forEach(function(p){
+        let name = String(p && p.name || '').replace(/\s+/g, ' ').trim();
+        name = name.replace(/\s*\((?:you|me)\)\s*$/i, '').trim();
+        const key = name.toLocaleLowerCase();
+        if (!name || name.length > 80 || participantIgnore.has(key) || participantUiPattern.test(name)) return;
+        if (name.split(' ').length > 6 || /https?:\/\//i.test(name) || /[{}<>]/.test(name)) return;
+        if ((name.match(/[.!?]/g) || []).length > 1 || seenPartNames.has(key)) return;
+        seenPartNames.add(key);
+        parts.push(Object.assign({}, p, { name: name }));
+      });
+      let talkTotal = parts.reduce(function(s, p){ return s + (Number(p.talkSeconds) || 0); }, 0);
+      const partColors = ['#e07a3d', '#6bbf8a', '#e8a0a0', '#5b8def', '#c084fc', '#fbbf24'];
+      function conicStops(list) {
+        if (!list.length) return '#e5e7eb 0 100%';
+        let acc = 0;
+        const total = list.reduce(function(s, p){ return s + (Number(p.talkPercent) || Number(p.talkSeconds) || 1); }, 0) || 1;
+        return list.map(function(p, i) {
+          const share = ((Number(p.talkPercent) || ((Number(p.talkSeconds) || 1) / total * 100)));
+          const start = acc;
+          acc += share;
+          const c = p.color || partColors[i % partColors.length];
+          return c + ' ' + start + '% ' + acc + '%';
+        }).join(', ');
+      }
+    %>
+
+    <div class="meeting-top-grid">
+      <div class="hero-card card">
+        <div class="kicker"><%= meeting.platform || "Manual" %> · MEETING NOTES</div>
+        <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
+        <p class="meta">
+          <%= meeting.startedAt ? new Date(meeting.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
+          · <%= mins %> minutes
+          · <%= ai.summary ? '✦ AI summary ready' : 'Transcript saved' %>
+        </p>
+        <div class="feature-pills">
+          <span class="fpill">✓ Transcript</span>
+          <span class="fpill <%= planFlags.aiSummaries ? '' : 'pro' %>"><%= planFlags.aiSummaries ? '✓' : '✦ PRO' %> AI Summary</span>
+          <span class="fpill <%= planFlags.actionItems ? '' : 'pro' %>"><%= planFlags.actionItems ? '✓' : '✦ PRO' %> Action Items</span>
+          <span class="fpill <%= u.askAiAvailable ? '' : 'pro' %>"><%= u.askAiAvailable ? '✓' : '✦ PRO' %> Ask AI</span>
+        </div>
+      </div>
+
+      <aside class="card participants-card">
+        <div class="participants-head">
+          <strong>Participants</strong>
+          <span class="part-count"><%= parts.length || 0 %></span>
+        </div>
+        <div class="participants-donut-wrap">
+          <div class="participants-donut" style="background: conic-gradient(<%= conicStops(parts) %>);">
+            <div class="participants-donut-hole">
+              <strong><%= mins || 0 %></strong>
+              <span>min</span>
+            </div>
+          </div>
+        </div>
+        <% if (parts.length) { %>
+          <ul class="participants-list">
+            <% parts.forEach(function(p, i) {
+              const pct = p.talkPercent || (talkTotal ? Math.round((p.talkSeconds / talkTotal) * 100) : 0);
+              const c = p.color || partColors[i % partColors.length];
+            %>
+              <li>
+                <span class="part-dot" style="background:<%= c %>"></span>
+                <span class="part-name" title="<%= p.name %>"><%= p.name %></span>
+                <span class="part-bar"><span style="width:<%= Math.min(100, pct) %>%;background:<%= c %>"></span></span>
+                <span class="part-pct"><%= p.talkSeconds ? pct + '%' : '—' %></span>
+              </li>
+            <% }) %>
+          </ul>
+        <% } else { %>
+          <p class="muted" style="font-size:13px;margin:8px 0 0">Participant talk-time appears when speaker labels are in the transcript or sent from the extension / Google Meet.</p>
+        <% } %>
+      </aside>
+    </div>
+
+    <div class="tabs" data-tabs>
+      <button type="button" class="tab active" data-tab="summary">AI Summary<%= planFlags.aiSummaries ? '' : ' · PRO' %></button>
+      <button type="button" class="tab" data-tab="transcript">Transcript</button>
+      <button type="button" class="tab" data-tab="actions">Action Items<%= planFlags.actionItems ? '' : ' · PRO' %></button>
+      <button type="button" class="tab" data-tab="chat">Ask AI<%= usage.askAiAvailable ? '' : ' · PRO' %></button>
+      <button type="button" class="tab" data-tab="notes">Notes</button>
+    </div>
+
+    <div class="tab-panel active" data-panel="summary">
+      <% const discussion = Array.isArray(ai.discussionDetails) ? ai.discussionDetails : []; %>
+      <% const decisionDetails = Array.isArray(ai.decisionDetails) ? ai.decisionDetails : []; %>
+      <% const conflicts = Array.isArray(ai.conflicts) ? ai.conflicts : []; %>
+      <% const openQuestions = Array.isArray(ai.openQuestions) ? ai.openQuestions : []; %>
+      <% const followUps = Array.isArray(ai.followUps) ? ai.followUps : []; %>
+      <% const risks = Array.isArray(ai.risks) ? ai.risks : []; %>
+      <% const topics = Array.isArray(ai.topics) ? ai.topics : []; %>
+
+      <section class="card section-card">
+        <h2>Executive summary</h2>
+        <% if (!planFlags.aiSummaries) { %>
+          <div class="pro-gate inline"><p>AI Summary is included with <strong>Pro</strong>.</p><a class="btn-primary" href="/app/usage#compare-plans">See Pro plan</a></div>
+        <% } else if (ai.summary) { %>
+          <div class="long-summary"><% String(ai.summary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+        <% } else { %>
+          <p class="muted">No summary yet. Use Retry analysis below or re-save from the extension.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Detailed summary</h2>
+        <% if (ai.detailedSummary) { %>
+          <div class="long-summary"><% String(ai.detailedSummary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+        <% } else if (ai.summary) { %>
+          <p class="muted">Detailed summary not generated yet. Click <strong>Retry analysis</strong> to regenerate a richer write-up.</p>
+        <% } else { %>
+          <p class="muted">No detailed summary available.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Discussion breakdown</h2>
+        <% if (discussion.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Topic</th><th>What was discussed</th><th>Outcome</th></tr></thead>
+            <tbody>
+              <% discussion.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.topic || "—" %></strong></td>
+                  <td><%= x.details || "—" %></td>
+                  <td><%= x.outcome || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">No discussion breakdown identified yet.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Key points</h2>
+        <% if (ai.keyPoints && ai.keyPoints.length) { %>
+          <ul class="bullet-list"><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Decisions</h2>
+        <% if (decisionDetails.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Decision</th><th>Rationale / context</th></tr></thead>
+            <tbody>
+              <% decisionDetails.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.decision || "—" %></strong></td>
+                  <td><%= x.rationale || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else if (ai.decisions && ai.decisions.length) { %>
+          <ul class="bullet-list"><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Action items</h2>
+        <% if (ai.actionItems && ai.actionItems.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Status</th><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+            <tbody>
+              <% ai.actionItems.forEach(function(a){ %>
+                <tr>
+                  <td><%= a.completed ? "✓ Complete" : "☐ Open" %></td>
+                  <td><strong><%= a.task || "—" %></strong></td>
+                  <td><%= a.owner || "Not specified" %></td>
+                  <td><%= a.deadline || "Not specified" %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">None identified yet.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Conflicts &amp; differing viewpoints</h2>
+        <% if (conflicts.length) { %>
+          <div class="table-wrap"><table class="ai-table">
+            <thead><tr><th>Topic</th><th>Perspectives</th><th>Impact</th><th>Resolution</th><th>Status</th></tr></thead>
+            <tbody>
+              <% conflicts.forEach(function(x){ %>
+                <tr>
+                  <td><strong><%= x.topic || "—" %></strong></td>
+                  <td><%= x.perspectives || "—" %></td>
+                  <td><%= x.impact || "—" %></td>
+                  <td><%= x.resolution || "Not resolved" %></td>
+                  <td><span class="status-pill"><%= x.status || "Open" %></span></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %>
+          <p class="muted">No explicit conflicts or competing viewpoints were identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Open questions</h2>
+        <% if (openQuestions.length) { %>
+          <ul class="bullet-list"><% openQuestions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Topics</h2>
+        <% if (topics.length) { %>
+          <div class="chips"><% topics.forEach(function(t){ %><span class="chip"># <%= t %></span><% }) %></div>
+        <% } else { %>
+          <p class="muted">No topics tagged yet.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Risks / blockers</h2>
+        <% if (risks.length) { %>
+          <ul class="bullet-list"><% risks.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <section class="card section-card">
+        <h2>Follow-ups</h2>
+        <% if (followUps.length) { %>
+          <ul class="bullet-list"><% followUps.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+        <% } else { %>
+          <p class="muted">None identified.</p>
+        <% } %>
+      </section>
+
+      <% if (ai.error) { %>
+        <section class="card section-card">
+          <h2>AI processing</h2>
+          <p class="muted"><%= ai.error %></p>
+        </section>
+      <% } %>
+
+      <form method="POST" action="/meetings/<%= meeting.externalId %>/analyze" style="margin-top:8px">
+        <button type="submit" class="btn-ghost">Retry analysis</button>
+      </form>
+    </div>
+
+    <div class="tab-panel" data-panel="transcript">
+      <section class="card section-card">
+        <input type="search" id="transcriptSearch" class="inline-search" placeholder="Search in transcript…" />
+        <pre class="transcript" id="transcriptBody"><%= meeting.fullTranscript || "No transcript." %></pre>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="actions">
+      <section class="card section-card">
+        <h2>Action items</h2>
+        <% if (!planFlags.actionItems) { %>
+          <div class="pro-gate inline">
+            <p>✦ Detailed action items are a <strong>Pro</strong> feature.</p>
+            <a class="btn-primary" href="/#pricing">Upgrade</a>
+          </div>
+        <% } %>
+        <% if (ai.actionItems && ai.actionItems.length) { %>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+            <tbody>
+              <% ai.actionItems.forEach(function(a){ %>
+                <tr><td>☐ <%= a.task %></td><td><%= a.owner || "—" %></td><td><%= a.deadline || "—" %></td></tr>
+              <% }) %>
+            </tbody>
+          </table></div>
+        <% } else { %><p class="muted">None identified yet.</p><% } %>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="chat">
+      <section class="card section-card chat-card">
+        <% if (!u.askAiAvailable) { %>
+          <div class="pro-gate">
+            <h2>✦ Ask AI — PRO</h2>
+            <p>Ask anything about this meeting transcript and summary.</p>
+            <a class="btn-primary" href="/#pricing">Upgrade to Pro</a>
+          </div>
+        <% } else { %>
+          <div class="prompt-gallery" id="promptGallery">
+            <h2 class="prompt-gallery-title">✦ What will you create today?</h2>
+            <p class="muted prompt-gallery-sub">Answers use only this meeting’s transcript and summary.</p>
+            <div class="prompt-grid">
+              <button type="button" class="prompt-card prompt-card-featured" data-prompt-id="detailed_transcript">
+                <span class="prompt-card-icon"><span class="material-symbols-outlined">description</span></span>
+                <span class="prompt-card-label">Detailed transcription</span>
+              </button>
+              <button type="button" class="prompt-card prompt-card-featured" data-prompt-id="short_summary">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Short summary</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="detailed_summary">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Detailed summary</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="detailed_with_citations">
+                <span class="prompt-card-icon">✦</span>
+                <span class="prompt-card-label">Detailed summary with citation</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="summary_and_actions">
+                <span class="prompt-card-icon">📋</span>
+                <span class="prompt-card-label">Summary and Action items</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="team_sync">
+                <span class="prompt-card-icon">👥</span>
+                <span class="prompt-card-label">Team Sync – Project Updates</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="smart_advice">
+                <span class="prompt-card-icon">💡</span>
+                <span class="prompt-card-label">Smart AI Advice</span>
+              </button>
+              <button type="button" class="prompt-card prompt-card-featured" data-prompt-id="task_list">
+                <span class="prompt-card-icon"><span class="material-symbols-outlined">checklist</span></span>
+                <span class="prompt-card-label">Short task list</span>
+              </button>
+              <button type="button" class="prompt-card prompt-card-featured" data-prompt-id="other_mentions">
+                <span class="prompt-card-icon"><span class="material-symbols-outlined">alternate_email</span></span>
+                <span class="prompt-card-label">Other mentions</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="generate_tasks">
+                <span class="prompt-card-icon">☑</span>
+                <span class="prompt-card-label">Generate tasks</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="prepare_slides">
+                <span class="prompt-card-icon">▶</span>
+                <span class="prompt-card-label">Prepare slides</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="key_decisions">
+                <span class="prompt-card-icon">🔵</span>
+                <span class="prompt-card-label">Key decisions</span>
+              </button>
+              <button type="button" class="prompt-card" data-prompt-id="next_steps">
+                <span class="prompt-card-icon">→</span>
+                <span class="prompt-card-label">Next steps</span>
+              </button>
+            </div>
+          </div>
+          <div id="chatHistory" class="chat-history"></div>
+          <form id="chatForm" class="chat-form" data-meeting-id="<%= meeting.externalId %>">
+            <input id="chatInput" type="text" placeholder="Ask about this meeting…" autocomplete="off" />
+            <button type="submit" class="btn-primary">Ask AI</button>
+          </form>
+        <% } %>
+      </section>
+    </div>
+
+    <div class="tab-panel" data-panel="notes">
+      <section class="card section-card">
+        <form method="POST" action="/meetings/<%= meeting.externalId %>/notes">
+          <textarea name="notes" class="notes-area" rows="12" placeholder="Private notes…"><%= meeting.notes || "" %></textarea>
+          <button type="submit" class="btn-primary" style="margin-top:12px">Save notes</button>
+        </form>
+      </section>
+    </div>
+  </div>
+</div>
+<script>
+  document.querySelectorAll('.ask-sugg').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('chatInput');
+      if (input) { input.value = btn.getAttribute('data-q'); input.focus(); }
+    });
+  });
+</script>
+<%- include("partials/footer") %>

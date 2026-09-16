@@ -1,0 +1,168 @@
+<%- include("../partials/header", { title: "AI Note · Admin", bodyClass: "app-shell" }) %>
+<%
+  const ai = meeting.ai || {};
+  const owner = ownerUser || {};
+  const title = ai.generatedTitle || meeting.title || 'Untitled meeting';
+  function planPill(slug) {
+    const s = String(slug || 'free').toLowerCase();
+    if (s === 'pro') return { label: '✦ PRO', cls: 'plan-pro' };
+    if (s === 'team') return { label: 'TEAM', cls: 'plan-business' };
+    if (s === 'premium' || s === 'business') return { label: '✦ ' + s.toUpperCase(), cls: 'plan-premium' };
+    return { label: 'FREE', cls: 'plan-free' };
+  }
+  const pill = planPill(owner.planSlug);
+  const hasSummary = Boolean(ai.summary);
+  const hasActions = Array.isArray(ai.actionItems) && ai.actionItems.length > 0;
+  const hasError = Boolean(ai.error);
+  const hasTranscript = Boolean(meeting.fullTranscript);
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "ai-notes" }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <a class="back" href="/admin/ai-notes">← AI Notes</a>
+        <h1 style="margin-top:8px"><%= title %></h1>
+        <div class="user-detail-badges" style="margin-top:10px">
+          <span class="plan-pill plan-pro">✦ AI Note</span>
+          <% if (hasError) { %>
+            <span class="ai-status-badge ai-failed">⚠ Failed</span>
+          <% } else if (hasSummary) { %>
+            <span class="ai-status-badge ai-ready-badge">✓ Generated successfully</span>
+          <% } else { %>
+            <span class="ai-status-badge ai-pending">◌ Pending</span>
+          <% } %>
+        </div>
+        <p class="muted" style="margin-top:8px">
+          <% if (owner.username) { %>
+            <a href="/admin/users/<%= owner.id %>" style="color:inherit;font-weight:600"><%= owner.displayName || owner.username %></a>
+            · @<%= owner.username %> ·
+          <% } %>
+          <span class="plan-pill <%= pill.cls %>"><%= pill.label %></span>
+          · <%= (ai.generatedAt || meeting.updatedAt || meeting.createdAt) ? new Date(ai.generatedAt || meeting.updatedAt || meeting.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—' %>
+        </p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-ghost" href="/admin/meetings/<%= meeting.externalId %>">Open meeting</a>
+        <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/analyze" style="display:inline">
+          <button type="submit" class="btn-primary">Retry AI processing</button>
+        </form>
+      </div>
+    </header>
+
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="admin-meeting-layout">
+      <div class="admin-meeting-main">
+        <div class="tabs" data-tabs>
+          <button type="button" class="tab active" data-tab="summary">Summary</button>
+          <button type="button" class="tab" data-tab="actions">Action Items</button>
+          <button type="button" class="tab" data-tab="transcript">Transcript</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="summary">
+          <section class="card section-card">
+            <h2>AI Summary</h2>
+            <% if (ai.summary) { %>
+              <div class="long-summary"><% String(ai.summary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+            <% } else { %>
+              <p class="muted">No summary generated.</p>
+            <% } %>
+          </section>
+          <% if (ai.detailedSummary) { %>
+            <section class="card section-card">
+              <h2>Detailed summary</h2>
+              <div class="long-summary"><% String(ai.detailedSummary).split(/\n\s*\n/).filter(Boolean).forEach(function(p){ %><p><%= p.trim() %></p><% }) %></div>
+            </section>
+          <% } %>
+          <% if (ai.keyPoints && ai.keyPoints.length) { %>
+            <section class="card section-card">
+              <h2>Key points</h2>
+              <ul class="bullet-list"><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+            </section>
+          <% } %>
+          <% if (ai.decisions && ai.decisions.length) { %>
+            <section class="card section-card">
+              <h2>Key decisions</h2>
+              <ul class="bullet-list"><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+            </section>
+          <% } %>
+          <% if (ai.error) { %>
+            <section class="card section-card">
+              <h2>AI error</h2>
+              <p class="muted"><%= ai.error %></p>
+            </section>
+          <% } %>
+        </div>
+
+        <div class="tab-panel" data-panel="actions">
+          <section class="card section-card">
+            <h2>Action items</h2>
+            <% if (hasActions) { %>
+              <div class="table-wrap"><table class="ai-table">
+                <thead><tr><th>Status</th><th>Task</th><th>Owner</th><th>Deadline</th></tr></thead>
+                <tbody>
+                  <% ai.actionItems.forEach(function(a){ %>
+                    <tr>
+                      <td><%= a.completed ? '✓' : '☐' %></td>
+                      <td><strong><%= a.task || '—' %></strong></td>
+                      <td><%= a.owner || '—' %></td>
+                      <td><%= a.deadline || '—' %></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table></div>
+            <% } else { %>
+              <p class="muted">None identified.</p>
+            <% } %>
+          </section>
+        </div>
+
+        <div class="tab-panel" data-panel="transcript">
+          <section class="card section-card">
+            <pre class="transcript"><%= meeting.fullTranscript || 'No transcript.' %></pre>
+          </section>
+        </div>
+      </div>
+
+      <aside class="admin-meeting-side">
+        <section class="card section-card">
+          <h2 class="side-heading">Note information</h2>
+          <dl class="detail-list compact">
+            <div><dt>User</dt><dd><% if (owner.username) { %><a href="/admin/users/<%= owner.id %>">@<%= owner.username %></a><% } else { %><%= meeting.userId || '—' %><% } %></dd></div>
+            <div><dt>Plan</dt><dd><span class="plan-pill <%= pill.cls %>"><%= pill.label %></span></dd></div>
+            <div><dt>Platform</dt><dd><%= meeting.platform || 'Manual' %></dd></div>
+            <div><dt>Created</dt><dd><%= meeting.createdAt ? new Date(meeting.createdAt).toLocaleString() : '—' %></dd></div>
+            <div><dt>AI generated</dt><dd><%= ai.generatedAt ? new Date(ai.generatedAt).toLocaleString() : '—' %></dd></div>
+          </dl>
+        </section>
+
+        <section class="card section-card">
+          <h2 class="side-heading">AI processing</h2>
+          <ul class="proc-list">
+            <li><span>Transcript</span><span><%= hasTranscript ? '✓ Complete' : '— Missing' %></span></li>
+            <li><span>AI Summary</span><span><%= hasSummary ? '✓ Complete' : (hasError ? '⚠ Failed' : '— Waiting') %></span></li>
+            <li><span>Action Items</span><span><%= hasActions ? '✓ Complete' : (hasSummary ? '— None found' : '— Waiting') %></span></li>
+            <li><span>Ask AI</span><span><%= hasTranscript || hasSummary ? '✓ Available' : '— Unavailable' %></span></li>
+          </ul>
+          <form method="POST" action="/admin/meetings/<%= meeting.externalId %>/analyze" style="margin-top:12px">
+            <button type="submit" class="btn-primary" style="width:100%">Retry AI processing</button>
+          </form>
+        </section>
+
+        <section class="card section-card">
+          <h2 class="side-heading">AI usage (est.)</h2>
+          <dl class="detail-list compact">
+            <div><dt>Transcript chars</dt><dd><%= (meeting.fullTranscript || '').length.toLocaleString() %></dd></div>
+            <div><dt>Summary chars</dt><dd><%= ((ai.summary || '') + (ai.detailedSummary || '')).length.toLocaleString() %></dd></div>
+            <div><dt>Est. tokens</dt><dd>~<%= Math.round(((meeting.fullTranscript || '').length + ((ai.summary || '') + (ai.detailedSummary || '')).length) / 4).toLocaleString() %></dd></div>
+            <div><dt>Action items</dt><dd><%= hasActions ? ai.actionItems.length : 0 %></dd></div>
+          </dl>
+          <p class="muted" style="margin:10px 0 0;font-size:12px">Token estimates are approximate from text length. Exact provider usage can be wired when billing is connected.</p>
+        </section>
+      </aside>
+    </div>
+  </div>
+</div>
+<%- include("../partials/footer") %>

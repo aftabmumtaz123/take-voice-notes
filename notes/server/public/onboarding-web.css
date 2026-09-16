@@ -1,0 +1,85 @@
+.onb-shell h1 { margin-bottom: 8px; }
+.onb-panel { margin-top: 8px; }
+.onb-progress {
+  display: flex; gap: 6px; margin-bottom: 18px;
+}
+.onb-progress span {
+  height: 4px; flex: 1; border-radius: 99px; background: #e8e4dc;
+}
+.onb-progress span.done { background: #6d5efc; }
+.onb-q {
+  font-weight: 700; font-size: 15px; margin: 0 0 14px; color: #1a1a1a;
+}
+.onb-chips {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px;
+}
+.chip-opt {
+  cursor: pointer;
+}
+.chip-opt input { position: absolute; opacity: 0; pointer-events: none; }
+.chip-opt span {
+  display: inline-block;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid #e8e4dc;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+.chip-opt.selected span,
+.chip-opt input:checked + span {
+  border-color: #6d5efc;
+  background: #f3f0ff;
+  color: #4c1d95;
+}
+.onb-checks {
+  list-style: none; padding: 0; margin: 0 0 8px;
+}
+.onb-checks li {
+  position: relative;
+  padding: 8px 0 8px 28px;
+  font-size: 14px;
+  color: #374151;
+}
+.onb-checks li::before {
+  content: "✓";
+  position: absolute; left: 0; top: 8px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #ede9fe; color: #6d5efc;
+  display: grid; place-items: center;
+  font-size: 11px; font-weight: 800;
+}
+.onb-hr {
+  border: 0; border-top: 1px solid #e8e4dc; margin: 14px 0;
+}
+.onb-install-btn {
+  display: block; text-align: center; text-decoration: none;
+  line-height: 48px; height: 48px;
+}
+.onb-later {
+  width: 100%; border: 0; background: transparent;
+  color: #9ca3af; font-size: 13px; cursor: pointer; padding: 8px;
+}
+.onb-later:hover { color: #6b7280; }
+.install-h {
+  font-size: 15px; margin: 18px 0 8px; color: #1a1a1a;
+}
+.install-h:first-child { margin-top: 0; }
+.install-steps {
+  margin: 0 0 8px; padding-left: 20px;
+  color: #4b5563; font-size: 13px; line-height: 1.55;
+}
+.install-steps li { margin: 8px 0; }
+.install-steps pre, .install-steps code {
+  background: #f3f4f6; border-radius: 6px; padding: 2px 6px;
+  font-size: 12px;
+}
+.install-steps pre {
+  display: block; padding: 10px 12px; margin: 8px 0; overflow-x: auto;
+}
+.install-note {
+  margin-top: 14px; padding: 12px;
+  background: #fffbeb; border: 1px solid #fde68a;
+  border-radius: 10px; font-size: 12px; color: #92400e; line-height: 1.45;
+}

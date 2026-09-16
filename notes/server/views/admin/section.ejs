@@ -1,0 +1,63 @@
+<%- include("../partials/header", { title: title + " · Admin", bodyClass: "app-shell" }) %>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: activeNav }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <h1><%= title %></h1>
+        <p class="admin-sub"><%= description || '' %></p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-ghost" href="/admin">← Overview</a>
+      </div>
+    </header>
+
+    <% if (activeNav === 'extension') { %>
+      <section class="card section-card">
+        <h2>Chrome extension</h2>
+        <p class="muted">Users install via Load unpacked until the Web Store listing is live.</p>
+        <ol class="install-steps-admin">
+          <li>Build: <code>npm run build</code> → produces <code>dist/</code></li>
+          <li>Chrome → <code>chrome://extensions</code> → Developer mode → Load unpacked → select <code>dist</code></li>
+          <li>Paste API key from Account into the extension popup</li>
+        </ol>
+        <p><a class="btn-primary" href="/install" target="_blank">Open public install guide</a></p>
+      </section>
+    <% } %>
+
+    <% if (meetings && meetings.length) { %>
+      <section class="card section-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Platform</th>
+                <th>Duration</th>
+                <th>AI</th>
+                <th>When</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% meetings.forEach(function(m) { %>
+                <tr>
+                  <td><%= m.title || 'Untitled' %></td>
+                  <td><%= m.platform || '—' %></td>
+                  <td><%= Math.max(1, Math.round((m.duration || 0) / 60)) %>m</td>
+                  <td><%= (m.ai && m.ai.summary) ? 'Yes' : '—' %></td>
+                  <td><%= m.startedAt ? new Date(m.startedAt).toLocaleString() : '—' %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    <% } else if (activeNav !== 'extension') { %>
+      <div class="empty-state card">
+        <h3>No data yet</h3>
+        <p>Activity will appear here as users process meetings through the extension.</p>
+      </div>
+    <% } %>
+  </div>
+</div>
+<%- include("../partials/footer") %>

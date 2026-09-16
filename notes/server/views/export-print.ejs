@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title><%= (meeting.ai && meeting.ai.generatedTitle) || meeting.title || "Meeting summary" %></title>
+  <style>
+    :root { font-family: Georgia, "Times New Roman", serif; color: #111; }
+    body { max-width: 720px; margin: 24px auto; padding: 0 20px 40px; line-height: 1.5; }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; margin: 22px 0 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    .meta { color: #555; font-size: 12px; margin-bottom: 18px; font-family: system-ui, sans-serif; }
+    p, li { font-size: 13px; }
+    ul { padding-left: 18px; }
+    .no-print { margin-bottom: 16px; font-family: system-ui, sans-serif; }
+    .no-print button {
+      border: 0; background: #6d5efc; color: #fff; padding: 10px 14px;
+      border-radius: 8px; font-weight: 700; cursor: pointer;
+    }
+    pre {
+      white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace;
+      font-size: 11px; background: #f7f7f7; padding: 12px; border-radius: 8px;
+    }
+    @media print {
+      .no-print { display: none !important; }
+      body { margin: 0; }
+    }
+  </style>
+</head>
+<body>
+  <% const ai = meeting.ai || {}; %>
+  <div class="no-print">
+    <button type="button" onclick="window.print()">Save as PDF (print dialog)</button>
+    <span style="margin-left:10px;color:#666;font-size:13px">Choose “Save as PDF” in the print dialog.</span>
+  </div>
+  <h1><%= ai.generatedTitle || meeting.title || "Untitled meeting" %></h1>
+  <div class="meta">
+    <%= meeting.platform || "Manual" %>
+    <% if (meeting.startedAt) { %> · <%= new Date(meeting.startedAt).toLocaleString() %><% } %>
+    <% if (meeting.duration) { %> · <%= Math.round(meeting.duration / 60) %> min<% } %>
+  </div>
+
+  <h2>Executive summary</h2>
+  <p><%= ai.summary || "No summary." %></p>
+
+  <h2>Detailed summary</h2>
+  <p style="white-space:pre-wrap"><%= ai.detailedSummary || ai.summary || "—" %></p>
+
+  <% if (ai.keyPoints && ai.keyPoints.length) { %>
+    <h2>Key points</h2>
+    <ul><% ai.keyPoints.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+  <% } %>
+
+  <% if (ai.decisions && ai.decisions.length) { %>
+    <h2>Decisions</h2>
+    <ul><% ai.decisions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+  <% } %>
+
+  <% if (ai.actionItems && ai.actionItems.length) { %>
+    <h2>Action items</h2>
+    <ul>
+      <% ai.actionItems.forEach(function(a){ %>
+        <li><strong><%= a.task %></strong><% if (a.owner) { %> — <%= a.owner %><% } %><% if (a.deadline) { %> (<%= a.deadline %>)<% } %></li>
+      <% }) %>
+    </ul>
+  <% } %>
+
+  <% if (ai.topics && ai.topics.length) { %>
+    <h2>Topics</h2>
+    <p><%= ai.topics.map(function(t){ return "#" + t; }).join(", ") %></p>
+  <% } %>
+
+  <% if (ai.openQuestions && ai.openQuestions.length) { %>
+    <h2>Open questions</h2>
+    <ul><% ai.openQuestions.forEach(function(x){ %><li><%= x %></li><% }) %></ul>
+  <% } %>
+
+  <% if (meeting.notes) { %>
+    <h2>Notes</h2>
+    <p style="white-space:pre-wrap"><%= meeting.notes %></p>
+  <% } %>
+
+  <h2>Transcript</h2>
+  <pre><%= meeting.fullTranscript || "No transcript." %></pre>
+
+  <% if (typeof autoPrint !== "undefined" && autoPrint) { %>
+  <script>window.addEventListener("load", function(){ setTimeout(function(){ window.print(); }, 300); });</script>
+  <% } %>
+</body>
+</html>

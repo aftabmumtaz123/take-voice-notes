@@ -1,0 +1,199 @@
+<%- include("../partials/header", { title: (target.displayName || target.username) + " · Admin", bodyClass: "app-shell" }) %>
+<%
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return n.toLocaleString();
+    return String(n);
+  }
+  function planBadge(slug) {
+    const s = String(slug || 'free').toLowerCase();
+    if (s === 'pro') return { label: '✦ PRO', cls: 'plan-pro' };
+    if (s === 'premium' || s === 'team') return { label: '✦ PREMIUM', cls: 'plan-premium' };
+    if (s === 'business') return { label: '✦ BUSINESS', cls: 'plan-business' };
+    return { label: 'FREE', cls: 'plan-free' };
+  }
+  function fmtDate(d) {
+    if (!d) return '—';
+    return new Date(d).toLocaleDateString([], { dateStyle: 'medium' });
+  }
+  function fmtDateTime(d) {
+    if (!d) return '—';
+    return new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  }
+  function barPct(used, max) {
+    if (!max || max >= 9999) return Math.min(100, used ? 5 : 0);
+    return Math.min(100, Math.round((used / max) * 100));
+  }
+  const badge = planBadge(target.planSlug);
+  const isSelf = String(target.id) === String(user.id);
+  const usage = usageStats || {};
+  const maxMeetings = usage.meetingsMax || 5;
+  const meetingsUsed = usage.meetingsUsed || 0;
+  const aiUsed = usage.aiNotes || 0;
+  const transMin = usage.transcriptionMinutes || 0;
+  const askAi = usage.askAi || 0;
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "users" }) %>
+  <div class="main admin-main">
+    <header class="main-top">
+      <div>
+        <a class="back" href="/admin/users">← Users</a>
+        <div class="user-detail-hero">
+          <span class="user-avatar lg"><%= (target.displayName || target.username || '?').charAt(0).toUpperCase() %></span>
+          <div>
+            <h1><%= target.displayName || target.username %></h1>
+            <p class="muted">@<%= target.username %></p>
+            <div class="user-detail-badges">
+              <% if (target.isActive === false) { %>
+                <span class="status-dot disabled">● Disabled</span>
+              <% } else { %>
+                <span class="status-dot active">● Active</span>
+              <% } %>
+              <span class="plan-pill <%= badge.cls %>"><%= badge.label %></span>
+              <span class="role-pill role-<%= target.role || 'user' %>"><%= (target.role || 'user').toUpperCase() %></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="main-actions">
+        <% if (!isSelf) { %>
+          <form method="POST" action="/admin/users/<%= target.id %>/toggle" style="display:inline">
+            <button type="submit" class="btn-ghost"><%= target.isActive === false ? 'Enable User' : 'Disable User' %></button>
+          </form>
+        <% } %>
+        <a class="btn-primary" href="#plan">Change Plan</a>
+      </div>
+    </header>
+
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <div class="user-detail-grid">
+      <!-- Account -->
+      <section class="card section-card" id="account">
+        <h2>Account</h2>
+        <dl class="detail-list">
+          <div><dt>Name</dt><dd><%= target.displayName || '—' %></dd></div>
+          <div><dt>Username</dt><dd>@<%= target.username %></dd></div>
+          <div><dt>Role</dt><dd><span class="role-pill role-<%= target.role || 'user' %>"><%= (target.role || 'user').toUpperCase() %></span></dd></div>
+          <div><dt>Joined</dt><dd><%= fmtDate(target.createdAt) %></dd></div>
+          <div><dt>Last active</dt><dd><%= fmtDateTime(target.lastActiveAt || target.updatedAt) %></dd></div>
+          <div><dt>API key</dt><dd class="mono"><%= target.apiKey ? (target.apiKey.slice(0, 12) + '…') : '—' %></dd></div>
+        </dl>
+      </section>
+
+      <!-- Subscription -->
+      <section class="card section-card" id="plan">
+        <h2>Subscription</h2>
+        <div class="sub-block">
+          <span class="plan-pill <%= badge.cls %> lg"><%= badge.label %></span>
+          <p class="muted" style="margin:10px 0 0">
+            Status: <% if (target.isActive === false) { %><span class="status-dot disabled">● Disabled</span><% } else { %><span class="status-dot active">● Active</span><% } %>
+          </p>
+          <% if (plan) { %>
+            <p class="muted" style="margin:6px 0 0">
+              <%= plan.description || '' %>
+              <% if (plan.priceMonthly > 0) { %> · $<%= Number(plan.priceMonthly).toFixed(2) %>/mo<% } %>
+            </p>
+            <p class="muted" style="margin:6px 0 0">Limit: <%= plan.maxMeetingsPerMonth >= 9999 ? 'Unlimited' : plan.maxMeetingsPerMonth %> meetings / month</p>
+          <% } %>
+        </div>
+        <form method="POST" action="/admin/users/<%= target.id %>/plan" class="inline-plan-form" style="margin-top:14px">
+          <label>
+            Change plan
+            <select name="planSlug">
+              <% (plans || []).forEach(function(p) { %>
+                <option value="<%= p.slug %>" <%= (target.planSlug || 'free') === p.slug ? 'selected' : '' %>><%= p.name %></option>
+              <% }) %>
+            </select>
+          </label>
+          <button type="submit" class="btn-primary">Update plan</button>
+        </form>
+      </section>
+
+      <!-- Role -->
+      <section class="card section-card" id="role">
+        <h2>Role</h2>
+        <form method="POST" action="/admin/users/<%= target.id %>/role" class="inline-plan-form">
+          <label>
+            Role
+            <select name="role" <%= isSelf ? 'disabled' : '' %>>
+              <option value="user" <%= target.role === 'user' ? 'selected' : '' %>>User</option>
+              <option value="admin" <%= target.role === 'admin' ? 'selected' : '' %>>Admin</option>
+            </select>
+          </label>
+          <% if (!isSelf) { %>
+            <button type="submit" class="btn-primary">Update role</button>
+          <% } else { %>
+            <p class="muted" style="margin:8px 0 0">You cannot change your own role here.</p>
+          <% } %>
+        </form>
+      </section>
+
+      <!-- Usage -->
+      <section class="card section-card" id="usage">
+        <h2>Usage this month</h2>
+        <div class="usage-bars">
+          <div class="usage-row">
+            <div class="usage-label"><span>Meetings</span><span><%= meetingsUsed %> / <%= maxMeetings >= 9999 ? '∞' : maxMeetings %></span></div>
+            <div class="usage-track"><div class="usage-fill" style="width:<%= barPct(meetingsUsed, maxMeetings) %>%"></div></div>
+          </div>
+          <div class="usage-row">
+            <div class="usage-label"><span>Transcription</span><span><%= fmt(transMin) %> min</span></div>
+            <div class="usage-track"><div class="usage-fill" style="width:<%= Math.min(100, transMin ? Math.max(8, Math.round(transMin / 2)) : 0) %>%"></div></div>
+          </div>
+          <div class="usage-row">
+            <div class="usage-label"><span>AI Notes</span><span><%= aiUsed %> / <%= maxMeetings >= 9999 ? '∞' : maxMeetings %></span></div>
+            <div class="usage-track"><div class="usage-fill" style="width:<%= barPct(aiUsed, maxMeetings) %>%"></div></div>
+          </div>
+          <div class="usage-row">
+            <div class="usage-label"><span>Ask AI</span><span><%= fmt(askAi) %></span></div>
+            <div class="usage-track"><div class="usage-fill soft" style="width:<%= Math.min(100, askAi ? Math.max(6, Math.round(askAi / 5)) : 0) %>%"></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Recent meetings -->
+    <section class="card section-card" id="meetings" style="margin-top:16px">
+      <h2>Recent meetings</h2>
+      <% if (!(recentMeetings || []).length) { %>
+        <p class="muted">No meetings yet.</p>
+      <% } else { %>
+        <ul class="admin-meeting-list">
+          <% recentMeetings.forEach(function(m) { %>
+            <li>
+              <a href="/meetings/<%= m.externalId %>">
+                <strong><%= m.title || 'Untitled meeting' %></strong>
+                <span class="muted">
+                  <%= m.startedAt ? new Date(m.startedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '' %>
+                  · <%= Math.max(0, Math.round((m.duration || 0) / 60)) %> min
+                  <% if (m.ai && m.ai.summary) { %> · AI Summary<% } %>
+                </span>
+              </a>
+            </li>
+          <% }) %>
+        </ul>
+      <% } %>
+    </section>
+
+    <!-- Danger zone -->
+    <% if (!isSelf) { %>
+      <section class="card section-card danger-zone" style="margin-top:16px">
+        <h2>Danger zone</h2>
+        <p class="muted">Disabling blocks login and API access. Deleting permanently removes the account (meetings are kept orphaned).</p>
+        <div class="danger-actions">
+          <form method="POST" action="/admin/users/<%= target.id %>/toggle">
+            <button type="submit" class="btn-ghost"><%= target.isActive === false ? 'Enable account' : 'Disable account' %></button>
+          </form>
+          <form method="POST" action="/admin/users/<%= target.id %>/delete" onsubmit="return confirm('Delete @<%= target.username %> permanently? This cannot be undone.');">
+            <button type="submit" class="btn-danger">Delete account</button>
+          </form>
+        </div>
+      </section>
+    <% } %>
+  </div>
+</div>
+<%- include("../partials/footer") %>

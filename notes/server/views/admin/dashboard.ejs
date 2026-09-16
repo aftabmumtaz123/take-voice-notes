@@ -1,0 +1,248 @@
+<%- include("../partials/header", { title: "Admin Control Center", bodyClass: "app-shell" }) %>
+<%
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return n.toLocaleString();
+    return String(n);
+  }
+  function timeAgo(d) {
+    if (!d) return '';
+    const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + ' minutes ago';
+    if (s < 86400) return Math.floor(s / 3600) + ' hours ago';
+    return Math.floor(s / 86400) + ' days ago';
+  }
+  function joinedLabel(d) {
+    if (!d) return '—';
+    const dt = new Date(d);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const that = new Date(dt); that.setHours(0,0,0,0);
+    const diff = (today - that) / 86400000;
+    if (diff < 1) return 'Today';
+    if (diff < 2) return 'Yesterday';
+    return dt.toLocaleDateString();
+  }
+  const maxSeries = Math.max(1, ...(series || []).map(s => s.value));
+  const planTotal = Object.values(planDist || {}).reduce((a, b) => a + b, 0) || 1;
+%>
+<div class="shell">
+  <%- include("partials/admin-sidebar", { user, activeNav: "dashboard" }) %>
+  <div class="main admin-main">
+    <header class="main-top admin-hero">
+      <div>
+        <h1>AI Notes Admin Control Center</h1>
+        <p class="admin-sub">Manage users, subscriptions, meetings, AI usage, transcription, and extension services from one centralized dashboard.</p>
+      </div>
+      <div class="main-actions">
+        <a class="btn-ghost" href="/app">User App</a>
+        <a class="btn-primary" href="/admin/plans">Manage Plans</a>
+      </div>
+    </header>
+
+    <% if (success) { %><div class="flash ok"><%= success %></div><% } %>
+    <% if (error) { %><div class="flash error"><%= error %></div><% } %>
+
+    <!-- Primary stats -->
+    <div class="admin-stats stats-4">
+      <div class="stat-card rich">
+        <span class="stat-label">Total Users</span>
+        <strong><%= fmt(stats.userCount) %></strong>
+        <span class="stat-delta up">+<%= stats.usersGrowth %>% this month</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Active Subscriptions</span>
+        <strong><%= fmt(stats.activeSubscriptions) %></strong>
+        <span class="stat-delta up">Paid plans</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Meetings Processed</span>
+        <strong><%= fmt(stats.meetingCount) %></strong>
+        <span class="stat-delta up">+<%= stats.meetingsGrowth %>% this month</span>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">AI Notes Generated</span>
+        <strong><%= fmt(stats.aiNotesCount) %></strong>
+        <span class="stat-delta up">With AI summary</span>
+      </div>
+    </div>
+
+    <div class="admin-stats stats-4 secondary-stats">
+      <div class="stat-card rich">
+        <span class="stat-label">Transcription Minutes</span>
+        <strong><%= fmt(stats.transcriptionMinutes) %> <small class="unit">min</small></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">AI Tokens (est.)</span>
+        <strong><%= fmt(stats.aiTokensEstimate) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Monthly Revenue (est.)</span>
+        <strong>$<%= fmt(stats.monthlyRevenueEstimate) %></strong>
+      </div>
+      <div class="stat-card rich">
+        <span class="stat-label">Extension Active Users</span>
+        <strong><%= fmt(stats.extensionActiveUsers) %></strong>
+      </div>
+    </div>
+
+    <!-- Usage chart -->
+    <section class="card section-card chart-card">
+      <div class="section-head">
+        <div>
+          <h2>Usage Overview</h2>
+          <p class="muted">Meetings created over the last 7 days</p>
+        </div>
+        <div class="range-pills">
+          <span class="pill active">7 days</span>
+          <span class="pill muted-pill">30 days</span>
+          <span class="pill muted-pill">3 months</span>
+          <span class="pill muted-pill">12 months</span>
+        </div>
+      </div>
+      <div class="chart-tabs">
+        <span class="chip active">Meetings</span>
+        <span class="chip">Users</span>
+        <span class="chip">AI Notes</span>
+        <span class="chip">Transcription</span>
+        <span class="chip">AI Usage</span>
+      </div>
+      <div class="bar-chart" role="img" aria-label="Usage chart">
+        <% (series || []).forEach(function(s) { %>
+          <div class="bar-col">
+            <div class="bar-track">
+              <div class="bar-fill" style="height:<%= Math.max(4, Math.round((s.value / maxSeries) * 100)) %>%" title="<%= s.value %>"></div>
+            </div>
+            <span class="bar-label"><%= s.label %></span>
+            <span class="bar-val"><%= s.value %></span>
+          </div>
+        <% }) %>
+      </div>
+    </section>
+
+    <div class="admin-split">
+      <!-- Recent activity -->
+      <section class="card section-card">
+        <div class="section-head">
+          <h2>Recent Activity</h2>
+        </div>
+        <ul class="activity-list">
+          <% (recentActivity || []).forEach(function(a) { %>
+            <li>
+              <span class="act-dot <%= a.type %>"></span>
+              <div>
+                <strong><%= a.text %></strong>
+                <small><%= timeAgo(a.time) %></small>
+              </div>
+            </li>
+          <% }) %>
+          <% if (!recentActivity || !recentActivity.length) { %>
+            <li class="muted">No recent activity yet.</li>
+          <% } %>
+        </ul>
+      </section>
+
+      <!-- Subscription overview -->
+      <section class="card section-card">
+        <div class="section-head">
+          <h2>Subscription Overview</h2>
+        </div>
+        <div class="plan-dist">
+          <% Object.keys(planDist || {}).forEach(function(slug) { %>
+            <% const count = planDist[slug] || 0; const pct = Math.round((count / planTotal) * 100); %>
+            <div class="plan-dist-row">
+              <div class="plan-dist-meta">
+                <strong><%= slug %></strong>
+                <span><%= count %> users · <%= pct %>%</span>
+              </div>
+              <div class="plan-dist-bar"><div style="width:<%= pct %>%"></div></div>
+            </div>
+          <% }) %>
+        </div>
+        <div class="sub-meta-grid">
+          <div><span class="muted">Active paid</span><strong><%= stats.activeSubscriptions %></strong></div>
+          <div><span class="muted">Free users</span><strong><%= planDist.free || 0 %></strong></div>
+          <div><span class="muted">Plans live</span><strong><%= stats.planCount %></strong></div>
+          <div><span class="muted">Revenue est.</span><strong>$<%= fmt(stats.monthlyRevenueEstimate) %></strong></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Recent users -->
+    <section class="card section-card">
+      <div class="section-head">
+        <h2>Recent Users</h2>
+        <a href="/admin/users">View all users →</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Plan</th>
+              <th>Meetings</th>
+              <th>AI Notes</th>
+              <th>Status</th>
+              <th>Joined</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% (recentUsers || []).forEach(function(u) { %>
+              <tr>
+                <td>
+                  <div class="user-cell">
+                    <span class="avatar sm"><%= (u.displayName || u.username || '?').charAt(0).toUpperCase() %></span>
+                    <div>
+                      <strong>@<%= u.username %></strong>
+                      <% if (u.role === 'admin') { %><span class="chip">admin</span><% } %>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="plan-pill"><%= u.planSlug || 'free' %></span></td>
+                <td><%= u.meetingsCount || 0 %></td>
+                <td><%= u.aiNotesCount || 0 %></td>
+                <td>
+                  <% if (u.isActive !== false) { %>
+                    <span class="status-dot on">Active</span>
+                  <% } else { %>
+                    <span class="status-dot off">Disabled</span>
+                  <% } %>
+                </td>
+                <td><%= joinedLabel(u.createdAt) %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- System health -->
+    <section class="card section-card health-card">
+      <div class="section-head"><h2>System Health</h2></div>
+      <div class="health-grid">
+        <div class="health-item">
+          <span class="h-dot <%= health.api ? 'ok' : 'bad' %>"></span>
+          <div><strong>API</strong><small><%= health.api ? 'Operational' : 'Degraded' %></small></div>
+        </div>
+        <div class="health-item">
+          <span class="h-dot <%= health.ai ? 'ok' : 'bad' %>"></span>
+          <div><strong>AI Processing</strong><small><%= health.ai ? 'Operational' : 'Key missing' %></small></div>
+        </div>
+        <div class="health-item">
+          <span class="h-dot <%= health.transcription ? 'ok' : 'bad' %>"></span>
+          <div><strong>Transcription</strong><small><%= health.transcription ? 'Operational' : 'Check config' %></small></div>
+        </div>
+        <div class="health-item">
+          <span class="h-dot <%= health.database ? 'ok' : 'bad' %>"></span>
+          <div><strong>Database</strong><small><%= health.database ? 'Operational' : 'Disconnected' %></small></div>
+        </div>
+        <div class="health-item">
+          <span class="h-dot <%= health.extension ? 'ok' : 'bad' %>"></span>
+          <div><strong>Extension Services</strong><small><%= health.extension ? 'Operational' : 'Issue' %></small></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+<%- include("../partials/footer") %>
