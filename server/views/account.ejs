@@ -139,8 +139,8 @@
         </section>
 
         <section class="card settings-card" id="security">
-          <div class="settings-title"><div><h2>Security</h2><p>Manage your passkey and active web sessions.</p></div></div>
-          <div class="security-summary"><div><strong>Password / passkey</strong><span>Use a new passkey to protect this account.</span></div><button type="button" class="btn-ghost" data-open-dialog="passwordDialog">Change passkey</button></div>
+          <div class="settings-title"><div><h2>Security</h2><p>Manage your Password and active web sessions.</p></div></div>
+          <div class="security-summary"><div><strong>Password</strong><span>Use a new password to protect this account.</span></div><button type="button" class="btn-ghost" data-open-dialog="passwordDialog">Change password</button></div>
           <div class="security-summary"><div><strong>Active sessions</strong><span><%= Array.isArray(au.sessions) ? au.sessions.length : 1 %> session(s) associated with your account.</span></div><span class="status-pill success"><span></span> Current session</span></div>
           <div class="security-summary"><div><strong>Two-factor authentication</strong><span>Not enabled in this build.</span></div><button type="button" class="btn-ghost" disabled>Enable 2FA</button></div>
         </section>
@@ -167,7 +167,7 @@
         <section class="card settings-card danger-zone" id="danger">
           <div class="settings-title"><div><h2>Danger zone</h2><p>Permanently delete your account and associated meeting data.</p></div></div>
           <form method="POST" action="/account/delete" onsubmit="return confirm('Delete your account and all associated meeting data permanently? This cannot be undone.');">
-            <label>Confirm your passkey<input name="confirmPasskey" type="password" required autocomplete="current-password" placeholder="Enter your current passkey" /></label>
+            <label>Confirm your Password<input name="confirmPasskey" type="password" required autocomplete="current-password" placeholder="Enter your current password" /></label>
             <button class="btn-danger" type="submit"><span class="material-symbols-outlined">delete_forever</span> Delete account</button>
           </form>
         </section>
@@ -176,7 +176,7 @@
   </div>
 </div>
 
-<dialog id="passwordDialog" class="settings-dialog"><form method="POST" action="/account/change-passkey"><button type="button" class="dialog-close" data-close-dialog>×</button><h2>Change passkey</h2><p class="muted">Your new passkey must be at least 6 characters.</p><label>Current passkey<input type="password" name="currentPasskey" required autocomplete="current-password" /></label><label>New passkey<input type="password" name="newPasskey" required minlength="6" autocomplete="new-password" /></label><button class="btn-primary" type="submit">Change passkey</button></form></dialog>
+<dialog id="passwordDialog" class="settings-dialog"><form method="POST" action="/account/change-passkey"><button type="button" class="dialog-close" data-close-dialog>×</button><h2>Change Password</h2><p class="muted">Your new Password must be at least 6 characters.</p><label>Current Password<input type="password" name="currentPasskey" required autocomplete="current-password" /></label><label>New Password<input type="password" name="newPasskey" required minlength="6" autocomplete="new-password" /></label><button class="btn-primary" type="submit">Change Password</button></form></dialog>
 
 <div class="rotate-key-modal" id="rotateKeyModal" hidden aria-hidden="true">
   <div class="rotate-key-backdrop" data-close-rotate-key></div>
