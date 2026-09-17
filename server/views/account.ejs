@@ -221,11 +221,103 @@
     if (event.key === 'Escape' && rotateModal && !rotateModal.hidden) closeRotateKeyModal();
   });
 
-  const api = async () => { const r = await fetch('/api/account/api-key', { headers: { Accept: 'application/json' } }); const d = await r.json(); if (!r.ok || !d.ok) throw new Error(d.error || 'Unable to retrieve API key.'); return d.apiKey; };
-  const show = document.getElementById('showKey'), copy = document.getElementById('copyKey'), masked = document.getElementById('maskedKey'); let cached = '';
-  show?.addEventListener('click', async () => { try { cached = cached || await api(); masked.textContent = cached; show.innerHTML = '<span class="material-symbols-outlined">visibility_off</span> Hide'; show.dataset.shown = '1'; } catch (e) { alert(e.message); } });
-  show?.addEventListener('dblclick', () => { if (show.dataset.shown === '1') { masked.textContent = 'ntk_••••••••••••••••••••••••'; show.innerHTML = '<span class="material-symbols-outlined">visibility</span> Show'; show.dataset.shown = '0'; } });
-  copy?.addEventListener('click', async () => { try { cached = cached || await api(); await navigator.clipboard.writeText(cached); copy.innerHTML = '<span class="material-symbols-outlined">check</span> Copied'; setTimeout(() => copy.innerHTML = '<span class="material-symbols-outlined">content_copy</span> Copy', 1400); } catch (e) { alert(e.message); } });
+  const api = async () => {
+    const r = await fetch('/api/account/api-key', {
+      headers: { Accept: 'application/json' }
+    });
+
+    const d = await r.json();
+
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || 'Unable to retrieve API key.');
+    }
+
+    return d.apiKey;
+  };
+
+  const show = document.getElementById('showKey');
+  const copy = document.getElementById('copyKey');
+  const masked = document.getElementById('maskedKey');
+
+  let cached = '';
+  let keyRequest = null;
+
+  const maskedValue = 'ntk_••••••••••••••••••••••••';
+
+  const setKeyVisibility = (visible) => {
+    if (!masked || !show) return;
+
+    if (visible) {
+      masked.textContent = cached;
+      show.innerHTML =
+        '<span class="material-symbols-outlined">visibility_off</span> Hide';
+      show.dataset.shown = '1';
+      show.setAttribute('aria-label', 'Hide API key');
+    } else {
+      masked.textContent = maskedValue;
+      show.innerHTML =
+        '<span class="material-symbols-outlined">visibility</span> Show';
+      show.dataset.shown = '0';
+      show.setAttribute('aria-label', 'Show API key');
+    }
+  };
+
+  const getApiKey = async () => {
+    // Reuse the already loaded key instead of making another request.
+    if (cached) return cached;
+
+    // If a request is already in progress, reuse that same request.
+    if (!keyRequest) {
+      keyRequest = api()
+        .then((key) => {
+          cached = key;
+          return key;
+        })
+        .finally(() => {
+          keyRequest = null;
+        });
+    }
+
+    return keyRequest;
+  };
+
+  show?.addEventListener('click', async () => {
+    // One click toggles Show/Hide.
+    if (show.dataset.shown === '1') {
+      setKeyVisibility(false);
+      return;
+    }
+
+    try {
+      show.disabled = true;
+
+      await getApiKey();
+
+      setKeyVisibility(true);
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      show.disabled = false;
+    }
+  });
+
+  copy?.addEventListener('click', async () => {
+    try {
+      const key = await getApiKey();
+
+      await navigator.clipboard.writeText(key);
+
+      copy.innerHTML =
+        '<span class="material-symbols-outlined">check</span> Copied';
+
+      setTimeout(() => {
+        copy.innerHTML =
+          '<span class="material-symbols-outlined">content_copy</span> Copy';
+      }, 1400);
+    } catch (e) {
+      alert(e.message);
+    }
+  });
   document.querySelectorAll('[data-open-dialog]').forEach(b => b.addEventListener('click', () => document.getElementById(b.dataset.openDialog)?.showModal()));
   document.querySelectorAll('[data-close-dialog]').forEach(b => b.addEventListener('click', () => b.closest('dialog')?.close()));
   const avatarInput = document.querySelector('[data-avatar-input]');
